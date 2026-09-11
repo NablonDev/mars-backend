@@ -138,6 +138,48 @@ class MitigationEngine:
             rationale=rationale,
         )
 
+    def _split_shipment_option(
+        self, snapshot: OrderSnapshot, projection: ProjectionResult, inputs: MitigationInputs
+    ) -> MitigationOption | None:
+        """Evaluate splitting the shipment to avoid delay penalties.
+
+        Returns None when nothing is confirmed yet or the whole order is already
+        confirmed. The confirmed portion ships on schedule, so only shortage
+        penalties remain, which is why confidence is always CONFIRMED. Risk is a
+        fixed MEDIUM for the qualitative retailer-relationship impact.
+        """
+        if snapshot.confirmed_qty <= 0 or snapshot.confirmed_qty >= snapshot.order_qty:
+            return None  # nothing ready to ship now, or nothing missing
+
+        # The confirmed portion ships on the original date, so delay-type
+        # violations don't apply to it. The engine already prices the shortage
+        # penalty off the true confirmed_qty vs order_qty gap today, so that
+        # half of `projection` needs no hypothetical re-run.
+        shortage_only = [v for v in projection.violations if v.violation_type in SHORTAGE_VIOLATION_TYPES]
+        if projection.stacking_mode == "MAX":
+            projected_penalty_after = max((v.expected_penalty_amount for v in shortage_only), default=0.0)
+        else:
+            projected_penalty_after = sum(v.expected_penalty_amount for v in shortage_only)
+
+        action_cost = inputs.split_shipment_handling_cost
+        net_saving = projection.total_expected_penalty_amount - projected_penalty_after - action_cost
+
+        rationale = (
+            f"Ships the {snapshot.confirmed_qty} confirmed units on schedule and the remaining "
+            f"{snapshot.order_qty - snapshot.confirmed_qty} units later: avoids delay penalties, "
+            "shortage penalties still apply."
+        )
+
+        return MitigationOption(
+            action="SPLIT_SHIPMENT",
+            projected_penalty_after=round(projected_penalty_after, 2),
+            action_cost=round(action_cost, 2),
+            net_saving=round(net_saving, 2),
+            risk_level="MEDIUM",  # qualitative retailer-relationship risk, not computed
+            confidence="CONFIRMED",  # reuses the already-trusted shortage pricing, no new assumption
+            rationale=rationale,
+        )
+
     def _faster_carrier_option(
         self,
         snapshot: OrderSnapshot,
@@ -180,47 +222,5 @@ class MitigationEngine:
             net_saving=round(net_saving, 2),
             risk_level=risk_level,
             confidence=confidence,
-            rationale=rationale,
-        )
-
-    def _split_shipment_option(
-        self, snapshot: OrderSnapshot, projection: ProjectionResult, inputs: MitigationInputs
-    ) -> MitigationOption | None:
-        """Evaluate splitting the shipment to avoid delay penalties.
-
-        Returns None when nothing is confirmed yet or the whole order is already
-        confirmed. The confirmed portion ships on schedule, so only shortage
-        penalties remain, which is why confidence is always CONFIRMED. Risk is a
-        fixed MEDIUM for the qualitative retailer-relationship impact.
-        """
-        if snapshot.confirmed_qty <= 0 or snapshot.confirmed_qty >= snapshot.order_qty:
-            return None  # nothing ready to ship now, or nothing missing
-
-        # The confirmed portion ships on the original date, so delay-type
-        # violations don't apply to it. The engine already prices the shortage
-        # penalty off the true confirmed_qty vs order_qty gap today, so that
-        # half of `projection` needs no hypothetical re-run.
-        shortage_only = [v for v in projection.violations if v.violation_type in SHORTAGE_VIOLATION_TYPES]
-        if projection.stacking_mode == "MAX":
-            projected_penalty_after = max((v.expected_penalty_amount for v in shortage_only), default=0.0)
-        else:
-            projected_penalty_after = sum(v.expected_penalty_amount for v in shortage_only)
-
-        action_cost = inputs.split_shipment_handling_cost
-        net_saving = projection.total_expected_penalty_amount - projected_penalty_after - action_cost
-
-        rationale = (
-            f"Ships the {snapshot.confirmed_qty} confirmed units on schedule and the remaining "
-            f"{snapshot.order_qty - snapshot.confirmed_qty} units later: avoids delay penalties, "
-            "shortage penalties still apply."
-        )
-
-        return MitigationOption(
-            action="SPLIT_SHIPMENT",
-            projected_penalty_after=round(projected_penalty_after, 2),
-            action_cost=round(action_cost, 2),
-            net_saving=round(net_saving, 2),
-            risk_level="MEDIUM",  # qualitative retailer-relationship risk, not computed
-            confidence="CONFIRMED",  # reuses the already-trusted shortage pricing, no new assumption
             rationale=rationale,
         )

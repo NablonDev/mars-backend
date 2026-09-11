@@ -1,5 +1,7 @@
 """Orchestrates one mitigation-ranking run.
 
+Entry points: run_for_purchase_order (POST /api/v1/penalties/mitigations).
+
 Reloads the purchase order's already-persisted projection for the day, loads
 cause and cost inputs, runs the pure engine, persists the ranked options, and
 returns the result.

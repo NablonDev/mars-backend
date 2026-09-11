@@ -1,4 +1,7 @@
-"""Orchestrates penalty-projection runs: assemble snapshot, load rules, run engine, persist."""
+"""Orchestrates penalty-projection runs: assemble snapshot, load rules, run engine, persist.
+
+Entry points: run_for_purchase_order (POST /api/v1/penalties/projections).
+"""
 
 from __future__ import annotations
 

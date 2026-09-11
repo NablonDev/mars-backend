@@ -256,25 +256,6 @@ class MitigationSummaryService(
             actual_outcomes=actual_outcomes,
         )
 
-    def _resolve_sku_description(self, primary_line: dict | None, purchase_order_id: UUID) -> str:
-        """Best-effort human-readable label for the order's primary line.
-
-        Falls back through SKU description, SKU code, retailer material code,
-        material id, then the purchase-order id, so the narrative always has
-        something to reference even when master data is incomplete.
-        """
-        if primary_line is None:
-            return str(purchase_order_id)
-        if primary_line["sku_id"] is not None:
-            sku = next((s for s in self.master_data.list_skus() if s["id"] == primary_line["sku_id"]), None)
-            if sku is not None:
-                return sku["description"] or sku["sku_code"]
-        if primary_line["retailer_material_code"]:
-            return primary_line["retailer_material_code"]
-        if primary_line["material_id"] is not None:
-            return str(primary_line["material_id"])
-        return str(purchase_order_id)
-
     def _compute_content_fingerprint(self, context: PenaltyMitigationSummaryContext) -> str:
         return _compute_content_fingerprint(context)
 
@@ -312,6 +293,29 @@ class MitigationSummaryService(
             tools=tools,
             heartbeat=heartbeat,
         )
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_sku_description(self, primary_line: dict | None, purchase_order_id: UUID) -> str:
+        """Best-effort human-readable label for the order's primary line.
+
+        Falls back through SKU description, SKU code, retailer material code,
+        material id, then the purchase-order id, so the narrative always has
+        something to reference even when master data is incomplete.
+        """
+        if primary_line is None:
+            return str(purchase_order_id)
+        if primary_line["sku_id"] is not None:
+            sku = next((s for s in self.master_data.list_skus() if s["id"] == primary_line["sku_id"]), None)
+            if sku is not None:
+                return sku["description"] or sku["sku_code"]
+        if primary_line["retailer_material_code"]:
+            return primary_line["retailer_material_code"]
+        if primary_line["material_id"] is not None:
+            return str(primary_line["material_id"])
+        return str(purchase_order_id)
 
     # ------------------------------------------------------------------
     # Tool implementations

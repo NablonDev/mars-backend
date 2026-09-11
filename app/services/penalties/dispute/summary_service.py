@@ -297,25 +297,6 @@ class DisputeSummaryService(SummaryServiceBase[DisputeSummaryContext, DisputeSum
             ),
         )
 
-    def _resolve_sku_description(self, purchase_order_id: UUID) -> str:
-        """Best-effort human-readable label for the order's primary SKU line.
-
-        Falls back through SKU description, SKU code, retailer material code,
-        then the purchase-order id, so incomplete master data degrades the label
-        instead of failing generation.
-        """
-        lines = self.purchase_orders.list_lines(purchase_order_id)
-        if not lines:
-            return str(purchase_order_id)
-        primary_line = lines[0]
-        if primary_line["sku_id"] is not None:
-            sku = next((s for s in self.master_data.list_skus() if s["id"] == primary_line["sku_id"]), None)
-            if sku is not None:
-                return sku["description"] or sku["sku_code"]
-        if primary_line["retailer_material_code"]:
-            return primary_line["retailer_material_code"]
-        return str(purchase_order_id)
-
     def _compute_content_fingerprint(self, context: DisputeSummaryContext) -> str:
         return _compute_content_fingerprint(context)
 
@@ -354,6 +335,29 @@ class DisputeSummaryService(SummaryServiceBase[DisputeSummaryContext, DisputeSum
         return self._agent.generate_dispute_summary(
             context, order_id=order_id, as_of_date=as_of_date, tools=tools, heartbeat=heartbeat
         )
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_sku_description(self, purchase_order_id: UUID) -> str:
+        """Best-effort human-readable label for the order's primary SKU line.
+
+        Falls back through SKU description, SKU code, retailer material code,
+        then the purchase-order id, so incomplete master data degrades the label
+        instead of failing generation.
+        """
+        lines = self.purchase_orders.list_lines(purchase_order_id)
+        if not lines:
+            return str(purchase_order_id)
+        primary_line = lines[0]
+        if primary_line["sku_id"] is not None:
+            sku = next((s for s in self.master_data.list_skus() if s["id"] == primary_line["sku_id"]), None)
+            if sku is not None:
+                return sku["description"] or sku["sku_code"]
+        if primary_line["retailer_material_code"]:
+            return primary_line["retailer_material_code"]
+        return str(purchase_order_id)
 
     # ------------------------------------------------------------------
     # Tool implementations
