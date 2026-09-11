@@ -14,7 +14,7 @@ repository fixtures those tables were deferred to this phase for.
 Phase 7a (API surface) restores the `app`/`client`/`seeded_client`
 fixtures, for the `common`/`penalties` domain at least (CMIR/PO-validation
 routes are mounted but not exercised through these fixtures -- `service`/
-`po_service` are fakes, see `_FakeCmirRunService`/`_FakePoValidationService`
+`po_service` are fakes, see `_FakeCmirService`/`_FakePoValidationService`
 below, so `create_app` never has to build the real Postgres-backed LangGraph
 composition root for a test that only needs `common`/`penalties`).
 
@@ -53,6 +53,7 @@ from app.repositories.common.delivery_change_request import PoDeliveryChangeRequ
 from app.repositories.common.fulfillment import FulfillmentRepository
 from app.repositories.common.master_data import MasterDataRepository
 from app.repositories.common.purchase_order import PurchaseOrderRepository
+from app.repositories.common.retailer_agreement import RetailerAgreementRepository
 from app.repositories.penalties.dispute import PenaltyDisputeRepository
 from app.repositories.penalties.job_context import (
     PenaltyJobItemContextRepository,
@@ -103,6 +104,7 @@ def repos(db_session):
     Phase 3, and still keyed on deleted models today)."""
     return SimpleNamespace(
         master_data=MasterDataRepository(db_session),
+        contracts=RetailerAgreementRepository(db_session),
         purchase_orders=PurchaseOrderRepository(db_session),
         fulfillment=FulfillmentRepository(db_session),
         penalty_rules=PenaltyRuleRepository(db_session),
@@ -185,7 +187,7 @@ class _NoOpJobQueue:
         return 0
 
 
-class _FakeCmirRunService:
+class _FakeCmirService:
     """Stand-in passed to `create_app(service=...)` so lifespan's `if
     app.state.service is None: build_service()` branch is never reached
     (these fixtures never run lifespan at all -- no `with TestClient(app):`
@@ -194,23 +196,23 @@ class _FakeCmirRunService:
     Postgres-backed LangGraph checkpointer, which no test using these
     fixtures should ever need.
 
-    Default value of the `cmir_run_service` fixture below -- a test module
+    Default value of the `cmir_service` fixture below -- a test module
     that needs the `client`/`app` fixtures to actually exercise cmir routes
-    overrides `cmir_run_service` (same fixture name) with a richer fake; see
+    overrides `cmir_service` (same fixture name) with a richer fake; see
     `tests/unit/api/test_cmir_api.py`/`test_workflow_threads_api.py`."""
 
 
 class _FakePoValidationService:
-    """Same purpose as `_FakeCmirRunService`, for `app.state.po_service` /
+    """Same purpose as `_FakeCmirService`, for `app.state.po_service` /
     the `po_validation_service` fixture below."""
 
 
 @pytest.fixture
-def cmir_run_service() -> object:
+def cmir_service() -> object:
     """Default fake for `app.state.service` -- override this fixture (same
     name) in a test module to supply a fake implementing the
-    `CmirRunService` methods your test's routes actually call."""
-    return _FakeCmirRunService()
+    `CmirService` methods your test's routes actually call."""
+    return _FakeCmirService()
 
 
 @pytest.fixture
@@ -222,7 +224,7 @@ def po_validation_service() -> object:
 
 
 @pytest.fixture
-def app(database: Database, cmir_run_service: object, po_validation_service: object):
+def app(database: Database, cmir_service: object, po_validation_service: object):
     """A real `create_app()` FastAPI app, wired to the SQLite `database`
     fixture instead of a Postgres-backed lifespan.
 
@@ -231,7 +233,7 @@ def app(database: Database, cmir_run_service: object, po_validation_service: obj
     exercise it) -- `app.state.database` is set directly instead, `
     require_internal_api_key`/`get_llm_client`/`get_job_queue` are
     overridden, and `service`/`po_service` come from the
-    `cmir_run_service`/`po_validation_service` fixtures (trivial stand-ins
+    `cmir_service`/`po_validation_service` fixtures (trivial stand-ins
     by default, so `create_app` never has to build the CMIR/PO-validation
     composition root -- a real Postgres LangGraph checkpointer -- for tests
     that only exercise `common`/`penalties` routes; overridable per test
@@ -240,7 +242,7 @@ def app(database: Database, cmir_run_service: object, po_validation_service: obj
     from app.api.dependencies import get_job_queue, get_llm_client, require_internal_api_key
     from app.main import create_app
 
-    test_app = create_app(service=cmir_run_service, po_service=po_validation_service)
+    test_app = create_app(service=cmir_service, po_service=po_validation_service)
     test_app.state.database = database
 
     test_app.dependency_overrides[require_internal_api_key] = lambda: None

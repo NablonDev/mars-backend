@@ -1,0 +1,191 @@
+"""Integration tests for the penalty rule extraction graph
+(app.agents.penalties.rule_extraction.graph.build_graph).
+
+Runs the full `Send` fan-out/fan-in topology end to end against the shared in-memory
+SQLite `database` fixture, with a `FakeLLM` standing in for the three provider calls.
+No live LLM call is ever reached.
+"""
+
+from __future__ import annotations
+
+from uuid import UUID
+
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Command
+
+from app.agents.penalties.rule_extraction.graph import build_graph
+from app.agents.penalties.rule_extraction.nodes import RuleExtractionNodes
+from app.agents.penalties.rule_extraction.schema import (
+    CandidateClause,
+    CandidateClauseList,
+    PenaltyFact,
+    PenaltyFactList,
+    PenaltyRuleExtraction,
+)
+from app.repositories.common.master_data import MasterDataRepository
+from app.repositories.common.retailer_agreement import RetailerAgreementRepository
+from app.repositories.penalties.rule_extraction import ExtractedPenaltyRuleRepository
+from app.repositories.process.agent_registry import AgentRegistryRepository, AgentRunRepository
+
+INTERRUPT_KEY = "__interrupt__"
+
+CLAUSE_TEXT = "Retailer may assess a $50 fee per short-shipped case."
+CONTRACT_WITH_CLAUSE = f"## Shortages\n{CLAUSE_TEXT}\n"
+CONTRACT_WITHOUT_CLAUSE = "## Definitions\nThis agreement is between the parties.\n"
+
+
+class FakeTraceRepo:
+    """No-op double for `AgentTraceRepository`; the graph traces every node through it."""
+
+    def log(self, *args, **kwargs):
+        pass
+
+
+class FakeLLM:
+    """Test double for `RuleExtractionLLM`, driven by one fixed screen/classify/facts result."""
+
+    def __init__(self, *, has_clause: bool) -> None:
+        self._has_clause = has_clause
+
+    def screen(self, context):
+        if not self._has_clause:
+            return CandidateClauseList(clauses=[])
+        return CandidateClauseList(
+            clauses=[
+                CandidateClause(
+                    section_title="Shortages",
+                    excerpt=CLAUSE_TEXT,
+                    reason="short shipment leads to a fee",
+                )
+            ]
+        )
+
+    def classify(self, context):
+        return PenaltyRuleExtraction(
+            is_penalty_rule=True,
+            penalty_category="SHORT_SHIP",
+            calc_type="PER_UNIT",
+            economic_effect_type="CHARGEBACK",
+            confidence=0.9,
+        )
+
+    def extract_facts(self, context):
+        return PenaltyFactList(
+            facts=[
+                PenaltyFact(
+                    attribute_role="RATE",
+                    basis_type="UNIT_COST",
+                    value=50.0,
+                    value_status="PRESENT",
+                    source_text=CLAUSE_TEXT,
+                    confidence=0.9,
+                )
+            ]
+        )
+
+
+def _make_contract(db_session, sha256: str, markdown_text: str):
+    retailer_id = MasterDataRepository(db_session).add_retailer(f"R{sha256[:6]}", "Retailer", None, "SUM")[
+        "id"
+    ]
+    return RetailerAgreementRepository(db_session).add_retailer_agreement(
+        retailer_id=retailer_id,
+        contract_code=f"C-{sha256[:8]}",
+        title="Example Retailer Agreement",
+        document_sha256=sha256,
+        markdown_text=markdown_text,
+    )
+
+
+def _make_agent_run(db_session, code: str):
+    agent_id = AgentRegistryRepository(db_session).ensure_registered(
+        agent_code=code,
+        prompt_version="v1",
+        system_prompt="Extract penalty clauses from contract markdown.",
+        agent_name="Test Rule Extraction",
+        domain="penalties",
+    )
+    return AgentRunRepository(db_session).start(agent_id=agent_id, run_type="PENALTY_RULE_EXTRACTION")
+
+
+def _build_graph(database, *, has_clause: bool):
+    fake_llm = FakeLLM(has_clause=has_clause)
+    nodes = RuleExtractionNodes(
+        screen=fake_llm.screen,
+        classify=fake_llm.classify,
+        extract_facts=fake_llm.extract_facts,
+        database=database,
+    )
+    return build_graph(nodes, MemorySaver(), FakeTraceRepo())
+
+
+def _config(thread_id: str) -> dict:
+    return {"configurable": {"thread_id": thread_id}}
+
+
+def test_a_run_with_no_candidate_clauses_never_interrupts(database, db_session):
+    contract = _make_contract(db_session, "1" * 64, CONTRACT_WITHOUT_CLAUSE)
+    run_id = _make_agent_run(db_session, "penalty_rule_extractor_1")
+    db_session.commit()
+
+    graph = _build_graph(database, has_clause=False)
+    state = graph.invoke(
+        {"contract_id": contract["id"], "run_id": run_id, "contract_text": CONTRACT_WITHOUT_CLAUSE},
+        config=_config("empty-run"),
+    )
+
+    assert INTERRUPT_KEY not in state
+    assert state["applied_rule_ids"] == []
+    with database.session() as session:
+        assert ExtractedPenaltyRuleRepository(session).list_for_contract(contract["id"]) == []
+
+
+def test_a_staged_rule_pauses_for_review_and_approval_is_applied_after_resume(database, db_session):
+    contract = _make_contract(db_session, "2" * 64, CONTRACT_WITH_CLAUSE)
+    run_id = _make_agent_run(db_session, "penalty_rule_extractor_2")
+    db_session.commit()
+
+    graph = _build_graph(database, has_clause=True)
+    config = _config("approval-run")
+    state = graph.invoke(
+        {"contract_id": contract["id"], "run_id": run_id, "contract_text": CONTRACT_WITH_CLAUSE},
+        config=config,
+    )
+
+    assert INTERRUPT_KEY in state
+    payload = state[INTERRUPT_KEY][0].value
+    assert payload["reason"] == "rule_review_required"
+    assert payload["pending_count"] == 1
+    [rule_id] = payload["extracted_rule_ids"]
+
+    with database.session() as session:
+        ExtractedPenaltyRuleRepository(session).set_review_decision(UUID(rule_id), "APPROVED")
+
+    state = graph.invoke(Command(resume={"__ack__": "REVIEWED"}), config=config)
+
+    assert INTERRUPT_KEY not in state
+    assert state["applied_rule_ids"] == [rule_id]
+
+
+def test_a_zero_decision_resume_still_reaches_end(database, db_session):
+    contract = _make_contract(db_session, "3" * 64, CONTRACT_WITH_CLAUSE)
+    run_id = _make_agent_run(db_session, "penalty_rule_extractor_3")
+    db_session.commit()
+
+    graph = _build_graph(database, has_clause=True)
+    config = _config("zero-decision-run")
+    state = graph.invoke(
+        {"contract_id": contract["id"], "run_id": run_id, "contract_text": CONTRACT_WITH_CLAUSE},
+        config=config,
+    )
+    assert INTERRUPT_KEY in state
+
+    # Nothing was decided; resuming with a falsy value (None/{}) would make LangGraph
+    # re-raise the interrupt forever, so the sentinel must be truthy.
+    state = graph.invoke(Command(resume={"__ack__": "NO_DECISIONS"}), config=config)
+
+    assert INTERRUPT_KEY not in state
+    assert state["applied_rule_ids"] == []
+    with database.session() as session:
+        [staged] = ExtractedPenaltyRuleRepository(session).list_for_contract(contract["id"])
+        assert staged.status == "PENDING_REVIEW"
