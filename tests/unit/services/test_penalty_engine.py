@@ -21,6 +21,9 @@ from datetime import date, timedelta
 import pytest
 
 from app.services.penalties.projection import (
+    APPLIES_PER_DAY,
+    BASIS_COST_OF_GOODS,
+    BASIS_SHORTFALL_VALUE,
     SHORTAGE_LOCKED_IN_PROBABILITY,
     AppointmentStatus,
     CalcType,
@@ -462,3 +465,89 @@ class TestAsnLateMapping:
         result = ProjectionEngine().project(snap, [rule])
         assert result.violations[0].violation_type == "ASN_LATE"
         assert result.violations[0].probability == compute_delay_probability(snap)
+
+
+# ---------------------------------------------------------------------------
+# Real labelled-contract cases: per-day delay accrual with a cap on the
+# accrued total, and a SHORTFALL_VALUE-basis fill-rate rule.
+# ---------------------------------------------------------------------------
+
+
+class TestDelayPerDayAccrualWithCap:
+    """4% of COST_OF_GOODS per day late, capped at 20% of the same basis."""
+
+    def _rule(self) -> PenaltyRule:
+        return PenaltyRule(
+            rule_id="R-GT03",
+            violation_type="OTIF_LATE",
+            calc_type=CalcType.PERCENT_OF_PO,
+            rate=0.04,
+            basis_type=BASIS_COST_OF_GOODS,
+            applies_per=APPLIES_PER_DAY,
+            cap_amount=7200.00,  # 20% of the $36,000.00 COGS basis
+        )
+
+    def test_cap_binds_on_the_accrued_total_not_per_day(self):
+        # COGS = 2000 x $18.00 = $36,000.00; 10 days x 4%/day = 40%
+        # uncapped, so the 20% cap binds at $7,200.00, not $14,400.00.
+        penalty = price_delay_penalty(self._rule(), order_qty=2000, unit_price=18.00, days_late=10)
+        assert penalty == 7200.00
+
+    def test_uncapped_below_the_cap(self):
+        # 3 days x 4%/day = 12% of $36,000.00 = $4,320.00, under the cap.
+        penalty = price_delay_penalty(self._rule(), order_qty=2000, unit_price=18.00, days_late=3)
+        assert penalty == 4320.00
+
+    def test_zero_days_late_prices_to_zero(self):
+        penalty = price_delay_penalty(self._rule(), order_qty=2000, unit_price=18.00, days_late=0)
+        assert penalty == 0.00
+
+    def test_no_accrual_without_applies_per_day(self):
+        # Same rate and cap, but applies_per unset: single flat application,
+        # not scaled by days_late.
+        rule = PenaltyRule(
+            rule_id="R-FLAT",
+            violation_type="OTIF_LATE",
+            calc_type=CalcType.PERCENT_OF_PO,
+            rate=0.04,
+            basis_type=BASIS_COST_OF_GOODS,
+            cap_amount=7200.00,
+        )
+        penalty = price_delay_penalty(rule, order_qty=2000, unit_price=18.00, days_late=10)
+        assert penalty == 1440.00
+
+
+class TestShortfallValueBasisThreshold:
+    """7% of SHORTFALL_VALUE, gated on a 95% required fill rate."""
+
+    def _rule(self, threshold_pct: float = 0.95) -> PenaltyRule:
+        return PenaltyRule(
+            rule_id="R-FILLRATE",
+            violation_type="FILL_RATE",
+            calc_type=CalcType.PERCENT_OF_PO,
+            rate=0.07,
+            basis_type=BASIS_SHORTFALL_VALUE,
+            threshold_pct=threshold_pct,
+        )
+
+    def test_below_threshold_fires_on_the_full_shortfall_value(self):
+        # 2000 - 1880 = 120 units short = $2,160.00 invoice value; a 94%
+        # fill rate is below the 95% floor, so 7% of $2,160.00 = $151.20.
+        penalty = price_shortage_penalty(self._rule(), order_qty=2000, unit_price=18.00, shortfall_units=120)
+        assert penalty == 151.20
+
+    def test_fill_rate_exactly_at_threshold_does_not_fire(self):
+        # 100 units short on a 2000-unit order is exactly a 95% fill rate:
+        # meeting the floor is compliant, not a breach (half-open bound).
+        penalty = price_shortage_penalty(self._rule(), order_qty=2000, unit_price=18.00, shortfall_units=100)
+        assert penalty == 0.0
+
+    def test_fill_rate_above_threshold_does_not_fire(self):
+        penalty = price_shortage_penalty(self._rule(), order_qty=2000, unit_price=18.00, shortfall_units=50)
+        assert penalty == 0.0
+
+    def test_shortfall_value_basis_still_respects_cap(self):
+        rule = self._rule()
+        rule.cap_amount = 100.00
+        penalty = price_shortage_penalty(rule, order_qty=2000, unit_price=18.00, shortfall_units=120)
+        assert penalty == 100.00

@@ -58,6 +58,16 @@ DELAY_VIOLATION_TYPES = {"OTIF_LATE", "ASN_LATE"}
 # ASN_LATE uses the delay model as an approximation because the engine
 # does not yet have a dedicated ASN-submission-timing input.
 
+# What a PERCENT_OF_PO rate multiplies against. `None` (and any basis_type the
+# engine doesn't recognize yet, e.g. the extraction vocabulary's PO_VALUE,
+# UNIT_COST, SHORTFALL_UNITS) falls back to the legacy full-order-value basis.
+BASIS_COST_OF_GOODS = "COST_OF_GOODS"
+BASIS_SHORTFALL_VALUE = "SHORTFALL_VALUE"
+
+# `applies_per` value the engine understands as day-count accrual. Any other
+# value, including None, prices as a single flat application.
+APPLIES_PER_DAY = "DAY"
+
 
 @dataclass
 class PenaltyRule:
@@ -76,6 +86,8 @@ class PenaltyRule:
     threshold_pct: float = 0.0  # FRACTION: 0.02 means 2%, never a whole-number percent
     cap_amount: float | None = None
     tiers: list[PenaltyRuleTier] | None = None  # required when calc_type == TIERED
+    basis_type: str | None = None  # what a PERCENT_OF_PO rate multiplies; see BASIS_* above
+    applies_per: str | None = None  # APPLIES_PER_DAY accrues per day late; anything else is flat
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.threshold_pct <= 1.0:

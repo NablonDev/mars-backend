@@ -1,6 +1,10 @@
 """Orchestrates shortage and delay calculations into an order projection."""
 
-from app.services.penalties.projection.delay import compute_delay_probability, price_delay_penalty
+from app.services.penalties.projection.delay import (
+    compute_days_late,
+    compute_delay_probability,
+    price_delay_penalty,
+)
 from app.services.penalties.projection.shortage import (
     compute_shortage_probability,
     price_shortage_penalty,
@@ -37,6 +41,7 @@ class ProjectionEngine:
         shortage_prob = compute_shortage_probability(snapshot)
         delay_prob = compute_delay_probability(snapshot)
         shortfall_units = shortfall_units_for_pricing(snapshot)
+        days_late = compute_days_late(snapshot)
 
         violations: list[ViolationProjection] = []
 
@@ -48,7 +53,7 @@ class ProjectionEngine:
                 )
             elif rule.violation_type in DELAY_VIOLATION_TYPES:
                 probability = delay_prob
-                penalty_amount = price_delay_penalty(rule, snapshot.order_qty, snapshot.unit_price)
+                penalty_amount = price_delay_penalty(rule, snapshot.order_qty, snapshot.unit_price, days_late)
             else:
                 raise ValueError(
                     f"Rule {rule.rule_id} has violation_type '{rule.violation_type}' "

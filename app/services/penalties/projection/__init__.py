@@ -11,6 +11,7 @@ package only because the imports above have already bound them.
 """
 
 from app.services.penalties.projection.delay import (  # noqa: I001  (deliberate order; see module docstring)
+    compute_days_late,
     compute_delay_probability,
     price_delay_penalty,
     resolve_expected_ship_date,
@@ -23,6 +24,9 @@ from app.services.penalties.projection.shortage import (
     shortfall_units_for_pricing,
 )
 from app.services.penalties.projection.types import (
+    APPLIES_PER_DAY,
+    BASIS_COST_OF_GOODS,
+    BASIS_SHORTFALL_VALUE,
     DELAY_VIOLATION_TYPES,
     SHORTAGE_VIOLATION_TYPES,
     AppointmentStatus,
@@ -41,6 +45,9 @@ from app.services.penalties.projection.summary_service import (
 )
 
 __all__ = [
+    "APPLIES_PER_DAY",
+    "BASIS_COST_OF_GOODS",
+    "BASIS_SHORTFALL_VALUE",
     "DELAY_VIOLATION_TYPES",
     "SHORTAGE_LOCKED_IN_PROBABILITY",
     "SHORTAGE_VIOLATION_TYPES",
@@ -56,6 +63,7 @@ __all__ = [
     "ProjectionSummaryService",
     "SummaryJob",
     "ViolationProjection",
+    "compute_days_late",
     "compute_delay_probability",
     "compute_shortage_probability",
     "price_delay_penalty",

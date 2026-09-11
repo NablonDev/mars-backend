@@ -39,6 +39,9 @@ def _rule_to_dict(r: PenaltyRuleModel) -> dict:
         "effective_start_date": r.effective_start_date,
         "effective_end_date": r.effective_end_date,
         "source_doc_reference": r.source_doc_reference,
+        "basis_type": r.basis_type,
+        "applies_per": r.applies_per,
+        "currency_code": r.currency_code,
     }
 
 
@@ -66,6 +69,9 @@ class PenaltyRuleRepository:
         effective_end_date: date | None = None,
         source_doc_reference: str | None = None,
         tiers: list[dict] | None = None,
+        basis_type: str | None = None,
+        applies_per: str | None = None,
+        currency_code: str = "USD",
     ) -> dict:
         """Create a penalty rule, along with its penalty_rule_tier rows for a TIERED rule.
 
@@ -85,6 +91,9 @@ class PenaltyRuleRepository:
             effective_start_date=effective_start_date or date(2026, 1, 1),
             effective_end_date=effective_end_date,
             source_doc_reference=source_doc_reference,
+            basis_type=basis_type,
+            applies_per=applies_per,
+            currency_code=currency_code,
         )
         self._session.add(rule)
         self._session.flush()
@@ -155,6 +164,8 @@ class PenaltyRuleRepository:
                     threshold_pct=float(r.threshold_pct or 0.0),
                     cap_amount=float(r.cap_amount) if r.cap_amount is not None else None,
                     tiers=tiers,
+                    basis_type=r.basis_type,
+                    applies_per=r.applies_per,
                 )
             )
         return rules

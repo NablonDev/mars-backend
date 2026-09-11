@@ -3,7 +3,7 @@
 from datetime import date
 from uuid import UUID
 
-from sqlalchemy import Boolean, Date, ForeignKey, Integer, Numeric, String, UniqueConstraint
+from sqlalchemy import CHAR, Boolean, Date, ForeignKey, Integer, Numeric, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import PENALTIES_SCHEMA, UUID_PK, Base, TimestampMixin, generate_uuid7
@@ -32,6 +32,9 @@ class PenaltyRule(Base, TimestampMixin):
     effective_start_date: Mapped[date] = mapped_column(Date, default=date(2026, 1, 1))
     effective_end_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     source_doc_reference: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    basis_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    applies_per: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    currency_code: Mapped[str] = mapped_column(CHAR(3), default="USD")
 
 
 class PenaltyRuleTier(Base, TimestampMixin):

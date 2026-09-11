@@ -14,6 +14,7 @@ import pytest
 from app.services.penalties.dispute.engine import (
     ROUNDING_TOLERANCE,
     classify,
+    compute_days_late,
     compute_deadline,
     compute_is_late,
     compute_shortfall_units,
@@ -26,7 +27,7 @@ from app.services.penalties.dispute.types import (
     InsufficientDataForDisputeError,
     UnsupportedDisputeCalcError,
 )
-from app.services.penalties.projection.types import CalcType, PenaltyRule, PenaltyRuleTier
+from app.services.penalties.projection.types import APPLIES_PER_DAY, CalcType, PenaltyRule, PenaltyRuleTier
 
 REQUIRED_DELIVERY = date(2026, 6, 10)
 
@@ -91,6 +92,17 @@ def test_compute_is_late_false_within_deadline():
 def test_compute_is_late_false_on_early_delivery():
     facts = _delay_facts(actual_delivery_date=date(2026, 6, 5))
     assert compute_is_late(facts) is False
+
+
+def test_compute_days_late_counts_from_grace_adjusted_deadline():
+    # Deadline is 2026-06-12 (required + 2-day grace); delivered 5 days after that.
+    facts = _delay_facts(actual_delivery_date=date(2026, 6, 17), grace_period_days=2)
+    assert compute_days_late(facts) == 5
+
+
+def test_compute_days_late_floored_at_zero_on_early_delivery():
+    facts = _delay_facts(actual_delivery_date=date(2026, 6, 5))
+    assert compute_days_late(facts) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +236,23 @@ def test_delay_per_unit_penalized():
     assert amount == 50.0
     assert calc_trace["violation_family"] == "DELAY"
     assert calc_trace["is_late"] is True
+
+
+def test_delay_per_unit_applies_per_day_accrues_by_days_late():
+    # 5 days late (2026-06-15 vs. deadline 2026-06-10); a flat per-unit price
+    # would be 0.5 * 100 = 50.0, so a 250.0 result proves 5-day accrual, not
+    # a single-period charge.
+    rule = PenaltyRule(
+        rule_id="r1",
+        violation_type="OTIF_LATE",
+        calc_type=CalcType.PER_UNIT,
+        rate=0.5,
+        applies_per=APPLIES_PER_DAY,
+    )
+    facts = _delay_facts(actual_delivery_date=date(2026, 6, 15), order_qty=100)
+    amount, calc_trace = price_violation(rule, facts)
+    assert amount == 250.0
+    assert calc_trace["days_late"] == 5
 
 
 def test_delay_percent_of_po_penalized():

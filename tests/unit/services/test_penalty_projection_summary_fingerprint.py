@@ -2,7 +2,7 @@
 DB-free function over the engine's OUTPUTS for the "current" day plus
 material facts, deliberately excluding as_of_date/current_projection_date,
 any generated-at timestamp, and days_to_delivery. See
-app/agents/penalties/projection/prompts/v1.py and PROGRESS.local.md for why.
+app/agents/penalties/projection/prompts/v1.py and .claude/PROGRESS.md for why.
 
 Was `tests/unit/services/test_fine_projection_summary_fingerprint.py`
 (`fine`/`fines` -> `penalty`/`penalties` rename)."""

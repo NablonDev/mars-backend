@@ -45,21 +45,32 @@ from app.services.penalties.projection.types import (
 ROUNDING_TOLERANCE = 0.01
 
 
-def compute_shortfall_units(facts: DisputeFacts) -> float:
-    """Real, final shortfall; caller must have already confirmed `facts.delivered_qty is not None`."""
-    assert facts.delivered_qty is not None
-    return max(0.0, facts.order_qty - facts.delivered_qty)
+def recompute_dispute(rule: PenaltyRule, facts: DisputeFacts, claimed_amount: float) -> DisputeCalculation:
+    """Deterministically recompute and classify a single penalty dispute.
 
+    Raises `InsufficientDataForDisputeError` when a required post-delivery fact
+    is missing, or `UnsupportedDisputeCalcError` when the rule's calc_type has
+    no implementation for its violation family.
+    """
+    computed_amount, calc_trace = price_violation(rule, facts)
+    computed_amount = round(computed_amount, 2)
+    verdict, delta_amount = classify(computed_amount, claimed_amount)
 
-def compute_deadline(facts: DisputeFacts) -> date:
-    """Last date delivery could land without being late, grace period included."""
-    return facts.required_delivery_date + timedelta(days=facts.grace_period_days)
+    # Approximation: a rule's cap counts as applied when the final amount lands
+    # exactly on it. Reusing the pricing functions as black boxes means this
+    # engine never sees the pre-cap amount, so it cannot tell a genuine clip
+    # from a penalty that coincidentally equals the cap.
+    cap_amount = rule.cap_amount
+    cap_applied = cap_amount is not None and computed_amount == round(cap_amount, 2)
+    calc_trace = {**calc_trace, "cap_amount": cap_amount, "cap_applied": cap_applied}
 
-
-def compute_is_late(facts: DisputeFacts) -> bool:
-    """Caller must have already confirmed `facts.actual_delivery_date is not None`."""
-    assert facts.actual_delivery_date is not None
-    return facts.actual_delivery_date > compute_deadline(facts)
+    return DisputeCalculation(
+        computed_amount=computed_amount,
+        claimed_amount=round(claimed_amount, 2),
+        delta_amount=delta_amount,
+        verdict=verdict,
+        calc_trace=calc_trace,
+    )
 
 
 def price_violation(rule: PenaltyRule, facts: DisputeFacts) -> tuple[float, dict]:
@@ -103,14 +114,16 @@ def price_violation(rule: PenaltyRule, facts: DisputeFacts) -> tuple[float, dict
                 "deadline": deadline,
                 "is_late": False,
             }
+        days_late = compute_days_late(facts)
         try:
-            amount = price_delay_penalty(rule, facts.order_qty, facts.unit_price)
+            amount = price_delay_penalty(rule, facts.order_qty, facts.unit_price, days_late)
         except NotImplementedError as exc:
             raise UnsupportedDisputeCalcError(str(exc)) from exc
         return amount, {
             "violation_family": "DELAY",
             "deadline": deadline,
             "is_late": True,
+            "days_late": days_late,
         }
 
     raise ValueError(
@@ -141,29 +154,27 @@ def classify(
     return DisputeVerdict.PAY_FULL, delta
 
 
-def recompute_dispute(rule: PenaltyRule, facts: DisputeFacts, claimed_amount: float) -> DisputeCalculation:
-    """Deterministically recompute and classify a single penalty dispute.
+def compute_shortfall_units(facts: DisputeFacts) -> float:
+    """Real, final shortfall; caller must have already confirmed `facts.delivered_qty is not None`."""
+    assert facts.delivered_qty is not None
+    return max(0.0, facts.order_qty - facts.delivered_qty)
 
-    Raises `InsufficientDataForDisputeError` when a required post-delivery fact
-    is missing, or `UnsupportedDisputeCalcError` when the rule's calc_type has
-    no implementation for its violation family.
+
+def compute_deadline(facts: DisputeFacts) -> date:
+    """Last date delivery could land without being late, grace period included."""
+    return facts.required_delivery_date + timedelta(days=facts.grace_period_days)
+
+
+def compute_days_late(facts: DisputeFacts) -> int:
+    """Calendar days between actual delivery and the grace-adjusted deadline, floored at 0.
+
+    Caller must have already confirmed `facts.actual_delivery_date is not None`.
     """
-    computed_amount, calc_trace = price_violation(rule, facts)
-    computed_amount = round(computed_amount, 2)
-    verdict, delta_amount = classify(computed_amount, claimed_amount)
+    assert facts.actual_delivery_date is not None
+    return max(0, (facts.actual_delivery_date - compute_deadline(facts)).days)
 
-    # Approximation: a rule's cap counts as applied when the final amount lands
-    # exactly on it. Reusing the pricing functions as black boxes means this
-    # engine never sees the pre-cap amount, so it cannot tell a genuine clip
-    # from a penalty that coincidentally equals the cap.
-    cap_amount = rule.cap_amount
-    cap_applied = cap_amount is not None and computed_amount == round(cap_amount, 2)
-    calc_trace = {**calc_trace, "cap_amount": cap_amount, "cap_applied": cap_applied}
 
-    return DisputeCalculation(
-        computed_amount=computed_amount,
-        claimed_amount=round(claimed_amount, 2),
-        delta_amount=delta_amount,
-        verdict=verdict,
-        calc_trace=calc_trace,
-    )
+def compute_is_late(facts: DisputeFacts) -> bool:
+    """Caller must have already confirmed `facts.actual_delivery_date is not None`."""
+    assert facts.actual_delivery_date is not None
+    return facts.actual_delivery_date > compute_deadline(facts)
