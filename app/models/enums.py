@@ -100,3 +100,11 @@ class AgentDomain(StrEnum):
 
     CMIR = "cmir"
     PENALTIES = "penalties"
+
+
+class WorkflowThreadSubjectType(StrEnum):
+    """`process.workflow_thread_subject.subject_type` values, one per domain that owns a review thread."""
+
+    EMAIL_EVENT = "EMAIL_EVENT"
+    PURCHASE_ORDER_LINE = "PURCHASE_ORDER_LINE"
+    RETAILER_AGREEMENT = "RETAILER_AGREEMENT"

@@ -11,7 +11,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from app.models import HumanAction, ProcessingError, WorkflowThread, WorkflowThreadSubject
-from app.utils.pagination import parse_cursor
+from app.utils.pagination import next_cursor_from_page, parse_cursor
 
 
 def _thread_to_dict(thread: WorkflowThread, subject: WorkflowThreadSubject | None) -> dict:
@@ -25,8 +25,8 @@ def _thread_to_dict(thread: WorkflowThread, subject: WorkflowThreadSubject | Non
         "completed_at": thread.completed_at,
         "error": thread.error,
         "metadata_json": thread.metadata_json,
-        "email_event_id": subject.email_event_id if subject is not None else None,
-        "purchase_order_line_id": subject.purchase_order_line_id if subject is not None else None,
+        "subject_type": subject.subject_type if subject is not None else None,
+        "subject_id": subject.subject_id if subject is not None else None,
         "updated_at": thread.updated_at,
     }
 
@@ -72,11 +72,11 @@ def _processing_error_to_dict(row: ProcessingError) -> dict:
 
 
 class WorkflowThreadRepository:
-    """One LangGraph run's persisted thread state, shared by CMIR and PO validation.
+    """One LangGraph run's persisted thread state, shared by CMIR, PO validation, and rule extraction.
 
-    A thread's identity (which email or PO line it concerns) lives in the
-    1:1 `WorkflowThreadSubject` row rather than on `WorkflowThread` itself,
-    since exactly one of the two subject columns applies per domain.
+    A thread's identity (which email, PO line, or retailer agreement it concerns) lives
+    in the 1:1 `WorkflowThreadSubject` row rather than on `WorkflowThread` itself, as a
+    polymorphic `subject_type`/`subject_id` pair rather than a typed FK per domain.
     """
 
     def __init__(self, session: Session) -> None:
@@ -90,24 +90,14 @@ class WorkflowThreadRepository:
         self,
         stage: str,
         *,
-        email_event_id: UUID | None = None,
-        purchase_order_line_id: UUID | None = None,
+        subject_type: str,
+        subject_id: UUID,
         job_item_id: UUID | None = None,
         status: str = "running",
         current_node: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict:
-        """Create a thread and its 1:1 subject row together.
-
-        Exactly one of `email_event_id` or `purchase_order_line_id` must be set. The
-        `num_nonnulls(...) = 1` CHECK exists only in Postgres migration DDL, so this
-        guard is the only enforcement SQLite gets.
-        """
-        if (email_event_id is None) == (purchase_order_line_id is None):
-            raise ValueError(
-                "Exactly one of email_event_id/purchase_order_line_id must be set for a workflow thread."
-            )
-
+        """Create a thread and its 1:1 subject row together."""
         thread = WorkflowThread(
             job_item_id=job_item_id,
             status=status,
@@ -120,8 +110,8 @@ class WorkflowThreadRepository:
 
         subject = WorkflowThreadSubject(
             workflow_thread_id=thread.id,
-            email_event_id=email_event_id,
-            purchase_order_line_id=purchase_order_line_id,
+            subject_type=subject_type,
+            subject_id=subject_id,
         )
         self._session.add(subject)
         self._session.flush()
@@ -135,29 +125,18 @@ class WorkflowThreadRepository:
             return None
         return _thread_to_dict(thread, self._get_subject(workflow_thread_id))
 
-    def get_latest_by_email_event(self, email_event_id: UUID) -> dict | None:
-        """Return the most recently updated thread for `email_event_id`, or None."""
+    def get_latest_by_subject(self, subject_type: str, subject_id: UUID) -> dict | None:
+        """Return the most recently updated thread for `(subject_type, subject_id)`, or None."""
         # SQLite's func.now() has only second resolution, so threads created within
         # one second tie on updated_at; the id is a time-ordered UUIDv7, which breaks
         # the tie deterministically.
         row = self._session.scalars(
             select(WorkflowThreadSubject)
             .join(WorkflowThread, WorkflowThread.id == WorkflowThreadSubject.workflow_thread_id)
-            .where(WorkflowThreadSubject.email_event_id == email_event_id)
-            .order_by(WorkflowThread.updated_at.desc(), WorkflowThread.id.desc())
-            .limit(1)
-        ).first()
-        if row is None:
-            return None
-        thread = self._session.get(WorkflowThread, row.workflow_thread_id)
-        return _thread_to_dict(thread, row) if thread is not None else None
-
-    def get_latest_by_purchase_order_line(self, purchase_order_line_id: UUID) -> dict | None:
-        """Return the most recently updated thread for `purchase_order_line_id`, or None."""
-        row = self._session.scalars(
-            select(WorkflowThreadSubject)
-            .join(WorkflowThread, WorkflowThread.id == WorkflowThreadSubject.workflow_thread_id)
-            .where(WorkflowThreadSubject.purchase_order_line_id == purchase_order_line_id)
+            .where(
+                WorkflowThreadSubject.subject_type == subject_type,
+                WorkflowThreadSubject.subject_id == subject_id,
+            )
             .order_by(WorkflowThread.updated_at.desc(), WorkflowThread.id.desc())
             .limit(1)
         ).first()
@@ -190,7 +169,7 @@ class WorkflowThreadRepository:
 
         rows = self._session.scalars(stmt).all()
         items = [_thread_to_dict(r, self._get_subject(r.id)) for r in rows]
-        next_cursor = items[-1]["updated_at"].isoformat() if len(items) == limit and items else None
+        next_cursor = next_cursor_from_page(items, limit)
         return items, next_cursor
 
     def update_status(

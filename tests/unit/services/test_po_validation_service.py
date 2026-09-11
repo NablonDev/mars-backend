@@ -19,7 +19,7 @@ now a `common.purchase_order_line` row like any other domain's.
 A repository gap this exposed and could not silently route around: no
 `PurchaseOrderRepository` method sets `purchase_order_line.line_status`
 directly (nodes.py -- Phase 4 -- is the intended future writer, and it's
-currently broken/unwired, same as `app.services.cmir.run_service`'s sibling
+currently broken/unwired, same as `app.services.cmir.service`'s sibling
 gap). Where a test needs to simulate "the graph's outcome node already set
 this terminal status" (the old fakes' `forced_final_status` override), this
 suite writes the ORM row directly via `db_session`, flagged inline at each
@@ -166,7 +166,7 @@ def test_qty_mismatch_interrupt_creates_thread_and_pending_action(repos) -> None
     thread_id = UUID(line["thread_id"])
     thread = repos.workflow_threads.get_by_id(thread_id)
     assert thread is not None
-    assert thread["purchase_order_line_id"] is not None
+    assert thread["subject_id"] is not None
     pending = repos.human_actions.get_open_for_thread(thread_id)
     assert pending is not None
     assert pending["interrupt_type"] == "qty_mismatch_decision"
@@ -279,7 +279,7 @@ def test_submit_qty_mismatch_decision_persists_decision_and_reaches_final_stage(
         repos, "qty_mismatch_decision", resume_results=[{}]
     )
     stage = service.get_stage(thread_id)
-    line_row = db_session.get(PurchaseOrderLine, stage["purchase_order_line_id"])
+    line_row = db_session.get(PurchaseOrderLine, stage["subject_id"])
     line_row.line_status = "READY_FOR_SO_CREATION_PARTIAL"
     db_session.flush()
 
@@ -341,7 +341,7 @@ def test_get_errors_finds_pre_interrupt_error_with_no_thread(repos) -> None:
 
 def test_ingest_po_lines_creates_job_run_and_settles_job_item_succeeded(repos) -> None:
     """Gap 1: ingest_po_lines must create a real process.job_run/job_item
-    trail (mirroring CmirRunService.start_email_ingest) and settle each
+    trail (mirroring CmirService.start_email_ingest) and settle each
     line's job item inline, in the same request, once its graph invocation
     returns -- without changing the existing synchronous response shape."""
     service = _build_service(repos, FakeGraph([{}]))
