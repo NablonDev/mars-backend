@@ -285,6 +285,58 @@ A dispute's `reason_code` is one of `AMOUNT_INCORRECT`, `NOT_LATE`,
 `claimed_amount`) and a full `analysis_breakdown` of the facts and rule
 the verdict was computed against, once analyzed.
 
+### Contracts and rule extraction
+
+Routes in `app/api/v1/penalties/rule_extraction.py`, backed by
+`app.services.penalties.rule_extraction.service.PenaltyRuleExtractionService`;
+schemas in `app/schemas/penalties/rule_extraction.py`. Turns a retailer
+contract's prose into reviewed `penalty_rule` rows: upload the contract,
+run extraction, review each candidate clause, publish the approved ones.
+See `docs/architecture/penalty-rule-extraction.md` for the full design.
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/api/v1/penalties/contracts` (body: `retailer_id`, `contract_code`, `title`, `markdown_text`, `source_uri?`, `effective_date?`, `expiration_date?`) | Create a contract (`201`), or return the existing one (`200`) if its content already matches one on file by `document_sha256` |
+| GET | `/api/v1/penalties/contracts/{contract_id}` | Single contract read (`404 CONTRACT_NOT_FOUND`) |
+| POST | `/api/v1/penalties/contracts/{contract_id}/extract` | Start the extraction graph for the contract (`202`), returning `agent_run_id` and `workflow_thread_id` (`null` when nothing in the contract needed review) |
+| GET | `/api/v1/penalties/contracts/{contract_id}/extracted-rules?status=` | List a contract's extracted rules and their attributes, optionally narrowed to `PENDING_REVIEW`\|`APPROVED`\|`REJECTED` |
+| POST | `/api/v1/penalties/contracts/{contract_id}/extracted-rules/{extracted_rule_id}/review` (body: `status`, `review_notes?`) | Record a reviewer's `APPROVED` or `REJECTED` decision on one extracted rule (graph-unaware; does not resume the run) |
+| POST | `/api/v1/penalties/contracts/{contract_id}/publish` | Run the publisher over the contract's approved extracted rules, inserting live `penalty_rule` rows and a `rule_publication` audit row for every outcome |
+| GET | `/api/v1/penalties/contracts/{contract_id}/publications` | Every recorded publication outcome for the contract, plus a `rejection_reason_histogram` keyed by `reason_code` |
+
+`document_sha256` is computed server-side, a sha256 over `markdown_text`;
+the client never supplies it. `ContractResponse` carries the full row
+(`id`, `retailer_id`, `contract_code`, `title`, `document_sha256`,
+`source_uri`, `effective_date`, `expiration_date`).
+
+The extraction graph interrupts at `human_review` while any staged rule stays
+`PENDING_REVIEW`. Once every rule a reviewer cares about has been decided via
+`POST .../review`, resume the run through the shared workflow-threads surface:
+`POST /api/v1/workflow-threads/{workflow_thread_id}/decisions` with
+`decision_type: "RULE_REVIEW_RESUME"` (body: `actor`, `expected_updated_at`,
+no verdicts -- decisions are re-read from the database). See "Workflow
+threads" below for the shared contract and its common errors.
+
+`GET .../extracted-rules` returns each `ExtractedPenaltyRuleResponse` with
+its nested `attributes` array (`ExtractedPenaltyRuleAttributeResponse`:
+`branch_no`, `attribute_role`, `metric_code`, `operator`, `value`/
+`value_max`, `value_unit`, `value_status`, `currency_code`, `basis_type`,
+`applies_per`, `tier_application`, `cap_scope`, `source_text`,
+`confidence`). `pricing_readiness` is one of `READY`,
+`NEEDS_EXTERNAL_FIGURE`, `AWAITING_DATA`, `UNSUPPORTED_SHAPE`,
+`NOT_A_CHARGE`; only a `READY` rule that a reviewer also marks `APPROVED`
+is eligible for publication.
+
+`POST .../publish` returns `RulePublicationResultResponse`
+(`published_count`, `rejected_count`, `outcomes`), each `outcomes[]` entry
+an `extracted_rule_id`, `outcome` (`PUBLISHED`\|`REJECTED`),
+`penalty_rule_id` (set only when published), `reason_code` (set only when
+rejected, see `docs/RUNBOOK.md` for the full list), and `reason_detail`.
+`GET .../publications` returns the same outcome shape for every publication
+run ever recorded against the contract, not just the latest.
+
+Every response above uses the standard envelope.
+
 ## Job runs (`penalties` domain)
 
 Routes in `app/api/v1/job_runs.py`; request schemas in
@@ -344,7 +396,7 @@ lookups.
 
 ## CMIR
 
-Routes in `app/api/v1/cmir.py`, backed by `app.services.cmir.run_service.CmirRunService`.
+Routes in `app/api/v1/cmir.py`, backed by `app.services.cmir.service.CmirService`.
 See `docs/prd.md` for the business rules and the README's identity rule
 before touching reviewer/queue code -- `thread_id` is the only identifier
 reviewer/UI actions may key on.
@@ -363,18 +415,24 @@ Routes in `app/api/v1/po_validation.py`.
 | POST | `/api/v1/po-validation/purchase-order-lines` | Ingest PO lines into the validation pipeline (runs CMIR-matching/material-master checks as a side effect); `202`. Each line also creates and inline-settles one `process.job_item` (`item_type=PO_VALIDATION`) under one `process.job_run` (`job_type=PO_VALIDATION_BATCH`) per call -- `batch_id` in the response *is* that `job_run_id`, queryable via `GET /api/v1/job-runs/{batch_id}` |
 | GET | `/api/v1/purchase-order-lines?purchase_order_id=&status=&limit=&cursor=` | The one `purchase_order_line` listing route, paginated on `updated_at` (replaces what used to be this flat route plus a separate nested `GET /purchase-orders/{purchase_order_id}/lines`). Both `purchase_order_id`/`status` omitted defaults to the "ready" set (`READY_FOR_SO_CREATION`/`READY_FOR_SO_CREATION_PARTIAL`) across every PO; `purchase_order_id` given with `status` omitted returns that PO's lines regardless of status; an explicit `status` filters on that exact `line_status` value, optionally also scoped to one PO |
 
-## Workflow threads (shared: `cmir` + `po_validation`)
+## Workflow threads (shared: `cmir` + `po_validation` + penalty rule extraction)
 
 Routes in `app/api/v1/workflow_threads.py`. `workflow_thread` is a shared
-`process`-schema resource used by both domains, not owned by either router.
+`process`-schema resource used by all three, not owned by any one router. A
+penalty rule-extraction thread's subject is `workflow_thread_subject.subject_id`
+with `subject_type='RETAILER_AGREEMENT'` (neither `EMAIL_EVENT` nor
+`PURCHASE_ORDER_LINE` fits a contract-scoped review); the
+`domain=cmir`/`domain=po_validation` filter below only recognizes those
+other two, so a rule-extraction thread is absent from either filtered view
+but still listed unfiltered.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/v1/workflow-threads?domain=&status=&stage=&limit=&cursor=` | List workflow threads (`domain` is `cmir`\|`po_validation`) |
+| GET | `/api/v1/workflow-threads?domain=&status=&stage=&limit=&cursor=` | List workflow threads (`domain` is `cmir`\|`po_validation`; rule-extraction threads are unfiltered by `domain` but still listed) |
 | GET | `/api/v1/workflow-threads/{thread_id}?include=snapshot` | Thread stage (always) plus its domain-specific snapshot (opt-in via `include`) |
 | POST | `/api/v1/workflow-threads/{thread_id}/missing-fields` | Submit missing mandatory fields and resume the graph (CMIR-only in substance today) |
 | PATCH | `/api/v1/workflow-threads/{thread_id}/draft` | Save reviewer draft edits (CMIR-only in substance today) |
-| POST | `/api/v1/workflow-threads/{thread_id}/decisions` | Record a decision -- one generic endpoint, `decision_type` discriminator selects `CMIR_APPROVAL`, `QTY_MISMATCH`, or `MANUAL_CMIR_ENTRY` |
+| POST | `/api/v1/workflow-threads/{thread_id}/decisions` | Record a decision -- one generic endpoint, `decision_type` discriminator selects `CMIR_APPROVAL`, `QTY_MISMATCH`, `MANUAL_CMIR_ENTRY`, or `RULE_REVIEW_RESUME` (body: `actor`, `expected_updated_at`; resumes a penalty rule-extraction run paused at `human_review`, carrying no verdicts of its own) |
 
 Common errors: `THREAD_NOT_FOUND` (404, unknown `thread_id`), `THREAD_STALE`
 (409, `expected_updated_at` didn't match -- refetch and retry), `THREAD_NOT_WAITING`

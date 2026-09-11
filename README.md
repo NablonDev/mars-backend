@@ -14,7 +14,9 @@ Two agentic backends in one FastAPI app, separated by Postgres schema:
   rules and the real, final delivery facts (not the risk-adjusted ones
   projection works with). A deterministic rules engine computes both the
   projection and the dispute verdict; the LLM only explains the projection, or
-  narrates the dispute outcome, in plain language.
+  narrates the dispute outcome, in plain language. A separate LangGraph
+  pipeline extracts candidate penalty rules from an uploaded contract, with a
+  human-review step before anything is promoted into a live rule.
 
 Both domains share a `common` schema (retailers, materials, purchase orders,
 ...) and a `process` schema (the job/agent/workflow backbone: `job_run`,

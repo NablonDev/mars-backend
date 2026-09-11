@@ -29,7 +29,6 @@ format-check:
 typecheck:
 	uv run mypy app/
 
-# Everything CLAUDE.local.md requires before calling a change done.
 check: lint format-check typecheck test
 
 # Local Postgres reachable directly (DATABASE_URL from the environment/.env).

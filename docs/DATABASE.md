@@ -30,6 +30,10 @@ unqualified (no schema override on those models).
   from the original `po_delivery_change_request`, back when the FK was
   also renamed `order_id` -> `purchase_order_id` to point at the surrogate
   `purchase_order.id`).
+  Also `retailer_agreement` (`RetailerAgreement`): the retailer agreement
+  document itself, master data next to `retailer` and `sku`, not a penalty
+  artefact. See "Retailer agreement and penalty rule extraction tables"
+  below.
   Alembic's own version table lives here too (see "Migration history"
   below).
 - **`process`** -- the shared job/agent/workflow backbone (`job_run`,
@@ -98,6 +102,7 @@ genuinely incremental revision added since, in FK-dependency order:
 | `4b41f6bcb2f3` | `alembic/versions/4b41f6bcb2f3_initial_penalties_schema.py` | Every `penalties`-schema table |
 | `a5b39c6e2181` | `alembic/versions/a5b39c6e2181_initial_langgraph_schema.py` | `CREATE SCHEMA langgraph` only -- no tables, Postgres-only, no-op on SQLite |
 | `11ce88f609e0` | `alembic/versions/11ce88f609e0_penalty_dispute_schema.py` | `penalty_dispute` table; `DISPUTE` added to `penalty_summary.summary_type`'s CHECK constraint; `penalty_rule.rule_code` widened `varchar(20)` -> `varchar(50)` |
+| `1d92b65b8eb4` | `alembic/versions/1d92b65b8eb4_penalty_rule_extraction_schema_squash.py` | `retailer_agreement` table (public); `penalties.extracted_penalty_rule`, `.extracted_penalty_rule_attribute`, `.rule_publication` tables; `penalty_rule` gains `basis_type`, `applies_per`, `currency_code`; `process.workflow_thread_subject` drops its `email_event_id`/`purchase_order_line_id` FK columns and `ck_workflow_thread_subject_one_of`, replaced by `subject_type`/`subject_id` plus a plain composite index |
 
 The five revisions above `11ce88f609e0` are a pre-release squash -- edited in
 place rather than chained, since there was no production data to preserve
@@ -108,6 +113,18 @@ revisions applied, at which point editing an already-applied revision's
 file stopped doing anything for `alembic upgrade head` (Alembic tracks
 revision *ids* applied, never file content). Every revision from here on
 should be a normal new chained revision, not an edit to an existing one.
+
+`1d92b65b8eb4` itself squashes four untracked revisions this replaces
+(`a346037536d2` -> `d9cccf0d0847` -> `718bb329ceb9` -> `39a35fff652d`),
+since none of them had shipped to any environment carrying real data:
+`contract` is renamed `retailer_agreement` throughout (table, model,
+repository); `penalty_rule` gains
+`basis_type`/`applies_per`/`currency_code` only, not `extracted_rule_id`
+(that provenance link lives on `rule_publication` alone); and
+`workflow_thread_subject` goes straight from its original two-column
+(`email_event_id`/`purchase_order_line_id`) shape to `subject_type`/
+`subject_id`, never passing through the three-typed-FK intermediate shape
+the deleted revisions added.
 
 **Why `workflow_thread_subject` is created by the `cmir` revision, not the
 `process` one its Python class lives in:** a genuine cross-revision FK
@@ -257,12 +274,25 @@ because the index itself is optional.
 
 ### `workflow_thread` (`WorkflowThread`) / `workflow_thread_subject` (`WorkflowThreadSubject`)
 The reviewer-facing HITL thread, only created once a job item's first
-human interrupt fires. `workflow_thread_subject` replaces the old
-polymorphic `subject_type`/`subject_id` pair with two nullable typed FKs
-(`email_event_id`, `purchase_order_line_id`) plus a
-`CHECK (num_nonnulls(email_event_id, purchase_order_line_id) = 1)`
-(migration-only raw DDL, Postgres-only). See "Migration history" above
-for why this table is created by the `cmir` revision.
+human interrupt fires. `workflow_thread_subject` identifies a thread's
+subject with a polymorphic `subject_type`/`subject_id` pair, backed by a
+plain composite index (`ix_workflow_thread_subject_subject_type_subject_id`),
+rather than a typed FK per domain -- `subject_id` carries no DB-level FK,
+since the referenced table depends on `subject_type`
+(`WorkflowThreadSubjectType`: `EMAIL_EVENT`, `PURCHASE_ORDER_LINE`,
+`RETAILER_AGREEMENT`). See "Migration history" above for why this table
+is created by the `cmir` revision, and why it went straight from a
+two-column typed-FK shape to this one without an intermediate three-column
+stop.
+
+`WorkflowThreadRepository.create(subject_type=..., subject_id=...)` is the
+one entry point for all three domains; `get_latest_by_subject(subject_type,
+subject_id)` is the one lookup, replacing what used to be three
+domain-specific methods (`get_latest_by_email_event`,
+`get_latest_by_purchase_order_line`, `get_latest_by_contract`).
+`PenaltyRuleExtractionService._create_review_thread` uses
+`WorkflowThreadSubjectType.RETAILER_AGREEMENT` the same way CMIR and PO
+validation use `EMAIL_EVENT`/`PURCHASE_ORDER_LINE`.
 
 ### `agent` (`Agent`)
 Merges what were two tables (`agent` + `prompt_version`) into one: one row
@@ -286,7 +316,7 @@ this column and no API endpoint may expose a write to it.
 `(agent_code) WHERE is_active` (migration-only raw DDL -- see
 "Migration-only raw DDL constructs" below) -- guarantees at most one
 active prompt version per agent code, matching the seed data's shape (each
-of the four `agent_code`s has exactly one `is_active = TRUE` row).
+of the eight `agent_code`s has exactly one `is_active = TRUE` row).
 
 ### `agent_run` (`AgentRun`) / `agent_trace` (`AgentTrace`)
 One row per independent agent execution, and one row per LangGraph node
@@ -354,6 +384,73 @@ Full `fine`/`fines` -> `penalty`/`penalties` domain rename.
 | `penalty_projection` (`PenaltyProjection`) | `(purchase_order_id, rule_id, projection_date)` | Renamed from `projected_fine`. Three dollar/probability columns, all always populated: `failure_probability` (raw probability, 0-1), `penalty_amount` (raw $ if the violation occurs, independent of probability), `expected_penalty_amount` (= `failure_probability * penalty_amount`, a risk-adjusted combined figure -- retained for internal ranking/PO-level exposure aggregation only, never a predicted certain cost) |
 | `actual_penalty` (`ActualPenalty`) | `actual_penalty_number` | Renamed from `actual_fine` |
 
+## Retailer agreement and penalty rule extraction tables
+
+Turns a retailer contract's prose into reviewed `penalty_rule` rows. Full
+design: `docs/architecture/penalty-rule-extraction.md`.
+
+### `retailer_agreement` (`RetailerAgreement`, `public`)
+The retailer agreement document itself, master data next to `retailer` and
+`sku`. Renamed from `contract` (table, model, repository); its own columns
+(`contract_code`, `document_sha256`, ...) are unchanged. `document_sha256`
+makes re-upload idempotent; `contract_code` is its own unique business key.
+Which extraction run's approved rules are authoritative is not stored on
+this table; `PenaltyRuleExtractionService.publish` derives it as the
+newest `agent_run_id` among the contract's staged
+`extracted_penalty_rule` rows.
+
+### `penalties.extracted_penalty_rule` (`ExtractedPenaltyRule`)
+One row per penalty clause found, pending review. `status` moves
+`PENDING_REVIEW` -> `APPROVED`/`REJECTED`; `pricing_readiness` (`READY`,
+`NEEDS_EXTERNAL_FIGURE`, `AWAITING_DATA`, `UNSUPPORTED_SHAPE`,
+`NOT_A_CHARGE`) is set by the extraction pipeline's readiness evaluator,
+and only a `READY`+`APPROVED` row is eligible for publication.
+`po_shortage_flag`/`po_delay_flag` mark whether the clause is in scope for
+this engine (purchase order shortage or lateness) at all.
+
+`UNIQUE (agent_run_id, clause_fingerprint)`
+(`uq_extracted_penalty_rule_run_fingerprint`) is what stops a
+re-extraction doubling every rule: a second run over the same contract
+inserts its own rows under its own `agent_run_id`, and publication only
+ever considers rules approved under the contract's newest run.
+
+`ix_extracted_penalty_rule_contract_status` is a partial index
+(`(contract_id, status) WHERE deleted_at IS NULL`), raw DDL in the
+migration for the same `postgresql_where=`-dropped-on-SQLite reason as the
+other partial indexes below (see "Migration-only raw DDL constructs").
+
+### `penalties.extracted_penalty_rule_attribute` (`ExtractedPenaltyRuleAttribute`)
+One extracted fact (rate, threshold, cap, grace period, ...) per row,
+`branch_no` grouping rows into rule-wide (`0`) versus one branch of a tier
+ladder or conditional (`1` and up). Narrow and typed for the fifteen
+fields the publisher reads to admit, convert, or reject a rule
+(`attribute_role`, `metric_code`, `operator`, `value`/`value_max`,
+`value_status`, `currency_code`, `basis_type`, `tier_application`,
+`cap_scope`, and the rest), with one `extra jsonb` column for everything
+extracted but not yet consumed by a pricing decision (window type, event
+anchor, rounding convention, and similar). An earlier draft folded all of
+this into one JSONB column; that was wrong on two counts, both
+compiler-facing: rates and thresholds are money, and a JSON number is a
+float that can drift by a cent at the bottom of a tier ladder, while a
+field the publisher reads to decide correctness needs a type and a
+constraint the database enforces, not a `.get()` on a document. When
+something in `extra` starts driving a decision, it graduates to a typed
+column with a migration, never the other direction.
+
+### `penalties.rule_publication` (`RulePublication`)
+Append-only audit row for every publication outcome, `PUBLISHED` or
+`REJECTED`, with a `reason_code` for the latter (see `docs/RUNBOOK.md` for
+the code list and what an operator should do about each). No
+`updated_at`/`deleted_at`, so it does not use `TimestampMixin`.
+
+### `penalties.penalty_rule` gains three columns
+`basis_type` (nullable), `applies_per` (nullable), and `currency_code`
+(`NOT NULL DEFAULT 'USD'`) -- the pricing engine needs these regardless of
+a rule's origin, hand-written or published. No `extracted_rule_id` column:
+provenance from an extracted rule to the `penalty_rule` row it was
+published into lives entirely on `penalties.rule_publication` (which carries
+both `extracted_rule_id` and `penalty_rule_id`), not duplicated here.
+
 ## Why no `dim_`/`fact_` prefix
 
 Every table across all four ORM-owned schemas is singular, `snake_case`,
@@ -369,30 +466,35 @@ established it -- and is carried forward unchanged.
 
 ## Migration-only raw DDL constructs
 
-Six constructs across the five revisions cannot be expressed as an ORM
-model declaration, and exist only as raw DDL inside their migration:
+Six constructs across the migration history cannot be expressed as an
+ORM model declaration, and exist only as raw DDL inside their migration:
 
-1. **`workflow_thread_subject`'s `CHECK (num_nonnulls(email_event_id,
-   purchase_order_line_id) = 1)`** (`374aa902b053_initial_cmir_schema.py`) --
-   PostgreSQL-only builtin, skipped on SQLite.
-2. **`cmir_job_item_context`'s identical CHECK** (same migration, same
-   reason).
-3. **`cmir_record`'s partial unique index**
+1. **`cmir_job_item_context`'s `CHECK (num_nonnulls(email_event_id,
+   purchase_order_line_id) = 1)`** (`374aa902b053_initial_cmir_schema.py`)
+   -- PostgreSQL-only builtin, skipped on SQLite.
+   `workflow_thread_subject` used to carry an equivalent CHECK; it is now
+   a polymorphic `subject_type`/`subject_id` pair with no DB-level CHECK
+   (see `1d92b65b8eb4_penalty_rule_extraction_schema_squash.py`).
+2. **`cmir_record`'s partial unique index**
    (`uq_cmir_record_current_identity`, same migration) -- SQLAlchemy's
    `postgresql_where=` on an `Index` is silently dropped on SQLite, which
    would otherwise create a full unique index there and wrongly reject a
    legitimate second historical (non-current) row for the same identity
    pair.
-4. **`job_item`'s partial unique index** (`uq_job_item_inflight`,
+3. **`job_item`'s partial unique index** (`uq_job_item_inflight`,
    `ff53dabe6e4c_initial_process_schema.py`) -- restores the pre-restructure
    schema's in-flight dedupe constraint on top of the generic `dedupe_key`
-   column; same "`postgresql_where=` dropped on SQLite" reason as #3. See
+   column; same "`postgresql_where=` dropped on SQLite" reason as #2. See
    `job_item`'s own section above for the full story, including why an
    earlier version of this squash dropped it and why that was wrong.
-5. **`agent`'s partial unique index** (`uq_agent_one_active_per_code`,
+4. **`agent`'s partial unique index** (`uq_agent_one_active_per_code`,
    same migration) -- at most one active prompt version per agent code.
-6. **`langgraph`'s `CREATE SCHEMA`** (`a5b39c6e2181_initial_langgraph_schema.py`)
+5. **`langgraph`'s `CREATE SCHEMA`** (`a5b39c6e2181_initial_langgraph_schema.py`)
    -- Postgres-only, no SQLite equivalent, no-op there.
+6. **`extracted_penalty_rule`'s partial index**
+   (`ix_extracted_penalty_rule_contract_status`,
+   `1d92b65b8eb4_penalty_rule_extraction_schema_squash.py`), same
+   `postgresql_where=`-dropped-on-SQLite reason as #2 and #3.
 
 All six are dialect-branched (schema-qualified on Postgres, unqualified
 or skipped on SQLite) so `tests/unit/db/test_migration_parity.py`'s
@@ -403,7 +505,7 @@ divergence in any of the six constructs above; they're verified only
 against a real Postgres database.
 
 **`alembic check` / `alembic revision --autogenerate` will always flag
-constructs #1-5 as phantom drops.** Autogenerate compares reflected
+constructs #1-4 and #6 as phantom drops.** Autogenerate compares reflected
 Postgres DDL against `Base.metadata`; none of a `postgresql_where=`
 partial index or a raw `ALTER TABLE ... ADD CONSTRAINT CHECK
 (num_nonnulls(...))` is represented in the ORM models, so every future
@@ -416,13 +518,13 @@ committing a new migration, the same way `374aa902b053` and
 autogenerate pass (`grep -n "drop_index" alembic/versions/*.py` should
 only ever match inside a `downgrade()`, never an `upgrade()` -- see the
 approved Phase 1 plan's "recurring Alembic autogenerate defect" note for
-the full mechanics). Construct #6 (`CREATE SCHEMA langgraph`) is not
+the full mechanics). Construct #5 (`CREATE SCHEMA langgraph`) is not
 affected -- it creates no table/index/constraint for autogenerate to
 compare against metadata at all.
 
 ## Schema-change checklist
 
-Per `CLAUDE.local.md`'s "Engineering Rules": a schema change touches,
+Per `.claude/CLAUDE.md`'s "Engineering Rules": a schema change touches,
 together, in one commit -- the relevant `app/models/*.py` file, a new
 Alembic migration (`alembic/versions/`), `docs/mars_penalties_erp_schema.sql`,
 this document (if the change is structural, not just a column tweak), and
