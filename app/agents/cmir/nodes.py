@@ -29,7 +29,7 @@ class WorkflowNodes:
 
     Nodes reach IMAP, Postgres and Azure OpenAI only through the injected
     collaborators. `process.workflow_thread` rows are created lazily by
-    `CmirRunService._handle_graph_state` at the first human interrupt, so no node
+    `CmirService._handle_graph_state` at the first human interrupt, so no node
     holds a workflow-thread repository.
     """
 

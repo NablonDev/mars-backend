@@ -8,7 +8,7 @@ from app.api.dependencies import get_service
 from app.core.envelope import Envelope, success_envelope
 from app.core.exceptions import ValidationError
 from app.schemas.cmir.email_events import IngestEmailEventsRequest, IngestEmailEventsResponse
-from app.services.cmir.run_service import CmirRunService
+from app.services.cmir.service import CmirService
 
 router = APIRouter(tags=["cmir"])
 
@@ -20,7 +20,7 @@ router = APIRouter(tags=["cmir"])
 )
 def start_email_ingest(
     body: IngestEmailEventsRequest,
-    run_service: CmirRunService = Depends(get_service),
+    run_service: CmirService = Depends(get_service),
 ) -> Envelope[IngestEmailEventsResponse]:
     """Start email ingestion from Gmail.
 

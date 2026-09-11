@@ -15,8 +15,8 @@ from __future__ import annotations
 import pytest
 
 
-class FakeCmirRunService:
-    """Implements the `CmirRunService` methods `app/api/v1/cmir.py` calls."""
+class FakeCmirService:
+    """Implements the `CmirService` methods `app/api/v1/cmir.py` calls."""
 
     def start_email_ingest(self, **kwargs):
         return {
@@ -56,8 +56,8 @@ class FakeCmirRunService:
 
 
 @pytest.fixture
-def cmir_run_service():
-    return FakeCmirRunService()
+def cmir_service():
+    return FakeCmirService()
 
 
 def test_create_email_events_returns_accepted_batch_payload(client):

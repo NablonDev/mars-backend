@@ -1,17 +1,28 @@
-"""Coordinates CMIR resolution workflow across repositories and LangGraph."""
+"""Coordinates CMIR resolution workflow across repositories and LangGraph.
+
+Entry points:
+    start_email_ingest (POST /api/v1/cmir/email-events)
+    process_queued_email (POST /api/v1/internal/process-email)
+    list_runs (GET /api/v1/workflow-threads)
+    get_stage (GET /api/v1/workflow-threads/{thread_id})
+    get_snapshot (GET /api/v1/workflow-threads/{thread_id})
+    submit_missing_fields (POST /api/v1/workflow-threads/{thread_id}/missing-fields)
+    update_draft (PATCH /api/v1/workflow-threads/{thread_id}/draft)
+    submit_decision (POST /api/v1/workflow-threads/{thread_id}/decisions)
+"""
 
 from __future__ import annotations
 
 import logging
 from dataclasses import asdict
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from langgraph.types import Command
 
 from app.core.config import get_settings
 from app.core.exceptions import AppError, ConflictError, ExternalServiceError, NotFoundError, ValidationError
-from app.models.enums import JobRunType, JobTaskType
+from app.models.enums import JobRunType, JobTaskType, WorkflowThreadSubjectType
 from app.repositories.cmir.cmir_record import CmirRecordRepository
 from app.repositories.cmir.email import EmailRepository
 from app.repositories.cmir.job_context import CmirJobItemContextRepository, CmirJobRunContextRepository
@@ -22,6 +33,7 @@ from app.schemas.cmir import CMIR_CONTENT_FIELDS, Cmir, EmailMessage
 from app.services.cmir.merge import merge_with_active
 from app.services.cmir.validation import CmirValidator
 from app.services.email_reader import GmailImapReader
+from app.utils.ids import new_id
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +72,7 @@ _SYSTEM_PROMPT = (
 )
 
 
-class CmirRunService:
+class CmirService:
     """Coordinates PRD API workflows across repositories and LangGraph."""
 
     def __init__(
@@ -91,16 +103,6 @@ class CmirRunService:
         self._job_item_context = job_item_context
         self._email_repository = email_repository
         self._validator = validator or CmirValidator()
-
-    def _ensure_registered(self) -> UUID:
-        """Ensure the `cmir_extractor` agent row exists for this prompt version and return its id."""
-        return self._agent_registry.ensure_registered(
-            agent_code=_AGENT_CODE,
-            prompt_version=_PROMPT_VERSION,
-            system_prompt=_SYSTEM_PROMPT,
-            agent_name=_AGENT_NAME,
-            domain="cmir",
-        )
 
     def start_email_ingest(
         self,
@@ -198,11 +200,15 @@ class CmirRunService:
                 )
             if queue_state.get("queue_status") == "processed":
                 logger.info("Skipping already processed queued email %s", email_id)
-                existing_thread = self._workflow_threads.get_latest_by_email_event(email_id)
+                existing_thread = self._workflow_threads.get_latest_by_subject(
+                    WorkflowThreadSubjectType.EMAIL_EVENT, email_id
+                )
                 if existing_thread is not None:
                     return self.get_stage(existing_thread["id"])
                 return self._already_processed_summary(batch_id, email_id)
-            existing_thread = self._workflow_threads.get_latest_by_email_event(email_id)
+            existing_thread = self._workflow_threads.get_latest_by_subject(
+                WorkflowThreadSubjectType.EMAIL_EVENT, email_id
+            )
             if existing_thread is not None and existing_thread["status"] != "failed":
                 self._email_repository.mark_queue_processed(email_id)
                 return self.get_stage(existing_thread["id"])
@@ -223,52 +229,6 @@ class CmirRunService:
             if self._email_repository is not None:
                 self._email_repository.mark_queue_failed(email_id, str(exc), retryable=False)
             raise
-
-    def _process_email_thread(
-        self,
-        batch_id: str,
-        email: Any,
-        *,
-        existing_email_id: Any | None = None,
-        raise_on_error: bool = False,
-    ) -> dict[str, Any]:
-        """Run one email through its independent agent and LangGraph thread."""
-        checkpoint_thread_id = self._new_checkpoint_thread_id()
-        agent_id = self._ensure_registered()
-        run_id = self._agent_runs.start(agent_id=agent_id, run_type="CMIR_EMAIL_INGEST")
-        try:
-            email_payload = self._email_to_payload(email)
-            initial_state = {
-                "batch_id": batch_id,
-                "email": email_payload,
-                "cmir": {},
-                "decision": None,
-                "run_id": run_id,
-                "thread_id": checkpoint_thread_id,
-            }
-            if existing_email_id is not None:
-                initial_state["email_id"] = existing_email_id
-            state = self._graph.invoke(
-                initial_state,
-                config=self._thread_config(checkpoint_thread_id),
-            )
-            return self._handle_graph_state(run_id, batch_id, checkpoint_thread_id, state)
-        except Exception as exc:
-            logger.exception("Workflow run %s failed during ingest", run_id)
-            self._agent_runs.update_status(run_id, "failed", error=str(exc), completed=True)
-            if raise_on_error:
-                raise
-            return {
-                "batch_id": batch_id,
-                "agent_run_id": run_id,
-                "thread_id": None,
-                "email_id": "",
-                "stage": "FAILED",
-                "status": "failed",
-                "current_node": None,
-                "pending_action_id": None,
-                "updated_at": None,
-            }
 
     def list_runs(
         self,
@@ -464,7 +424,7 @@ class CmirRunService:
                 next_pending_interrupt_type="approval_required",
                 next_pending_request_payload={
                     "reason": "approval_required",
-                    "email_id": str(stage["email_event_id"]) if stage["email_event_id"] else None,
+                    "email_id": str(stage["subject_id"]) if stage["subject_id"] else None,
                     "cmir": updated_cmir,
                     "existing_cmir": current,
                     "diff": diff,
@@ -555,6 +515,153 @@ class CmirRunService:
         except Exception as exc:
             raise self._resume_failed(thread_id, pending["id"], exc) from exc
 
+    @staticmethod
+    def _queue_summary(batch_id: str, row: dict[str, Any], status: str) -> dict[str, Any]:
+        """Build the per-email summary row `start_email_ingest` returns for one queued email."""
+        stage_by_status = {
+            "new": "NEW",
+            "queued": "QUEUED",
+            "enqueueing": "ENQUEUEING",
+            "processing": "PROCESSING",
+            "processed": "ALREADY_PROCESSED",
+            "failed": "FAILED",
+            "queue_failed": "QUEUE_FAILED",
+        }
+        return {
+            "batch_id": batch_id,
+            "agent_run_id": None,
+            "thread_id": None,
+            "email_id": str(row["id"]),
+            "source_message_id": row.get("source_message_id"),
+            "sender": row.get("sender"),
+            "subject": row.get("subject"),
+            "stage": stage_by_status.get(status, "INGESTED"),
+            "status": status,
+            "current_node": None,
+            "pending_action_id": None,
+            "updated_at": None,
+        }
+
+    @staticmethod
+    def _already_processed_summary(batch_id: str, email_id: Any) -> dict[str, Any]:
+        """Build the summary row returned for an email whose queue state is already 'processed'."""
+        return {
+            "batch_id": batch_id,
+            "agent_run_id": None,
+            "thread_id": None,
+            "email_id": str(email_id),
+            "stage": "ALREADY_PROCESSED",
+            "status": "already_processed",
+            "current_node": None,
+            "pending_action_id": None,
+            "updated_at": None,
+        }
+
+    @staticmethod
+    def _email_from_payload(payload: dict[str, Any], *, fallback_imap_id: str | None = None) -> EmailMessage:
+        """Build an `EmailMessage` from a queued Service Bus payload.
+
+        `imap_id` is resolved from whichever of `imap_id`/`source_imap_id`/
+        `email_id` is present, falling back to `fallback_imap_id`, since the
+        Service Bus consumer's nested `email` payload doesn't always carry the
+        same key the top-level request does.
+        """
+        # email_id is a required top-level field of the request; the nested copy
+        # inside `email` is a convenience the Service Bus consumer adds, so fall
+        # back to the authoritative value rather than KeyError-ing on its absence.
+        imap_id = (
+            payload.get("imap_id")
+            or payload.get("source_imap_id")
+            or payload.get("email_id")
+            or fallback_imap_id
+        )
+        if imap_id is None:
+            raise ValidationError(
+                code="VALIDATION_ERROR",
+                message="Queued email payload must include imap_id, source_imap_id, or email_id.",
+            )
+        return EmailMessage(
+            imap_id=str(imap_id),
+            sender=payload["sender"],
+            subject=payload["subject"],
+            body=payload.get("body") or payload.get("raw_content") or "",
+            source_message_id=payload.get("source_message_id"),
+            mark_read=bool(payload.get("mark_read", True)),
+        )
+
+    def _process_email_thread(
+        self,
+        batch_id: str,
+        email: Any,
+        *,
+        existing_email_id: Any | None = None,
+        raise_on_error: bool = False,
+    ) -> dict[str, Any]:
+        """Run one email through its independent agent and LangGraph thread."""
+        checkpoint_thread_id = self._new_checkpoint_thread_id()
+        agent_id = self._ensure_registered()
+        run_id = self._agent_runs.start(agent_id=agent_id, run_type="CMIR_EMAIL_INGEST")
+        try:
+            email_payload = self._email_to_payload(email)
+            initial_state = {
+                "batch_id": batch_id,
+                "email": email_payload,
+                "cmir": {},
+                "decision": None,
+                "run_id": run_id,
+                "thread_id": checkpoint_thread_id,
+            }
+            if existing_email_id is not None:
+                initial_state["email_id"] = existing_email_id
+            state = self._graph.invoke(
+                initial_state,
+                config=self._thread_config(checkpoint_thread_id),
+            )
+            return self._handle_graph_state(run_id, batch_id, checkpoint_thread_id, state)
+        except Exception as exc:
+            logger.exception("Workflow run %s failed during ingest", run_id)
+            self._agent_runs.update_status(run_id, "failed", error=str(exc), completed=True)
+            if raise_on_error:
+                raise
+            return {
+                "batch_id": batch_id,
+                "agent_run_id": run_id,
+                "thread_id": None,
+                "email_id": "",
+                "stage": "FAILED",
+                "status": "failed",
+                "current_node": None,
+                "pending_action_id": None,
+                "updated_at": None,
+            }
+
+    @staticmethod
+    def _new_checkpoint_thread_id() -> str:
+        """Generate a fresh, unique LangGraph checkpoint thread id for a new run."""
+        return new_id("thread")
+
+    def _ensure_registered(self) -> UUID:
+        """Ensure the `cmir_extractor` agent row exists for this prompt version and return its id."""
+        return self._agent_registry.ensure_registered(
+            agent_code=_AGENT_CODE,
+            prompt_version=_PROMPT_VERSION,
+            system_prompt=_SYSTEM_PROMPT,
+            agent_name=_AGENT_NAME,
+            domain="cmir",
+        )
+
+    @staticmethod
+    def _email_to_payload(email: Any) -> dict[str, Any]:
+        """Normalize an `EmailMessage` dataclass or plain dict into a dict for graph state."""
+        if isinstance(email, dict):
+            return email
+        return asdict(email)
+
+    @staticmethod
+    def _thread_config(checkpoint_thread_id: str) -> dict[str, Any]:
+        """Build the LangGraph `config` dict that pins a graph call to one checkpoint thread."""
+        return {"configurable": {"thread_id": checkpoint_thread_id}}
+
     def _handle_graph_state(
         self,
         run_id: UUID,
@@ -578,11 +685,13 @@ class CmirRunService:
             reason = payload["reason"]
             stage, status = STAGE_BY_INTERRUPT[reason]
             email_event_id = state.get("email_id")
+            assert email_event_id is not None
 
             if resume_context is None:
                 created = self._workflow_threads.create(
                     stage=stage,
-                    email_event_id=email_event_id,
+                    subject_type=WorkflowThreadSubjectType.EMAIL_EVENT,
+                    subject_id=email_event_id,
                     status=status,
                     current_node=NODE_BY_INTERRUPT[reason],
                     metadata={
@@ -699,13 +808,24 @@ class CmirRunService:
             )
         return self.get_stage(workflow_thread_id)
 
-    def _require_open_pending(self, thread_id: UUID, interrupt_type: str) -> dict[str, Any]:
-        """Return the thread's open `human_action` row, or raise if it isn't waiting on `interrupt_type`."""
-        pending = self._human_actions.get_open_for_thread(thread_id)
-        if pending is None or pending["interrupt_type"] != interrupt_type:
-            actual = None if pending is None else pending["interrupt_type"]
-            raise self._thread_not_waiting(thread_id, interrupt_type, actual)
-        return pending
+    @staticmethod
+    def _thread_not_found(thread_id: UUID) -> NotFoundError:
+        """Build the `NotFoundError` raised for an unknown `thread_id`."""
+        return NotFoundError(
+            code="THREAD_NOT_FOUND",
+            message="Unknown thread_id.",
+            details={"thread_id": str(thread_id)},
+        )
+
+    def _validate_fields(self, fields: dict[str, Any]) -> None:
+        """Raise `ValidationError` if `fields` contains a key outside `EDITABLE_FIELDS`."""
+        invalid_fields = sorted(set(fields) - EDITABLE_FIELDS)
+        if invalid_fields:
+            raise ValidationError(
+                code="VALIDATION_ERROR",
+                message="Bad field name.",
+                details={"invalid_fields": invalid_fields},
+            )
 
     def _ensure_current(self, thread_id: UUID, expected_updated_at: str) -> dict[str, Any]:
         """Return the thread's current stage, or raise `ConflictError` if it has moved since `expected_updated_at`."""
@@ -718,15 +838,26 @@ class CmirRunService:
             )
         return stage
 
-    def _validate_fields(self, fields: dict[str, Any]) -> None:
-        """Raise `ValidationError` if `fields` contains a key outside `EDITABLE_FIELDS`."""
-        invalid_fields = sorted(set(fields) - EDITABLE_FIELDS)
-        if invalid_fields:
-            raise ValidationError(
-                code="VALIDATION_ERROR",
-                message="Bad field name.",
-                details={"invalid_fields": invalid_fields},
-            )
+    @staticmethod
+    def _thread_not_waiting(
+        thread_id: UUID,
+        expected: str,
+        actual: str | None,
+    ) -> ConflictError:
+        """Build the `ConflictError` raised when a resume API is called against a thread not paused on that interrupt."""
+        return ConflictError(
+            code="THREAD_NOT_WAITING",
+            message="Resume API called while thread is not paused for that action.",
+            details={"thread_id": str(thread_id), "expected": expected, "actual": actual},
+        )
+
+    def _require_open_pending(self, thread_id: UUID, interrupt_type: str) -> dict[str, Any]:
+        """Return the thread's open `human_action` row, or raise if it isn't waiting on `interrupt_type`."""
+        pending = self._human_actions.get_open_for_thread(thread_id)
+        if pending is None or pending["interrupt_type"] != interrupt_type:
+            actual = None if pending is None else pending["interrupt_type"]
+            raise self._thread_not_waiting(thread_id, interrupt_type, actual)
+        return pending
 
     @staticmethod
     def _checkpoint_thread_id(stage: dict[str, Any]) -> str:
@@ -739,117 +870,6 @@ class CmirRunService:
                 details={"thread_id": str(stage["id"])},
             )
         return checkpoint_thread_id
-
-    @staticmethod
-    def _agent_run_id(stage: dict[str, Any]) -> UUID:
-        """Read the originating agent run id off a stage's metadata, falling back to the thread's own id."""
-        agent_run_id = (stage["metadata_json"] or {}).get("agent_run_id")
-        return UUID(agent_run_id) if agent_run_id else stage["id"]
-
-    @staticmethod
-    def _thread_config(checkpoint_thread_id: str) -> dict[str, Any]:
-        """Build the LangGraph `config` dict that pins a graph call to one checkpoint thread."""
-        return {"configurable": {"thread_id": checkpoint_thread_id}}
-
-    @staticmethod
-    def _email_to_payload(email: Any) -> dict[str, Any]:
-        """Normalize an `EmailMessage` dataclass or plain dict into a dict for graph state."""
-        if isinstance(email, dict):
-            return email
-        return asdict(email)
-
-    @staticmethod
-    def _email_from_payload(payload: dict[str, Any], *, fallback_imap_id: str | None = None) -> EmailMessage:
-        """Build an `EmailMessage` from a queued Service Bus payload.
-
-        `imap_id` is resolved from whichever of `imap_id`/`source_imap_id`/
-        `email_id` is present, falling back to `fallback_imap_id`, since the
-        Service Bus consumer's nested `email` payload doesn't always carry the
-        same key the top-level request does.
-        """
-        # email_id is a required top-level field of the request; the nested copy
-        # inside `email` is a convenience the Service Bus consumer adds, so fall
-        # back to the authoritative value rather than KeyError-ing on its absence.
-        imap_id = (
-            payload.get("imap_id")
-            or payload.get("source_imap_id")
-            or payload.get("email_id")
-            or fallback_imap_id
-        )
-        if imap_id is None:
-            raise ValidationError(
-                code="VALIDATION_ERROR",
-                message="Queued email payload must include imap_id, source_imap_id, or email_id.",
-            )
-        return EmailMessage(
-            imap_id=str(imap_id),
-            sender=payload["sender"],
-            subject=payload["subject"],
-            body=payload.get("body") or payload.get("raw_content") or "",
-            source_message_id=payload.get("source_message_id"),
-            mark_read=bool(payload.get("mark_read", True)),
-        )
-
-    @staticmethod
-    def _already_processed_summary(batch_id: str, email_id: Any) -> dict[str, Any]:
-        """Build the summary row returned for an email whose queue state is already 'processed'."""
-        return {
-            "batch_id": batch_id,
-            "agent_run_id": None,
-            "thread_id": None,
-            "email_id": str(email_id),
-            "stage": "ALREADY_PROCESSED",
-            "status": "already_processed",
-            "current_node": None,
-            "pending_action_id": None,
-            "updated_at": None,
-        }
-
-    @staticmethod
-    def _queue_summary(batch_id: str, row: dict[str, Any], status: str) -> dict[str, Any]:
-        """Build the per-email summary row `start_email_ingest` returns for one queued email."""
-        stage_by_status = {
-            "new": "NEW",
-            "queued": "QUEUED",
-            "enqueueing": "ENQUEUEING",
-            "processing": "PROCESSING",
-            "processed": "ALREADY_PROCESSED",
-            "failed": "FAILED",
-            "queue_failed": "QUEUE_FAILED",
-        }
-        return {
-            "batch_id": batch_id,
-            "agent_run_id": None,
-            "thread_id": None,
-            "email_id": str(row["id"]),
-            "source_message_id": row.get("source_message_id"),
-            "sender": row.get("sender"),
-            "subject": row.get("subject"),
-            "stage": stage_by_status.get(status, "INGESTED"),
-            "status": status,
-            "current_node": None,
-            "pending_action_id": None,
-            "updated_at": None,
-        }
-
-    @staticmethod
-    def _new_checkpoint_thread_id() -> str:
-        """Generate a fresh, unique LangGraph checkpoint thread id for a new run."""
-        return f"thread_{uuid4().hex[:12]}"
-
-    @staticmethod
-    def _snapshot_state(state: dict[str, Any]) -> dict[str, Any]:
-        """Strip the LangGraph interrupt marker out of graph state before persisting it as a snapshot."""
-        return {key: value for key, value in state.items() if key != INTERRUPT_KEY}
-
-    @staticmethod
-    def _thread_not_found(thread_id: UUID) -> NotFoundError:
-        """Build the `NotFoundError` raised for an unknown `thread_id`."""
-        return NotFoundError(
-            code="THREAD_NOT_FOUND",
-            message="Unknown thread_id.",
-            details={"thread_id": str(thread_id)},
-        )
 
     @staticmethod
     def _resume_failed(thread_id: UUID, pending_action_id: UUID, exc: Exception) -> ExternalServiceError:
@@ -870,14 +890,12 @@ class CmirRunService:
         )
 
     @staticmethod
-    def _thread_not_waiting(
-        thread_id: UUID,
-        expected: str,
-        actual: str | None,
-    ) -> ConflictError:
-        """Build the `ConflictError` raised when a resume API is called against a thread not paused on that interrupt."""
-        return ConflictError(
-            code="THREAD_NOT_WAITING",
-            message="Resume API called while thread is not paused for that action.",
-            details={"thread_id": str(thread_id), "expected": expected, "actual": actual},
-        )
+    def _agent_run_id(stage: dict[str, Any]) -> UUID:
+        """Read the originating agent run id off a stage's metadata, falling back to the thread's own id."""
+        agent_run_id = (stage["metadata_json"] or {}).get("agent_run_id")
+        return UUID(agent_run_id) if agent_run_id else stage["id"]
+
+    @staticmethod
+    def _snapshot_state(state: dict[str, Any]) -> dict[str, Any]:
+        """Strip the LangGraph interrupt marker out of graph state before persisting it as a snapshot."""
+        return {key: value for key, value in state.items() if key != INTERRUPT_KEY}
