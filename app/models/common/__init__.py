@@ -15,6 +15,7 @@ from app.models.common.plant import Plant, StorageLocation, Warehouse
 from app.models.common.production import ProductionOrder, ProductionSchedule
 from app.models.common.purchase_order import PurchaseOrder, PurchaseOrderLine
 from app.models.common.retailer import Retailer
+from app.models.common.retailer_agreement import RetailerAgreement
 from app.models.common.sku import Sku
 
 __all__ = [
@@ -33,6 +34,7 @@ __all__ = [
     "PurchaseOrder",
     "PurchaseOrderLine",
     "Retailer",
+    "RetailerAgreement",
     "RetailerLocation",
     "Shipment",
     "Sku",

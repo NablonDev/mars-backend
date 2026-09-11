@@ -35,9 +35,25 @@ from app.schemas.penalties.projections import (
     PenaltyProjectionSummaryStatusResponse,
     ViolationResponse,
 )
+from app.schemas.penalties.rule_extraction import (
+    ContractCreateRequest,
+    ContractResponse,
+    ExtractedPenaltyRuleAttributeResponse,
+    ExtractedPenaltyRuleResponse,
+    ExtractedPenaltyRuleReviewRequest,
+    ExtractionStartResponse,
+    RulePublicationOutcomeResponse,
+    RulePublicationResultResponse,
+)
 from app.schemas.penalties.rules import PenaltyRuleRequest, PenaltyRuleResponse, PenaltyRuleTierSchema
 
 __all__ = [
+    "ContractCreateRequest",
+    "ContractResponse",
+    "ExtractedPenaltyRuleAttributeResponse",
+    "ExtractedPenaltyRuleResponse",
+    "ExtractedPenaltyRuleReviewRequest",
+    "ExtractionStartResponse",
     "JobItemListResponse",
     "JobItemResponse",
     "JobRunRequest",
@@ -61,6 +77,8 @@ __all__ = [
     "PenaltyRuleRequest",
     "PenaltyRuleResponse",
     "PenaltyRuleTierSchema",
+    "RulePublicationOutcomeResponse",
+    "RulePublicationResultResponse",
     "ScenarioDayResult",
     "ScenarioSummary",
     "SeedDataResponse",

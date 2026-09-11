@@ -14,12 +14,12 @@ from app.core.logging import configure_logging
 from app.core.middleware import AccessLogMiddleware, RequestIdMiddleware
 from app.db.session import Database
 from app.queue.factory import build_job_queue
-from app.services.cmir.run_service import CmirRunService
+from app.services.cmir.service import CmirService
 from app.services.po_validation.service import PoValidationService
 
 
 def create_app(
-    service: CmirRunService | None = None,
+    service: CmirService | None = None,
     po_service: PoValidationService | None = None,
     settings: Settings | None = None,
 ) -> FastAPI:

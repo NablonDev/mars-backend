@@ -1,5 +1,12 @@
 """Orchestrates the dispute lifecycle: open, analyze, resolve or override, and read.
 
+Entry points:
+    open_dispute (POST /api/v1/penalties/disputes)
+    list_for_purchase_order (GET /api/v1/penalties/disputes)
+    get (GET /api/v1/penalties/disputes/{dispute_id})
+    analyze (POST /api/v1/penalties/disputes/{dispute_id}/analyze)
+    resolve (POST /api/v1/penalties/disputes/{dispute_id}/resolve)
+
 `analyze()` is synchronous, with no LangGraph and no job queue, per a locked
 design decision: a human never blocks on approval before a verdict is written,
 and resolves or overrides it afterward through a plain API call. The shape

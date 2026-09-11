@@ -24,6 +24,7 @@ from app.models.common import (
     PurchaseOrder,
     PurchaseOrderLine,
     Retailer,
+    RetailerAgreement,
     RetailerLocation,
     Shipment,
     Sku,
@@ -40,9 +41,12 @@ from app.models.enums import (
     JobTaskType,
     SummaryStatus,
     SummaryType,
+    WorkflowThreadSubjectType,
 )
 from app.models.penalties import (
     ActualPenalty,
+    ExtractedPenaltyRule,
+    ExtractedPenaltyRuleAttribute,
     MitigationInput,
     MitigationOption,
     PenaltyDispute,
@@ -52,6 +56,7 @@ from app.models.penalties import (
     PenaltyRule,
     PenaltyRuleTier,
     PenaltySummary,
+    RulePublication,
 )
 from app.models.process import (
     Agent,
@@ -84,6 +89,8 @@ __all__ = [
     "DisputeVerdict",
     "EmailActionLog",
     "EmailEvent",
+    "ExtractedPenaltyRule",
+    "ExtractedPenaltyRuleAttribute",
     "HumanAction",
     "JobItem",
     "JobItemStatus",
@@ -111,7 +118,9 @@ __all__ = [
     "PurchaseOrder",
     "PurchaseOrderLine",
     "Retailer",
+    "RetailerAgreement",
     "RetailerLocation",
+    "RulePublication",
     "Shipment",
     "Sku",
     "StorageLocation",
@@ -121,4 +130,5 @@ __all__ = [
     "Warehouse",
     "WorkflowThread",
     "WorkflowThreadSubject",
+    "WorkflowThreadSubjectType",
 ]

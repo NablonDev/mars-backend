@@ -14,7 +14,14 @@ from app.api.v1 import (
     workflow_threads,
 )
 from app.api.v1.common import delivery_change_requests, fulfillment, master_data, purchase_orders
-from app.api.v1.penalties import actual_penalties, disputes, mitigations, projections, rules
+from app.api.v1.penalties import (
+    actual_penalties,
+    disputes,
+    mitigations,
+    projections,
+    rule_extraction,
+    rules,
+)
 
 router = APIRouter()
 router.include_router(health.router)
@@ -30,6 +37,7 @@ protected_router.include_router(purchase_orders.router)
 protected_router.include_router(fulfillment.router)
 protected_router.include_router(delivery_change_requests.router)
 protected_router.include_router(rules.router)
+protected_router.include_router(rule_extraction.router)
 protected_router.include_router(projections.router)
 protected_router.include_router(mitigations.router)
 protected_router.include_router(actual_penalties.router)

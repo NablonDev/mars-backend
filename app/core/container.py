@@ -5,14 +5,20 @@ from __future__ import annotations
 import logging
 from contextlib import ExitStack
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from functools import partial
+from typing import ClassVar
 
 from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.graph.state import CompiledStateGraph
 
 from app.agents.cmir.graph import build_graph
 from app.agents.cmir.nodes import WorkflowNodes
+from app.agents.penalties.rule_extraction import adapter as rule_extraction_adapter
+from app.agents.penalties.rule_extraction.graph import build_graph as build_rule_extraction_graph
+from app.agents.penalties.rule_extraction.nodes import RuleExtractionNodes
 from app.agents.po_validation.graph import build_po_validation_graph
 from app.agents.po_validation.nodes import PoValidationNodes
+from app.agents.providers.azure_openai import AzureOpenAIChatClient
 from app.core.config import EmailConfig, LLMConfig, ServiceBusConfig, Settings, get_settings
 from app.db.base import LANGGRAPH_SCHEMA
 from app.db.session import Database, checkpoint_dsn
@@ -47,7 +53,7 @@ class Container:
     config: Settings
     email_reader: GmailImapReader
     human_review: CLIHumanReviewPort
-    graph: Any
+    graph: CompiledStateGraph
     agent_registry: AgentRegistryRepository
     agent_runs: AgentRunRepository
     agent_traces: AgentTraceRepository
@@ -57,7 +63,8 @@ class Container:
     cmir_repository: CmirRecordRepository
     action_log_repository: ActionLogRepository
     service_bus_queue: ServiceBusMailQueue
-    po_validation_graph: Any
+    po_validation_graph: CompiledStateGraph
+    rule_extraction_graph: CompiledStateGraph
     purchase_orders: PurchaseOrderRepository
     master_data: MasterDataRepository
     processing_errors: ProcessingErrorRepository
@@ -149,6 +156,30 @@ class Container:
         )
         logger.info("PO Validation graph compiled with PostgreSQL Checkpointer.")
 
+        # Shares the same checkpointer as the other two graphs; its thread ids are
+        # freshly minted per run (see `PenaltyRuleExtractionService._new_checkpoint_thread_id`),
+        # namespaced "thread_rule_extraction_..." so they cannot collide with the
+        # "thread_..."/"thread_po_..." keys those graphs use. Stays in the Container
+        # (unlike `PenaltyRuleExtractionService`, built per-request from
+        # `app/api/dependencies.py` instead) because it is expensive to compile and
+        # shares this one checkpointer; its nodes open their own scoped sessions
+        # against `database` rather than holding one, so they need no repositories
+        # built here.
+        rule_extraction_client = AzureOpenAIChatClient(LLMConfig.from_settings(config))
+        rule_extraction_graph = build_rule_extraction_graph(
+            RuleExtractionNodes(
+                screen=partial(rule_extraction_adapter.screen, rule_extraction_client, database),
+                classify=partial(rule_extraction_adapter.classify, rule_extraction_client, database),
+                extract_facts=partial(
+                    rule_extraction_adapter.extract_facts, rule_extraction_client, database
+                ),
+                database=database,
+            ),
+            checkpointer,
+            agent_trace_repository,
+        )
+        logger.info("Penalty rule extraction graph compiled with PostgreSQL Checkpointer.")
+
         cls._instance = cls(
             config=config,
             email_reader=email_reader,
@@ -164,6 +195,7 @@ class Container:
             action_log_repository=action_log_repository,
             service_bus_queue=service_bus_queue,
             po_validation_graph=po_validation_graph,
+            rule_extraction_graph=rule_extraction_graph,
             purchase_orders=purchase_order_repository,
             master_data=master_data_repository,
             processing_errors=processing_error_repository,
