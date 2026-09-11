@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.core.exceptions import ConflictError, NotFoundError
 from app.models import PurchaseOrder, PurchaseOrderLine
-from app.utils.pagination import parse_cursor
+from app.utils.pagination import next_cursor_from_page, parse_cursor
 
 
 def describe_no_open_orders(counts: dict[str, int]) -> str | None:
@@ -276,7 +276,7 @@ class PurchaseOrderRepository:
 
         rows = self._session.scalars(stmt).all()
         items = [_purchase_order_line_to_dict(r) for r in rows]
-        next_cursor = items[-1]["updated_at"].isoformat() if len(items) == limit and items else None
+        next_cursor = next_cursor_from_page(items, limit)
         return items, next_cursor
 
     def list_open_orders_for_material_plant(

@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import Agent, AgentRun, AgentTrace
-from app.utils.pagination import parse_cursor
+from app.utils.pagination import next_cursor_from_page, parse_cursor
 
 
 def _agent_to_dict(row: Agent) -> dict:
@@ -202,7 +202,7 @@ class AgentRunRepository:
 
         rows = self._session.scalars(stmt).all()
         items = [_agent_run_to_dict(r) for r in rows]
-        next_cursor = items[-1]["updated_at"].isoformat() if len(items) == limit and items else None
+        next_cursor = next_cursor_from_page(items, limit)
         return items, next_cursor
 
 

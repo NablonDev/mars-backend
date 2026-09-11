@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from collections.abc import Callable
 from datetime import date
-from typing import Any
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
@@ -17,6 +15,8 @@ from app.agents.penalties.projection.schema import PenaltyProjectionSummaryOutpu
 from app.agents.providers.azure_openai import AzureOpenAIChatClient
 from app.core.exceptions import ExternalServiceError
 from app.repositories.process.agent_registry import AgentRegistryRepository
+from app.utils.heartbeat import invoke_heartbeat
+from app.utils.json_helpers import json_default, wrap_data
 
 logger = logging.getLogger(__name__)
 
@@ -30,19 +30,6 @@ _UPSTREAM_FAILURE_CODES: dict[str, str] = {
     "projection": "PENALTY_PROJECTION_SUMMARY_UPSTREAM_FAILED",
     "mitigation": "PENALTY_MITIGATION_SUMMARY_UPSTREAM_FAILED",
 }
-
-
-def _json_default(value: Any) -> Any:
-    """Serialize a date as ISO 8601; fall back to str() for anything else json.dumps can't handle."""
-    if isinstance(value, date):
-        return value.isoformat()
-    return str(value)
-
-
-def _wrap_data(payload: dict | list) -> str:
-    """Serialize payload and wrap it in <DATA> tags marking it as untrusted, non-instructional content."""
-    body = json.dumps(payload, default=_json_default, sort_keys=True)
-    return f"<DATA>\n{body}\n</DATA>"
 
 
 class PenaltyProjectionAgent:
@@ -85,13 +72,13 @@ class PenaltyProjectionAgent:
         active_agent = self._active_agent_row()
         messages: list[BaseMessage] = [
             SystemMessage(content=active_agent["system_prompt"]),
-            HumanMessage(content=_wrap_data(context.model_dump(mode="json"))),
+            HumanMessage(content=wrap_data(context.model_dump(mode="json"), default=json_default)),
         ]
 
         try:
             for round_number in range(1, MAX_TOOL_ROUNDS):
                 # Heartbeat between LLM calls keeps long-running workers alive.
-                self._invoke_heartbeat(heartbeat, order_id)
+                invoke_heartbeat(heartbeat, order_id, logger)
 
                 logger.info(
                     "Calling LLM for order_id=%s round=%s/%s",
@@ -123,7 +110,7 @@ class PenaltyProjectionAgent:
                     result = tool.invoke(tool_call["args"])
                     messages.append(
                         ToolMessage(
-                            content=_wrap_data(result),
+                            content=wrap_data(result, default=json_default),
                             tool_call_id=tool_call["id"],
                         )
                     )
@@ -186,16 +173,3 @@ class PenaltyProjectionAgent:
                 },
             )
         return active
-
-    @staticmethod
-    def _invoke_heartbeat(heartbeat: Callable[[], None] | None, order_id: str) -> None:
-        """Best-effort heartbeat; callback failures never abort generation."""
-        if heartbeat is None:
-            return
-        try:
-            heartbeat()
-        except Exception:
-            logger.exception(
-                "Summary heartbeat callback failed for order_id=%s; continuing generation",
-                order_id,
-            )
