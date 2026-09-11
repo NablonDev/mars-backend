@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
-from pydantic import SecretStr
 
+from app.agents.providers.azure_openai import AzureOpenAIChatClient
 from app.core.config import LLMConfig
 from app.core.exceptions import ExternalServiceError
 from app.repositories.process.agent_registry import AgentRegistryRepository
@@ -59,14 +58,7 @@ class AzureOpenAICmirExtractor:
     """Extracts structured CMIR fields from an inbound email via Azure OpenAI structured output."""
 
     def __init__(self, config: LLMConfig, agent_registry: AgentRegistryRepository) -> None:
-        self._llm = ChatOpenAI(
-            base_url=config.endpoint,
-            api_key=SecretStr(config.api_key),
-            model=config.deployment,
-            temperature=config.temperature,
-            timeout=config.timeout_seconds,
-            max_retries=config.max_retries,
-        ).with_structured_output(Cmir)
+        self._client = AzureOpenAIChatClient(config)
         self._agent_registry = agent_registry
 
     def extract(self, body: str) -> Cmir:
@@ -89,5 +81,4 @@ class AzureOpenAICmirExtractor:
             SystemMessage(content=active["system_prompt"]),
             HumanMessage(content=_wrap_email_body(body)),
         ]
-        result = self._llm.invoke(messages)
-        return result if isinstance(result, Cmir) else Cmir(**result)
+        return self._client.invoke_structured(messages, Cmir)
