@@ -1264,9 +1264,9 @@ ruff format app/ scripts/ tests/ alembic/
 
 ## 16. Penalty rule extraction
 
-Turns an uploaded retailer contract into reviewed `penalty_rule` rows.
+Turns an uploaded retailer agreement into reviewed `penalty_rule` rows.
 Full design: `docs/architecture/penalty-rule-extraction.md`. Endpoint
-reference: `docs/API.md` "Contracts and rule extraction".
+reference: `docs/API.md` "Retailer agreements and rule extraction".
 `scripts/seed/seed_agents.py` now also seeds the `penalty_rule_extractor`
 run-owner row and the three per-stage prompt rows the adapter reads at
 inference time (`penalty_rule_screening`, `penalty_rule_classification`,
@@ -1276,29 +1276,29 @@ agents it already seeded: no separate seeding step needed beyond §6.
 The lifecycle, end to end:
 
 ```bash
-# 1. Upload the contract (idempotent: re-posting the same markdown_text
+# 1. Upload the retailer agreement (idempotent: re-posting the same markdown_text
 #    returns the existing row, 200, instead of a duplicate):
-curl -X POST http://127.0.0.1:8000/api/v1/penalties/contracts \
+curl -X POST http://127.0.0.1:8000/api/v1/penalties/retailer-agreements \
   -H "X-Internal-Api-Key: $APP_INTERNAL_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"retailer_id": "<retailer_id>", "contract_code": "CT-TGT-2026", "title": "Target Master Agreement 2026", "markdown_text": "..."}'
 
 # 2. Start extraction (returns agent_run_id and workflow_thread_id; runs
 #    the LangGraph pipeline through to a human-review interrupt):
-curl -X POST http://127.0.0.1:8000/api/v1/penalties/contracts/<contract_id>/extract \
+curl -X POST http://127.0.0.1:8000/api/v1/penalties/retailer-agreements/<retailer_agreement_id>/extract \
   -H "X-Internal-Api-Key: $APP_INTERNAL_API_KEY"
 
 # 3. List what is pending review:
-curl "http://127.0.0.1:8000/api/v1/penalties/contracts/<contract_id>/extracted-rules?status=PENDING_REVIEW" \
+curl "http://127.0.0.1:8000/api/v1/penalties/retailer-agreements/<retailer_agreement_id>/extracted-rules?status=PENDING_REVIEW" \
   -H "X-Internal-Api-Key: $APP_INTERNAL_API_KEY"
 
 # 4. Approve or reject each candidate (<extracted_rule_id> from step 3):
-curl -X POST http://127.0.0.1:8000/api/v1/penalties/contracts/<contract_id>/extracted-rules/<extracted_rule_id>/review \
+curl -X POST http://127.0.0.1:8000/api/v1/penalties/retailer-agreements/<retailer_agreement_id>/extracted-rules/<extracted_rule_id>/review \
   -H "X-Internal-Api-Key: $APP_INTERNAL_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"status": "APPROVED"}'
 
-curl -X POST http://127.0.0.1:8000/api/v1/penalties/contracts/<contract_id>/extracted-rules/<extracted_rule_id>/review \
+curl -X POST http://127.0.0.1:8000/api/v1/penalties/retailer-agreements/<retailer_agreement_id>/extracted-rules/<extracted_rule_id>/review \
   -H "X-Internal-Api-Key: $APP_INTERNAL_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"status": "REJECTED", "review_notes": "Not a PO shortage/delay clause."}'
@@ -1313,12 +1313,12 @@ curl -X POST http://127.0.0.1:8000/api/v1/workflow-threads/<workflow_thread_id>/
   -d '{"decision_type": "RULE_REVIEW_RESUME", "actor": "reviewer@company.com", "expected_updated_at": "<updated_at>"}'
 
 # 6. Publish the approved rules into live penalty_rule rows:
-curl -X POST http://127.0.0.1:8000/api/v1/penalties/contracts/<contract_id>/publish \
+curl -X POST http://127.0.0.1:8000/api/v1/penalties/retailer-agreements/<retailer_agreement_id>/publish \
   -H "X-Internal-Api-Key: $APP_INTERNAL_API_KEY"
 
 # 7. Read the publication audit (every outcome ever recorded, plus a
 #    rejection-reason histogram):
-curl http://127.0.0.1:8000/api/v1/penalties/contracts/<contract_id>/publications \
+curl http://127.0.0.1:8000/api/v1/penalties/retailer-agreements/<retailer_agreement_id>/publications \
   -H "X-Internal-Api-Key: $APP_INTERNAL_API_KEY"
 ```
 
@@ -1356,10 +1356,11 @@ with a `reason_code`. The common ones and what to do about them:
 | `EXTERNAL_FIGURE` | The value lives outside the contract (an index, a separately negotiated rate) | Expected; enter the rule by hand once the external figure is known |
 | `PERCENT_OF_INVOICE` | No invoice value in the projection snapshot | Needs an engine change, not an operator fix; the fact the rule needs isn't tracked yet |
 | `MIXED_CURRENCY` | The contract prices in more than one currency | The engine prices one currency per rule; split the contract's rules by currency and enter the non-primary ones by hand |
+| `ALREADY_PUBLISHED` | A `penalty_rule` with this rule's deterministic `rule_code` already exists | Expected on a repeat publish of the same run; no action needed |
 
 `reason_code` is `null` on a `PUBLISHED` outcome. The
 `rejection_reason_histogram` on `GET .../publications` counts each code
-across every publication run recorded for the contract, so a large
+across every publication run recorded for the retailer agreement, so a large
 `NOT_READY` or `UNSUPPORTED_CALC_TYPE` count is a signal to look at the
 extraction pipeline's prompts or the engine's coverage, not at any one
 rule.

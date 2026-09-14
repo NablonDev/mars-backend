@@ -104,7 +104,7 @@ def repos(db_session):
     Phase 3, and still keyed on deleted models today)."""
     return SimpleNamespace(
         master_data=MasterDataRepository(db_session),
-        contracts=RetailerAgreementRepository(db_session),
+        retailer_agreements=RetailerAgreementRepository(db_session),
         purchase_orders=PurchaseOrderRepository(db_session),
         fulfillment=FulfillmentRepository(db_session),
         penalty_rules=PenaltyRuleRepository(db_session),

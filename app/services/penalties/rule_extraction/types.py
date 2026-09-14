@@ -4,7 +4,7 @@
 and `penalties.extracted_penalty_rule_attribute` as the publisher receives them.
 `PublishedRule`/`PublishedTier` are its accepted output, shaped for an insert into
 `penalties.penalty_rule` and `penalties.penalty_rule_tier`. `RejectedPublication` is its
-rejected output, one of the fifteen `RejectionReason` codes below.
+rejected output, one of the sixteen `RejectionReason` codes below.
 """
 
 from dataclasses import dataclass, field
@@ -38,7 +38,7 @@ class StagedRule:
     """An approved `penalties.extracted_penalty_rule` row plus its facts, as the publisher receives it."""
 
     id: str
-    contract_id: str
+    retailer_agreement_id: str
     clause_fingerprint: str
     penalty_category: str
     calc_type: str
@@ -101,6 +101,7 @@ class RejectionReason(str, Enum):
     TIER_BAND_GAP = "TIER_BAND_GAP"
     EXTERNAL_FIGURE = "EXTERNAL_FIGURE"
     MIXED_CURRENCY = "MIXED_CURRENCY"
+    ALREADY_PUBLISHED = "ALREADY_PUBLISHED"
 
 
 @dataclass

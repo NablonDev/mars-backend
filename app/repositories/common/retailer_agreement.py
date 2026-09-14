@@ -70,6 +70,13 @@ class RetailerAgreementRepository:
         row = self._session.get(RetailerAgreement, retailer_agreement_id)
         return _retailer_agreement_to_dict(row) if row is not None else None
 
+    def list_all(self) -> list[dict]:
+        """Return every retailer agreement, newest first."""
+        rows = self._session.scalars(
+            select(RetailerAgreement).order_by(RetailerAgreement.created_at.desc())
+        ).all()
+        return [_retailer_agreement_to_dict(r) for r in rows]
+
     def list_for_retailer(self, retailer_id: UUID) -> list[dict]:
         """Return every retailer agreement for one retailer."""
         rows = self._session.scalars(

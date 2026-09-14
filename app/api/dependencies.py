@@ -221,7 +221,7 @@ def get_penalty_job_run_context_repository(
     return PenaltyJobRunContextRepository(session)
 
 
-def get_contract_repository(session: Session = Depends(get_session)) -> RetailerAgreementRepository:
+def get_retailer_agreement_repository(session: Session = Depends(get_session)) -> RetailerAgreementRepository:
     """Provide a retailer agreement repository for reading and writing retailer agreement documents."""
     return RetailerAgreementRepository(session)
 
@@ -452,7 +452,7 @@ def get_mitigation_summary_service(
 
 def get_penalty_rule_extraction_service(
     session: Session = Depends(get_session),
-    contracts: RetailerAgreementRepository = Depends(get_contract_repository),
+    retailer_agreements: RetailerAgreementRepository = Depends(get_retailer_agreement_repository),
     extracted_rules: ExtractedPenaltyRuleRepository = Depends(get_extracted_penalty_rule_repository),
     publications: RulePublicationRepository = Depends(get_rule_publication_repository),
     rules: PenaltyRuleRepository = Depends(get_penalty_rule_repository),
@@ -469,7 +469,7 @@ def get_penalty_rule_extraction_service(
     is an ordinary per-request repository, like every other penalties provider here.
     """
     return PenaltyRuleExtractionService(
-        contracts=contracts,
+        retailer_agreements=retailer_agreements,
         extracted_rules=extracted_rules,
         publications=publications,
         rules=rules,

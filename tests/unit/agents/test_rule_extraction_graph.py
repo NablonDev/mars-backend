@@ -30,8 +30,8 @@ from app.repositories.process.agent_registry import AgentRegistryRepository, Age
 INTERRUPT_KEY = "__interrupt__"
 
 CLAUSE_TEXT = "Retailer may assess a $50 fee per short-shipped case."
-CONTRACT_WITH_CLAUSE = f"## Shortages\n{CLAUSE_TEXT}\n"
-CONTRACT_WITHOUT_CLAUSE = "## Definitions\nThis agreement is between the parties.\n"
+RETAILER_AGREEMENT_WITH_CLAUSE = f"## Shortages\n{CLAUSE_TEXT}\n"
+RETAILER_AGREEMENT_WITHOUT_CLAUSE = "## Definitions\nThis agreement is between the parties.\n"
 
 
 class FakeTraceRepo:
@@ -84,7 +84,7 @@ class FakeLLM:
         )
 
 
-def _make_contract(db_session, sha256: str, markdown_text: str):
+def _make_retailer_agreement(db_session, sha256: str, markdown_text: str):
     retailer_id = MasterDataRepository(db_session).add_retailer(f"R{sha256[:6]}", "Retailer", None, "SUM")[
         "id"
     ]
@@ -101,7 +101,7 @@ def _make_agent_run(db_session, code: str):
     agent_id = AgentRegistryRepository(db_session).ensure_registered(
         agent_code=code,
         prompt_version="v1",
-        system_prompt="Extract penalty clauses from contract markdown.",
+        system_prompt="Extract penalty clauses from retailer agreement markdown.",
         agent_name="Test Rule Extraction",
         domain="penalties",
     )
@@ -124,31 +124,42 @@ def _config(thread_id: str) -> dict:
 
 
 def test_a_run_with_no_candidate_clauses_never_interrupts(database, db_session):
-    contract = _make_contract(db_session, "1" * 64, CONTRACT_WITHOUT_CLAUSE)
+    retailer_agreement = _make_retailer_agreement(db_session, "1" * 64, RETAILER_AGREEMENT_WITHOUT_CLAUSE)
     run_id = _make_agent_run(db_session, "penalty_rule_extractor_1")
     db_session.commit()
 
     graph = _build_graph(database, has_clause=False)
     state = graph.invoke(
-        {"contract_id": contract["id"], "run_id": run_id, "contract_text": CONTRACT_WITHOUT_CLAUSE},
+        {
+            "retailer_agreement_id": retailer_agreement["id"],
+            "run_id": run_id,
+            "retailer_agreement_text": RETAILER_AGREEMENT_WITHOUT_CLAUSE,
+        },
         config=_config("empty-run"),
     )
 
     assert INTERRUPT_KEY not in state
     assert state["applied_rule_ids"] == []
     with database.session() as session:
-        assert ExtractedPenaltyRuleRepository(session).list_for_contract(contract["id"]) == []
+        assert (
+            ExtractedPenaltyRuleRepository(session).list_for_retailer_agreement(retailer_agreement["id"])
+            == []
+        )
 
 
 def test_a_staged_rule_pauses_for_review_and_approval_is_applied_after_resume(database, db_session):
-    contract = _make_contract(db_session, "2" * 64, CONTRACT_WITH_CLAUSE)
+    retailer_agreement = _make_retailer_agreement(db_session, "2" * 64, RETAILER_AGREEMENT_WITH_CLAUSE)
     run_id = _make_agent_run(db_session, "penalty_rule_extractor_2")
     db_session.commit()
 
     graph = _build_graph(database, has_clause=True)
     config = _config("approval-run")
     state = graph.invoke(
-        {"contract_id": contract["id"], "run_id": run_id, "contract_text": CONTRACT_WITH_CLAUSE},
+        {
+            "retailer_agreement_id": retailer_agreement["id"],
+            "run_id": run_id,
+            "retailer_agreement_text": RETAILER_AGREEMENT_WITH_CLAUSE,
+        },
         config=config,
     )
 
@@ -168,14 +179,18 @@ def test_a_staged_rule_pauses_for_review_and_approval_is_applied_after_resume(da
 
 
 def test_a_zero_decision_resume_still_reaches_end(database, db_session):
-    contract = _make_contract(db_session, "3" * 64, CONTRACT_WITH_CLAUSE)
+    retailer_agreement = _make_retailer_agreement(db_session, "3" * 64, RETAILER_AGREEMENT_WITH_CLAUSE)
     run_id = _make_agent_run(db_session, "penalty_rule_extractor_3")
     db_session.commit()
 
     graph = _build_graph(database, has_clause=True)
     config = _config("zero-decision-run")
     state = graph.invoke(
-        {"contract_id": contract["id"], "run_id": run_id, "contract_text": CONTRACT_WITH_CLAUSE},
+        {
+            "retailer_agreement_id": retailer_agreement["id"],
+            "run_id": run_id,
+            "retailer_agreement_text": RETAILER_AGREEMENT_WITH_CLAUSE,
+        },
         config=config,
     )
     assert INTERRUPT_KEY in state
@@ -187,5 +202,7 @@ def test_a_zero_decision_resume_still_reaches_end(database, db_session):
     assert INTERRUPT_KEY not in state
     assert state["applied_rule_ids"] == []
     with database.session() as session:
-        [staged] = ExtractedPenaltyRuleRepository(session).list_for_contract(contract["id"])
+        [staged] = ExtractedPenaltyRuleRepository(session).list_for_retailer_agreement(
+            retailer_agreement["id"]
+        )
         assert staged.status == "PENDING_REVIEW"

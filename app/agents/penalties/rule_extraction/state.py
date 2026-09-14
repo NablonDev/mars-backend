@@ -23,9 +23,9 @@ class RuleExtractionState(TypedDict, total=False):
     `app.agents.cmir.state.GraphState`.
     """
 
-    contract_id: UUID
+    retailer_agreement_id: UUID
     run_id: UUID
-    contract_text: str
+    retailer_agreement_text: str
     screening_units: list[dict[str, Any]]
     screened_candidates: Annotated[list[dict[str, Any]], operator.add]
     candidate_clauses: list[dict[str, Any]]

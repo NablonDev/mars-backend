@@ -19,9 +19,9 @@ class RetailerAgreement(Base, TimestampMixin):
 
     id: Mapped[UUID] = mapped_column(UUID_PK, primary_key=True, default=generate_uuid7)
     retailer_id: Mapped[UUID] = mapped_column(UUID_PK, ForeignKey("retailer.id"))
-    contract_code: Mapped[str] = mapped_column(String(100), unique=True, index=True)
+    contract_code: Mapped[str] = mapped_column(String(100), index=True)
     title: Mapped[str] = mapped_column(String(300))
-    document_sha256: Mapped[str] = mapped_column(CHAR(64), unique=True, index=True)
+    document_sha256: Mapped[str] = mapped_column(CHAR(64), index=True)
     source_uri: Mapped[str | None] = mapped_column(String(500), nullable=True)
     markdown_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     effective_date: Mapped[date | None] = mapped_column(Date, nullable=True)

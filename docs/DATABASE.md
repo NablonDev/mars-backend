@@ -386,7 +386,7 @@ Full `fine`/`fines` -> `penalty`/`penalties` domain rename.
 
 ## Retailer agreement and penalty rule extraction tables
 
-Turns a retailer contract's prose into reviewed `penalty_rule` rows. Full
+Turns a retailer agreement's prose into reviewed `penalty_rule` rows. Full
 design: `docs/architecture/penalty-rule-extraction.md`.
 
 ### `retailer_agreement` (`RetailerAgreement`, `public`)
@@ -394,10 +394,13 @@ The retailer agreement document itself, master data next to `retailer` and
 `sku`. Renamed from `contract` (table, model, repository); its own columns
 (`contract_code`, `document_sha256`, ...) are unchanged. `document_sha256`
 makes re-upload idempotent; `contract_code` is its own unique business key.
-Which extraction run's approved rules are authoritative is not stored on
-this table; `PenaltyRuleExtractionService.publish` derives it as the
-newest `agent_run_id` among the contract's staged
-`extracted_penalty_rule` rows.
+Both are enforced by a partial unique index (`WHERE deleted_at IS NULL`),
+not a plain `UNIQUE` constraint, so a contract can be re-uploaded under the
+same code/hash once its prior row is soft-deleted (see "Migration-only raw
+DDL constructs"). Which extraction run's approved rules are authoritative
+is not stored on this table; `PenaltyRuleExtractionService.publish`
+derives it as the newest `agent_run_id` among the retailer agreement's
+staged `extracted_penalty_rule` rows.
 
 ### `penalties.extracted_penalty_rule` (`ExtractedPenaltyRule`)
 One row per penalty clause found, pending review. `status` moves
@@ -406,16 +409,21 @@ One row per penalty clause found, pending review. `status` moves
 `NOT_A_CHARGE`) is set by the extraction pipeline's readiness evaluator,
 and only a `READY`+`APPROVED` row is eligible for publication.
 `po_shortage_flag`/`po_delay_flag` mark whether the clause is in scope for
-this engine (purchase order shortage or lateness) at all.
+this engine (purchase order shortage or lateness) at all. `pricing_readiness`
+and `status` are only ever set by application code (the readiness
+evaluator's closed return set, and `set_review_decision`'s own check),
+and `confidence` by the extraction agent's Pydantic schema, so none of
+the three carries a DB-level CHECK.
 
 `UNIQUE (agent_run_id, clause_fingerprint)`
 (`uq_extracted_penalty_rule_run_fingerprint`) is what stops a
-re-extraction doubling every rule: a second run over the same contract
-inserts its own rows under its own `agent_run_id`, and publication only
-ever considers rules approved under the contract's newest run.
+re-extraction doubling every rule: a second run over the same retailer
+agreement inserts its own rows under its own `agent_run_id`, and
+publication only ever considers rules approved under the retailer
+agreement's newest run.
 
-`ix_extracted_penalty_rule_contract_status` is a partial index
-(`(contract_id, status) WHERE deleted_at IS NULL`), raw DDL in the
+`ix_extracted_penalty_rule_retailer_agreement_status` is a partial index
+(`(retailer_agreement_id, status) WHERE deleted_at IS NULL`), raw DDL in the
 migration for the same `postgresql_where=`-dropped-on-SQLite reason as the
 other partial indexes below (see "Migration-only raw DDL constructs").
 
@@ -435,13 +443,25 @@ float that can drift by a cent at the bottom of a tier ladder, while a
 field the publisher reads to decide correctness needs a type and a
 constraint the database enforces, not a `.get()` on a document. When
 something in `extra` starts driving a decision, it graduates to a typed
-column with a migration, never the other direction.
+column with a migration, never the other direction. Every field this
+table's `attribute_role` gates (`basis_type`, `cap_scope`, `value_max`,
+`metric_denominator`, `currency_code`, `value`/`value_max` for a `PRESENT`
+`value_status`) is re-validated by `PenaltyFact`'s Pydantic model
+(`app/agents/penalties/rule_extraction/schema.py`) before a row is ever
+built, so none of it carries a DB-level CHECK either.
 
 ### `penalties.rule_publication` (`RulePublication`)
 Append-only audit row for every publication outcome, `PUBLISHED` or
 `REJECTED`, with a `reason_code` for the latter (see `docs/RUNBOOK.md` for
 the code list and what an operator should do about each). No
-`updated_at`/`deleted_at`, so it does not use `TimestampMixin`.
+`updated_at`/`deleted_at`, so it does not use `TimestampMixin`. `outcome`
+is always one of the two literal strings `RulePublicationRepository.record`
+passes in, never user input, so it carries no DB-level CHECK.
+`PenaltyRuleExtractionService.publish` guards against re-publishing an
+already-published rule itself (its deterministic `rule_code` would
+otherwise collide on `penalty_rule`'s unique constraint): it checks
+`PenaltyRuleRepository.get_by_rule_code` before inserting and records an
+`ALREADY_PUBLISHED`-reasoned rejection instead of letting the insert fail.
 
 ### `penalties.penalty_rule` gains three columns
 `basis_type` (nullable), `applies_per` (nullable), and `currency_code`
@@ -466,7 +486,7 @@ established it -- and is carried forward unchanged.
 
 ## Migration-only raw DDL constructs
 
-Six constructs across the migration history cannot be expressed as an
+Eight constructs across the migration history cannot be expressed as an
 ORM model declaration, and exist only as raw DDL inside their migration:
 
 1. **`cmir_job_item_context`'s `CHECK (num_nonnulls(email_event_id,
@@ -492,25 +512,33 @@ ORM model declaration, and exist only as raw DDL inside their migration:
 5. **`langgraph`'s `CREATE SCHEMA`** (`a5b39c6e2181_initial_langgraph_schema.py`)
    -- Postgres-only, no SQLite equivalent, no-op there.
 6. **`extracted_penalty_rule`'s partial index**
-   (`ix_extracted_penalty_rule_contract_status`,
+   (`ix_extracted_penalty_rule_retailer_agreement_status`,
    `1d92b65b8eb4_penalty_rule_extraction_schema_squash.py`), same
    `postgresql_where=`-dropped-on-SQLite reason as #2 and #3.
+7. **`retailer_agreement`'s partial unique index**
+   (`uq_retailer_agreement_contract_code`, same migration) -- lets a
+   contract be re-uploaded under the same code after its prior row is
+   soft-deleted; same `postgresql_where=`-dropped-on-SQLite reason as #2,
+   #3, and #6.
+8. **`retailer_agreement`'s partial unique index**
+   (`uq_retailer_agreement_document_sha256`, same migration) -- same
+   reasoning, keyed on the document hash instead of the contract code.
 
-All six are dialect-branched (schema-qualified on Postgres, unqualified
+All eight are dialect-branched (schema-qualified on Postgres, unqualified
 or skipped on SQLite) so `tests/unit/db/test_migration_parity.py`'s
 SQLite `alembic upgrade head` run still exercises the surrounding
 migration cleanly. That test itself only diffs table/column *names* --
 never indexes, constraints, types, or nullability -- so it cannot catch a
-divergence in any of the six constructs above; they're verified only
+divergence in any of the eight constructs above; they're verified only
 against a real Postgres database.
 
 **`alembic check` / `alembic revision --autogenerate` will always flag
-constructs #1-4 and #6 as phantom drops.** Autogenerate compares reflected
+constructs #1-4 and #6-8 as phantom drops.** Autogenerate compares reflected
 Postgres DDL against `Base.metadata`; none of a `postgresql_where=`
 partial index or a raw `ALTER TABLE ... ADD CONSTRAINT CHECK
 (num_nonnulls(...))` is represented in the ORM models, so every future
 `alembic check`/autogenerate run against a freshly-migrated database will
-report all five as present-in-DB-but-absent-from-metadata and try to emit
+report all seven as present-in-DB-but-absent-from-metadata and try to emit
 a matching `op.drop_index(...)`/`op.drop_constraint(...)` in `upgrade()`.
 This is expected, not a regression -- hand-strip any such line before
 committing a new migration, the same way `374aa902b053` and
