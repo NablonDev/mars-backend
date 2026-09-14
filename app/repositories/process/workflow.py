@@ -466,7 +466,13 @@ class ProcessingErrorRepository:
         node_name: str | None = None,
         raw_error_detail: dict[str, Any] | None = None,
     ) -> dict:
-        """Record one processing error, optionally scoped to a job item, agent run, and/or PO line."""
+        """Record one processing error, optionally scoped to a job item, agent run, and/or PO line.
+
+        Wrapped in its own savepoint, not the bare session: this repository is bound to
+        the same shared process-lifetime session as `AgentTraceRepository` in some
+        callers (`app/core/container.py`), so a write failure here must roll back only
+        this insert, not a different concurrent run's uncommitted work.
+        """
         row = ProcessingError(
             job_item_id=job_item_id,
             agent_run_id=agent_run_id,
@@ -477,8 +483,9 @@ class ProcessingErrorRepository:
             node_name=node_name,
             raw_error_detail=raw_error_detail,
         )
-        self._session.add(row)
-        self._session.flush()
+        with self._session.begin_nested():
+            self._session.add(row)
+            self._session.flush()
         return _processing_error_to_dict(row)
 
     def list_for_job_item(self, job_item_id: UUID) -> list[dict]:

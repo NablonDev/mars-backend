@@ -10,6 +10,7 @@ from langgraph.errors import GraphInterrupt
 
 from app.repositories.process.agent_registry import AgentTraceRepository
 from app.utils.clock import utc_now
+from app.utils.sanitize import strip_nul_bytes
 
 # Deliberately Dict[str, Any], not the CMIR-specific GraphState: LangGraph reads a
 # wrapped node function's parameter annotation to decide which state keys to pass
@@ -57,7 +58,7 @@ def traced(node_name: str, fn: NodeFn, trace_repo: AgentTraceRepository) -> Node
                     started_at,
                     utc_now(),
                     duration_ms,
-                    input_snapshot=state,
+                    input_snapshot=strip_nul_bytes(state),
                     output_snapshot=None,
                     error=None,
                 )
@@ -72,9 +73,9 @@ def traced(node_name: str, fn: NodeFn, trace_repo: AgentTraceRepository) -> Node
                     started_at,
                     utc_now(),
                     duration_ms,
-                    input_snapshot=state,
+                    input_snapshot=strip_nul_bytes(state),
                     output_snapshot=None,
-                    error=str(exc),
+                    error=strip_nul_bytes(str(exc)),
                 )
             raise
         else:
@@ -87,8 +88,8 @@ def traced(node_name: str, fn: NodeFn, trace_repo: AgentTraceRepository) -> Node
                     started_at,
                     utc_now(),
                     duration_ms,
-                    input_snapshot=state,
-                    output_snapshot=result,
+                    input_snapshot=strip_nul_bytes(state),
+                    output_snapshot=strip_nul_bytes(result),
                     error=None,
                 )
             return result

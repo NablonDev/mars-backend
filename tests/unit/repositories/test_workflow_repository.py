@@ -39,16 +39,16 @@ def _seed_email_event(repos) -> str:
     return repos.emails.save(sender="customer@example.com", subject="Subj", raw_content="body")
 
 
-def _seed_contract(repos):
+def _seed_retailer_agreement(repos):
     retailer = repos.master_data.add_retailer("RET-WF-CONTRACT", "Retailer", None, "SUM")
-    contract = repos.contracts.add_retailer_agreement(
+    retailer_agreement = repos.retailer_agreements.add_retailer_agreement(
         retailer_id=retailer["id"],
         contract_code="CONTRACT-WF-1",
         title="Example Agreement",
         document_sha256="a" * 64,
         markdown_text="# Agreement",
     )
-    return contract["id"]
+    return retailer_agreement["id"]
 
 
 def test_create_creates_thread_and_subject_for_email_event(repos):
@@ -67,31 +67,35 @@ def test_create_creates_thread_and_subject_for_email_event(repos):
     assert thread["metadata_json"]["cmir"]["brand"] == "Brand A"
 
 
-def test_create_creates_thread_and_subject_for_contract(repos):
-    contract_id = _seed_contract(repos)
+def test_create_creates_thread_and_subject_for_retailer_agreement(repos):
+    retailer_agreement_id = _seed_retailer_agreement(repos)
 
     thread = repos.workflow_threads.create(
         stage="AWAITING_RULE_REVIEW",
         subject_type=WorkflowThreadSubjectType.RETAILER_AGREEMENT,
-        subject_id=contract_id,
+        subject_id=retailer_agreement_id,
     )
 
     assert thread["subject_type"] == WorkflowThreadSubjectType.RETAILER_AGREEMENT
-    assert thread["subject_id"] == contract_id
+    assert thread["subject_id"] == retailer_agreement_id
 
 
-def test_get_latest_by_subject_returns_the_most_recently_updated_for_contract(repos):
-    contract_id = _seed_contract(repos)
+def test_get_latest_by_subject_returns_the_most_recently_updated_for_retailer_agreement(repos):
+    retailer_agreement_id = _seed_retailer_agreement(repos)
     first = repos.workflow_threads.create(
-        stage="STARTED", subject_type=WorkflowThreadSubjectType.RETAILER_AGREEMENT, subject_id=contract_id
+        stage="STARTED",
+        subject_type=WorkflowThreadSubjectType.RETAILER_AGREEMENT,
+        subject_id=retailer_agreement_id,
     )
     repos.workflow_threads.update_status(first["id"], status="running", stage="AWAITING_RULE_REVIEW")
     second = repos.workflow_threads.create(
-        stage="STARTED", subject_type=WorkflowThreadSubjectType.RETAILER_AGREEMENT, subject_id=contract_id
+        stage="STARTED",
+        subject_type=WorkflowThreadSubjectType.RETAILER_AGREEMENT,
+        subject_id=retailer_agreement_id,
     )
 
     latest = repos.workflow_threads.get_latest_by_subject(
-        WorkflowThreadSubjectType.RETAILER_AGREEMENT, contract_id
+        WorkflowThreadSubjectType.RETAILER_AGREEMENT, retailer_agreement_id
     )
     assert latest["id"] == second["id"]
 
@@ -297,3 +301,22 @@ def test_processing_error_mark_resolved(repos, db_session):
 
     assert resolved["resolved"] is True
     assert resolved["resolved_by"] == "ops@company.com"
+
+
+def test_processing_error_log_rolls_back_only_its_own_savepoint_on_a_write_failure(repos, db_session):
+    """A failed flush (a NUL byte in `error_message`/`raw_error_detail` raises this way in
+    production) must not leave this shared session in a failed transactional state for a
+    later, unrelated caller -- mirrors the same regression covered for AgentTraceRepository."""
+
+    def _failing_flush() -> None:
+        raise ValueError("A string literal cannot contain NUL (0x00) characters.")
+
+    db_session.flush = _failing_flush
+
+    with pytest.raises(ValueError):
+        repos.processing_errors.log(error_type="LOOKUP_FAILURE", error_message="boom")
+
+    del db_session.flush  # restore the bound method now that the fake did its job
+
+    logged = repos.processing_errors.log(error_type="LOOKUP_FAILURE", error_message="clean write")
+    assert logged["error_message"] == "clean write"
