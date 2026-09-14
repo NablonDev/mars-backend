@@ -9,8 +9,8 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class ContractCreateRequest(BaseModel):
-    """Body for `POST /penalties/contracts`; `document_sha256` is derived server-side from content."""
+class RetailerAgreementCreateRequest(BaseModel):
+    """Body for `POST /penalties/retailer-agreements`; `document_sha256` is derived server-side from content."""
 
     retailer_id: UUID
     contract_code: str
@@ -23,8 +23,8 @@ class ContractCreateRequest(BaseModel):
     expiration_date: date | None = None
 
 
-class ContractResponse(BaseModel):
-    """Response shape for one `contract` row."""
+class RetailerAgreementResponse(BaseModel):
+    """Response shape for one `retailer_agreement` row."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -39,14 +39,34 @@ class ContractResponse(BaseModel):
 
 
 class ExtractionStartResponse(BaseModel):
-    """Response shape for `POST /penalties/contracts/{id}/extract`, starting the extraction graph.
+    """Response shape for `POST /penalties/retailer-agreements/{id}/extract`, starting the extraction graph.
 
-    `workflow_thread_id` is `None` when nothing in the contract needed review.
+    `workflow_thread_id` is `None` when nothing in the retailer agreement needed review.
     """
 
-    contract_id: UUID
+    retailer_agreement_id: UUID
     agent_run_id: UUID
     workflow_thread_id: UUID | None
+
+
+class ExtractionStatusResponse(BaseModel):
+    """Response shape for `GET /penalties/retailer-agreements/{id}/extraction`.
+
+    `status` is `NOT_STARTED` when extraction has never run; otherwise mirrors the
+    underlying `workflow_thread` for a run that needed review, or a synthesized
+    completed status for a touchless run that never created one.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    retailer_agreement_id: UUID
+    agent_run_id: UUID | None
+    workflow_thread_id: UUID | None
+    status: str
+    stage: str | None
+    current_node: str | None
+    completed_at: datetime | None
+    error: str | None
 
 
 class ExtractedPenaltyRuleAttributeResponse(BaseModel):
@@ -79,7 +99,7 @@ class ExtractedPenaltyRuleResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
-    contract_id: UUID
+    retailer_agreement_id: UUID
     agent_run_id: UUID
     section: str | None
     clause_text: str
@@ -98,7 +118,7 @@ class ExtractedPenaltyRuleResponse(BaseModel):
 
 
 class ExtractedPenaltyRuleReviewRequest(BaseModel):
-    """Body for `POST /penalties/contracts/{id}/extracted-rules/{rid}/review`."""
+    """Body for `POST /penalties/retailer-agreements/{id}/extracted-rules/{rid}/review`."""
 
     status: Literal["APPROVED", "REJECTED"]
     review_notes: str | None = None
@@ -118,10 +138,20 @@ class RulePublicationOutcomeResponse(BaseModel):
 
 
 class RulePublicationResultResponse(BaseModel):
-    """Response shape for `POST /penalties/contracts/{id}/publish`."""
+    """Response shape for `POST /penalties/retailer-agreements/{id}/publish`."""
 
-    contract_id: UUID
+    retailer_agreement_id: UUID
     agent_run_id: UUID
     published_count: int
     rejected_count: int
     outcomes: list[RulePublicationOutcomeResponse]
+
+
+class PublicationAuditResponse(BaseModel):
+    """Every recorded publication outcome for a retailer agreement plus a rejection-reason histogram."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    retailer_agreement_id: UUID
+    outcomes: list[RulePublicationOutcomeResponse]
+    rejection_reason_histogram: dict[str, int]
