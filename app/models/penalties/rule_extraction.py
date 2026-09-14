@@ -5,7 +5,6 @@ from uuid import UUID
 from sqlalchemy import (
     CHAR,
     Boolean,
-    CheckConstraint,
     ForeignKey,
     Index,
     Integer,
@@ -30,23 +29,13 @@ from app.db.base import (
 class ExtractedPenaltyRule(Base, TimestampMixin):
     """One penalty clause found by extraction, pending review before publication.
 
-    `ix_extracted_penalty_rule_contract_status` (contract_id, status WHERE deleted_at IS
-    NULL) is raw DDL in the migration, not declared here; see
+    `ix_extracted_penalty_rule_retailer_agreement_status` (retailer_agreement_id, status
+    WHERE deleted_at IS NULL) is raw DDL in the migration, not declared here; see
     app/models/process/job.py's JobItem docstring for why a partial index can't be.
     """
 
     __tablename__ = "extracted_penalty_rule"
     __table_args__ = (
-        CheckConstraint(
-            "pricing_readiness IN ('READY', 'NEEDS_EXTERNAL_FIGURE', 'AWAITING_DATA', "
-            "'UNSUPPORTED_SHAPE', 'NOT_A_CHARGE')",
-            name="ck_extracted_penalty_rule_pricing_readiness",
-        ),
-        CheckConstraint(
-            "status IN ('PENDING_REVIEW', 'APPROVED', 'REJECTED')",
-            name="ck_extracted_penalty_rule_status",
-        ),
-        CheckConstraint("confidence BETWEEN 0 AND 1", name="ck_extracted_penalty_rule_confidence"),
         UniqueConstraint(
             "agent_run_id", "clause_fingerprint", name="uq_extracted_penalty_rule_run_fingerprint"
         ),
@@ -54,7 +43,7 @@ class ExtractedPenaltyRule(Base, TimestampMixin):
     )
 
     id: Mapped[UUID] = mapped_column(UUID_PK, primary_key=True, default=generate_uuid7)
-    contract_id: Mapped[UUID] = mapped_column(UUID_PK, ForeignKey("retailer_agreement.id"))
+    retailer_agreement_id: Mapped[UUID] = mapped_column(UUID_PK, ForeignKey("retailer_agreement.id"))
     agent_run_id: Mapped[UUID] = mapped_column(UUID_PK, ForeignKey(f"{PROCESS_SCHEMA}.agent_run.id"))
     section: Mapped[str | None] = mapped_column(String(200), nullable=True)
     clause_text: Mapped[str] = mapped_column(Text)
@@ -78,49 +67,6 @@ class ExtractedPenaltyRuleAttribute(Base, TimestampMixin):
 
     __tablename__ = "extracted_penalty_rule_attribute"
     __table_args__ = (
-        CheckConstraint(
-            "attribute_role IN ('THRESHOLD', 'RATE', 'CAP', 'FLOOR', 'GRACE_PERIOD', "
-            "'CURE_PERIOD', 'TIME_WINDOW', 'QUANTITY', 'BASIS', 'ESCALATION_FACTOR', "
-            "'ROUNDING_RULE', 'EXCLUSION_CONDITION', 'OTHER')",
-            name="ck_extracted_penalty_rule_attribute_attribute_role",
-        ),
-        CheckConstraint(
-            "operator IS NULL OR operator IN ('EQ', 'GT', 'GTE', 'LT', 'LTE', 'BETWEEN', 'ALWAYS')",
-            name="ck_extracted_penalty_rule_attribute_operator",
-        ),
-        CheckConstraint(
-            "value_status IN ('PRESENT', 'NOT_APPLICABLE', 'NOT_STATED', 'REDACTED', "
-            "'EXTERNAL_REFERENCE', 'EXTRACTION_UNCERTAIN')",
-            name="ck_extracted_penalty_rule_attribute_value_status",
-        ),
-        CheckConstraint(
-            "tier_application IS NULL OR tier_application IN ('CLIFF', 'MARGINAL', 'NOT_APPLICABLE')",
-            name="ck_extracted_penalty_rule_attribute_tier_application",
-        ),
-        CheckConstraint(
-            "cap_scope IS NULL OR cap_scope IN ('RATE_CEILING', 'AMOUNT_CEILING', "
-            "'DURATION_CEILING', 'QUANTITY_CEILING')",
-            name="ck_extracted_penalty_rule_attribute_cap_scope",
-        ),
-        CheckConstraint("confidence BETWEEN 0 AND 1", name="ck_extracted_penalty_rule_attribute_confidence"),
-        # A percentage with no stated population is three different dollar figures.
-        CheckConstraint(
-            "metric_code NOT IN ('FILL_RATE_PCT', 'OTIF_PCT', 'SHORTFALL_PCT', "
-            "'DAMAGE_RATE_PCT', 'EXPIRED_UNSALABLE_PCT') OR metric_denominator IS NOT NULL",
-            name="ck_attribute_denominator_required",
-        ),
-        CheckConstraint(
-            "attribute_role NOT IN ('RATE', 'CAP') OR basis_type IS NOT NULL",
-            name="ck_attribute_basis_required",
-        ),
-        CheckConstraint(
-            "value_unit NOT IN ('USD', 'EUR', 'GBP', 'OTHER_CURRENCY') OR currency_code IS NOT NULL",
-            name="ck_attribute_currency_required",
-        ),
-        CheckConstraint(
-            "value_status <> 'PRESENT' OR value IS NOT NULL OR value_max IS NOT NULL",
-            name="ck_attribute_present_has_value",
-        ),
         Index("ix_extracted_penalty_rule_attribute_rule_branch", "extracted_rule_id", "branch_no"),
         {"schema": PENALTIES_SCHEMA},
     )
@@ -152,10 +98,7 @@ class RulePublication(Base, TimestampMixin):
     """Audit row recording why an extracted rule was published or rejected."""
 
     __tablename__ = "rule_publication"
-    __table_args__ = (
-        CheckConstraint("outcome IN ('PUBLISHED', 'REJECTED')", name="ck_rule_publication_outcome"),
-        {"schema": PENALTIES_SCHEMA},
-    )
+    __table_args__ = ({"schema": PENALTIES_SCHEMA},)
 
     id: Mapped[UUID] = mapped_column(UUID_PK, primary_key=True, default=generate_uuid7)
     extracted_rule_id: Mapped[UUID] = mapped_column(

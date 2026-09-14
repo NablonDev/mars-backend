@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
+from collections.abc import Sequence
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -47,6 +49,35 @@ def published_rule_insert_kwargs(published: PublishedRule, retailer_id: UUID) ->
     }
 
 
+def _rule_to_dict(
+    rule: ExtractedPenaltyRule, attribute_rows: Sequence[ExtractedPenaltyRuleAttribute]
+) -> dict[str, Any]:
+    """Shape one extracted rule plus its attribute rows into the API-facing dict shape.
+
+    `ExtractedPenaltyRule` carries no ORM relationship to its attributes (this codebase
+    queries them explicitly rather than declaring `relationship()`), so any caller that
+    hands an extracted rule to `ExtractedPenaltyRuleResponse` needs this dict, not the bare
+    ORM row, or `attributes` silently falls back to its schema default of `[]`.
+    """
+    return {
+        "id": rule.id,
+        "retailer_agreement_id": rule.retailer_agreement_id,
+        "agent_run_id": rule.agent_run_id,
+        "section": rule.section,
+        "clause_text": rule.clause_text,
+        "clause_fingerprint": rule.clause_fingerprint,
+        "penalty_category": rule.penalty_category,
+        "calc_type": rule.calc_type,
+        "po_shortage_flag": rule.po_shortage_flag,
+        "po_delay_flag": rule.po_delay_flag,
+        "pricing_readiness": rule.pricing_readiness,
+        "status": rule.status,
+        "confidence": rule.confidence,
+        "review_notes": rule.review_notes,
+        "attributes": list(attribute_rows),
+    }
+
+
 def _to_staged_fact(a: ExtractedPenaltyRuleAttribute) -> StagedFact:
     """Convert one ORM attribute row into the publisher's pure `StagedFact` value object."""
     return StagedFact(
@@ -79,7 +110,7 @@ class ExtractedPenaltyRuleRepository:
 
     def add_extracted_rule(
         self,
-        contract_id: UUID,
+        retailer_agreement_id: UUID,
         agent_run_id: UUID,
         clause_text: str,
         clause_fingerprint: str,
@@ -101,7 +132,7 @@ class ExtractedPenaltyRuleRepository:
         inserts either without the other.
         """
         rule = ExtractedPenaltyRule(
-            contract_id=contract_id,
+            retailer_agreement_id=retailer_agreement_id,
             agent_run_id=agent_run_id,
             section=section,
             clause_text=clause_text,
@@ -125,19 +156,60 @@ class ExtractedPenaltyRuleRepository:
 
         return rule
 
-    def list_for_contract(
+    def get_with_attributes(self, extracted_rule_id: UUID) -> dict[str, Any] | None:
+        """Return one extracted rule plus its attribute rows, or None if it doesn't exist."""
+        rule = self._session.get(ExtractedPenaltyRule, extracted_rule_id)
+        if rule is None:
+            return None
+        attribute_rows = self._session.scalars(
+            select(ExtractedPenaltyRuleAttribute)
+            .where(ExtractedPenaltyRuleAttribute.extracted_rule_id == rule.id)
+            .order_by(ExtractedPenaltyRuleAttribute.branch_no.asc())
+        ).all()
+        return _rule_to_dict(rule, attribute_rows)
+
+    def list_for_retailer_agreement(
         self,
-        contract_id: UUID,
+        retailer_agreement_id: UUID,
         status: str | None = None,
         agent_run_id: UUID | None = None,
     ) -> list[ExtractedPenaltyRule]:
-        """Return extracted rules for one contract, optionally narrowed by status and/or run."""
-        stmt = select(ExtractedPenaltyRule).where(ExtractedPenaltyRule.contract_id == contract_id)
+        """Return extracted rules for one retailer agreement, optionally narrowed by status and/or run."""
+        stmt = select(ExtractedPenaltyRule).where(
+            ExtractedPenaltyRule.retailer_agreement_id == retailer_agreement_id
+        )
         if status is not None:
             stmt = stmt.where(ExtractedPenaltyRule.status == status)
         if agent_run_id is not None:
             stmt = stmt.where(ExtractedPenaltyRule.agent_run_id == agent_run_id)
         return list(self._session.scalars(stmt).all())
+
+    def list_with_attributes_for_retailer_agreement(
+        self, retailer_agreement_id: UUID, status: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Return extracted rules for one retailer agreement with attributes attached, newest run included.
+
+        Batches attribute rows in one query keyed by rule id, instead of one query per
+        rule, for the same reason `get_with_attributes` builds a dict: `ExtractedPenaltyRule`
+        has no ORM relationship to its attributes.
+        """
+        rules = self.list_for_retailer_agreement(retailer_agreement_id, status=status)
+        if not rules:
+            return []
+
+        rule_ids = [rule.id for rule in rules]
+        attribute_rows = self._session.scalars(
+            select(ExtractedPenaltyRuleAttribute)
+            .where(ExtractedPenaltyRuleAttribute.extracted_rule_id.in_(rule_ids))
+            .order_by(
+                ExtractedPenaltyRuleAttribute.extracted_rule_id, ExtractedPenaltyRuleAttribute.branch_no.asc()
+            )
+        ).all()
+        attributes_by_rule: dict[UUID, list[ExtractedPenaltyRuleAttribute]] = defaultdict(list)
+        for attribute in attribute_rows:
+            attributes_by_rule[attribute.extracted_rule_id].append(attribute)
+
+        return [_rule_to_dict(rule, attributes_by_rule.get(rule.id, [])) for rule in rules]
 
     def set_review_decision(
         self,
@@ -165,8 +237,8 @@ class ExtractedPenaltyRuleRepository:
         self._session.flush()
         return rule
 
-    def list_publishable(self, contract_id: UUID, agent_run_id: UUID) -> list[StagedRule]:
-        """Return the contract's APPROVED rules from one run as pure `StagedRule` value objects.
+    def list_publishable(self, retailer_agreement_id: UUID, agent_run_id: UUID) -> list[StagedRule]:
+        """Return the retailer agreement's APPROVED rules from one run as pure `StagedRule` value objects.
 
         The boundary between the ORM and `PenaltyRulePublisher`
         (`app/services/penalties/rule_extraction/publisher.py`), which the publisher reads
@@ -174,7 +246,7 @@ class ExtractedPenaltyRuleRepository:
         """
         rows = self._session.scalars(
             select(ExtractedPenaltyRule).where(
-                ExtractedPenaltyRule.contract_id == contract_id,
+                ExtractedPenaltyRule.retailer_agreement_id == retailer_agreement_id,
                 ExtractedPenaltyRule.status == "APPROVED",
                 ExtractedPenaltyRule.agent_run_id == agent_run_id,
             )
@@ -190,7 +262,7 @@ class ExtractedPenaltyRuleRepository:
             staged_rules.append(
                 StagedRule(
                     id=str(rule.id),
-                    contract_id=str(rule.contract_id),
+                    retailer_agreement_id=str(rule.retailer_agreement_id),
                     clause_fingerprint=rule.clause_fingerprint,
                     penalty_category=rule.penalty_category,
                     calc_type=rule.calc_type,
@@ -232,23 +304,23 @@ class RulePublicationRepository:
         self._session.flush()
         return row
 
-    def list_for_contract(self, contract_id: UUID) -> list[RulePublication]:
-        """Return every publication outcome for a contract's extracted rules, oldest first."""
+    def list_for_retailer_agreement(self, retailer_agreement_id: UUID) -> list[RulePublication]:
+        """Return every publication outcome for a retailer agreement's extracted rules, oldest first."""
         rows = self._session.scalars(
             select(RulePublication)
             .join(ExtractedPenaltyRule, RulePublication.extracted_rule_id == ExtractedPenaltyRule.id)
-            .where(ExtractedPenaltyRule.contract_id == contract_id)
+            .where(ExtractedPenaltyRule.retailer_agreement_id == retailer_agreement_id)
             .order_by(RulePublication.created_at.asc())
         ).all()
         return list(rows)
 
-    def reason_histogram(self, contract_id: UUID) -> dict[str, int]:
-        """Count rejection reasons for a contract; the signal for which penalty shape to build next."""
+    def reason_histogram(self, retailer_agreement_id: UUID) -> dict[str, int]:
+        """Count rejection reasons for a retailer agreement; the signal for which penalty shape to build next."""
         rows = self._session.execute(
             select(RulePublication.reason_code, func.count())
             .join(ExtractedPenaltyRule, RulePublication.extracted_rule_id == ExtractedPenaltyRule.id)
             .where(
-                ExtractedPenaltyRule.contract_id == contract_id,
+                ExtractedPenaltyRule.retailer_agreement_id == retailer_agreement_id,
                 RulePublication.outcome == "REJECTED",
             )
             .group_by(RulePublication.reason_code)

@@ -1,21 +1,22 @@
-"""Coordinates contract rule extraction across repositories, the LangGraph workflow, and the publisher.
+"""Coordinates retailer agreement rule extraction across repositories, the LangGraph workflow, and the publisher.
 
 Entry points:
-    create_contract (POST /api/v1/penalties/contracts)
-    start_extraction (POST /api/v1/penalties/contracts/{contract_id}/extract)
-    list_extracted_rules (GET /api/v1/penalties/contracts/{contract_id}/extracted-rules)
-    submit_review (POST /api/v1/penalties/contracts/{contract_id}/extracted-rules/{extracted_rule_id}/review)
+    create_retailer_agreement (POST /api/v1/penalties/retailer-agreements)
+    start_extraction (POST /api/v1/penalties/retailer-agreements/{retailer_agreement_id}/extract)
+    get_extraction_status (GET /api/v1/penalties/retailer-agreements/{retailer_agreement_id}/extraction)
+    list_extracted_rules (GET /api/v1/penalties/retailer-agreements/{retailer_agreement_id}/extracted-rules)
+    get_extracted_rule (GET /api/v1/penalties/retailer-agreements/{retailer_agreement_id}/extracted-rules/{extracted_rule_id})
+    submit_review (POST /api/v1/penalties/retailer-agreements/{retailer_agreement_id}/extracted-rules/{extracted_rule_id}/review)
     resume_review (POST /api/v1/workflow-threads/{thread_id}/decisions)
-    publish (POST /api/v1/penalties/contracts/{contract_id}/publish)
+    publish (POST /api/v1/penalties/retailer-agreements/{retailer_agreement_id}/publish)
 
 Extraction is probabilistic and reviewed by a person; publication is pure and deterministic.
 This service owns the seam between them, including the transaction boundaries and which
-run's approved rules are authoritative for a contract.
+run's approved rules are authoritative for a retailer agreement.
 """
 
 from __future__ import annotations
 
-import hashlib
 import logging
 from dataclasses import dataclass, field
 from datetime import date
@@ -35,7 +36,7 @@ from app.agents.penalties.rule_extraction.prompts.v1 import (
 )
 from app.core.exceptions import ConflictError, ExternalServiceError, NotFoundError, ValidationError
 from app.models.enums import WorkflowThreadSubjectType
-from app.models.penalties.rule_extraction import ExtractedPenaltyRule, RulePublication
+from app.models.penalties.rule_extraction import RulePublication
 from app.repositories.common.master_data import MasterDataRepository
 from app.repositories.common.retailer_agreement import RetailerAgreementRepository
 from app.repositories.penalties.rule import PenaltyRuleRepository
@@ -47,8 +48,9 @@ from app.repositories.penalties.rule_extraction import (
 from app.repositories.process.agent_registry import AgentRegistryRepository, AgentRunRepository
 from app.repositories.process.workflow import HumanActionRepository, WorkflowThreadRepository
 from app.services.penalties.rule_extraction.publisher import PenaltyRulePublisher
-from app.services.penalties.rule_extraction.types import RejectedPublication
+from app.services.penalties.rule_extraction.types import RejectedPublication, RejectionReason
 from app.utils.clock import business_today
+from app.utils.hashing import content_sha256
 from app.utils.ids import new_id
 
 logger = logging.getLogger(__name__)
@@ -71,13 +73,14 @@ _AWAITING_STATUS = "waiting_rule_review"
 _REVIEW_NODE = "human_review"
 _COMPLETED_STAGE = "RULE_REVIEW_COMPLETE"
 _COMPLETED_STATUS = "completed"
+_NOT_STARTED_STATUS = "NOT_STARTED"
 
 
 @dataclass
 class ExtractionStartResult:
     """Identifiers a caller needs to follow one extraction run and its review thread.
 
-    `thread_id` is `None` when nothing in the contract needed review: `human_review`
+    `thread_id` is `None` when nothing in the retailer agreement needed review: `human_review`
     never interrupted, so no reviewer-facing `workflow_thread` was ever created.
     """
 
@@ -89,7 +92,7 @@ class ExtractionStartResult:
 
 @dataclass
 class PublicationResult:
-    """Outcome of publishing one contract's approved rules, accepted and rejected alike."""
+    """Outcome of publishing one retailer agreement's approved rules, accepted and rejected alike."""
 
     published_count: int
     rejected_count: int
@@ -103,7 +106,7 @@ class PenaltyRuleExtractionService:
     def __init__(
         self,
         *,
-        contracts: RetailerAgreementRepository,
+        retailer_agreements: RetailerAgreementRepository,
         extracted_rules: ExtractedPenaltyRuleRepository,
         publications: RulePublicationRepository,
         rules: PenaltyRuleRepository,
@@ -116,7 +119,7 @@ class PenaltyRuleExtractionService:
         graph: CompiledStateGraph | None = None,
         publisher: PenaltyRulePublisher | None = None,
     ) -> None:
-        self._contracts = contracts
+        self._retailer_agreements = retailer_agreements
         self._extracted_rules = extracted_rules
         self._publications = publications
         self._rules = rules
@@ -133,7 +136,7 @@ class PenaltyRuleExtractionService:
         # nothing here calls `.commit()` except those two documented spots.
         self._session = session
 
-    def create_contract(
+    def create_retailer_agreement(
         self,
         retailer_id: UUID,
         contract_code: str,
@@ -143,12 +146,12 @@ class PenaltyRuleExtractionService:
         effective_date: date | None = None,
         expiration_date: date | None = None,
     ) -> dict:
-        """Store a contract, returning the existing row when the same markdown was already uploaded."""
-        document_sha256 = hashlib.sha256(markdown_text.encode("utf-8")).hexdigest()
-        existing = self._contracts.get_by_sha256(document_sha256)
+        """Store a retailer agreement, returning the existing row when the same markdown was already uploaded."""
+        document_sha256 = content_sha256(markdown_text)
+        existing = self._retailer_agreements.get_by_sha256(document_sha256)
         if existing is not None:
             return existing
-        return self._contracts.add_retailer_agreement(
+        return self._retailer_agreements.add_retailer_agreement(
             retailer_id=retailer_id,
             contract_code=contract_code,
             title=title,
@@ -159,8 +162,8 @@ class PenaltyRuleExtractionService:
             expiration_date=expiration_date,
         )
 
-    def start_extraction(self, contract_id: UUID) -> ExtractionStartResult:
-        """Run the extraction graph over a contract, staging every rule it finds for review.
+    def start_extraction(self, retailer_agreement_id: UUID) -> ExtractionStartResult:
+        """Run the extraction graph over a retailer agreement, staging every rule it finds for review.
 
         The graph interrupts at `human_review` whenever a staged rule needs a decision, so
         this returns once rules are staged rather than once they are approved. `agent_run`
@@ -169,11 +172,14 @@ class PenaltyRuleExtractionService:
         `agent_run` row would be invisible to them, failing `agent_trace`'s foreign key
         mid-run.
         """
-        contract = self._require_contract(contract_id)
-        if not contract["markdown_text"]:
+        retailer_agreement = self._require_retailer_agreement(retailer_agreement_id)
+        if not retailer_agreement["markdown_text"]:
             raise ValidationError(
-                code="CONTRACT_HAS_NO_TEXT",
-                message=f"Contract {contract['contract_code']!r} has no markdown_text to extract from.",
+                code="RETAILER_AGREEMENT_HAS_NO_TEXT",
+                message=(
+                    f"Retailer agreement {retailer_agreement['contract_code']!r} has no markdown_text "
+                    "to extract from."
+                ),
             )
         if self._graph is None:
             raise ConflictError(
@@ -189,10 +195,10 @@ class PenaltyRuleExtractionService:
         try:
             state = self._graph.invoke(
                 {
-                    "contract_id": contract_id,
+                    "retailer_agreement_id": retailer_agreement_id,
                     "run_id": run_id,
-                    "retailer_id": contract["retailer_id"],
-                    "contract_text": contract["markdown_text"],
+                    "retailer_id": retailer_agreement["retailer_id"],
+                    "retailer_agreement_text": retailer_agreement["markdown_text"],
                 },
                 config=self._thread_config(checkpoint_thread_id),
             )
@@ -204,18 +210,68 @@ class PenaltyRuleExtractionService:
             raise
 
         result = self._handle_graph_state(
-            contract_id=contract_id,
+            retailer_agreement_id=retailer_agreement_id,
             run_id=run_id,
             checkpoint_thread_id=checkpoint_thread_id,
             state=state,
         )
-        staged = self._extracted_rules.list_for_contract(contract_id, agent_run_id=run_id)
+        staged = self._extracted_rules.list_for_retailer_agreement(retailer_agreement_id, agent_run_id=run_id)
         return ExtractionStartResult(
             job_run_id=None,
             agent_run_id=run_id,
             thread_id=result.get("id"),
             staged_count=len(staged),
         )
+
+    def get_extraction_status(self, retailer_agreement_id: UUID) -> dict[str, Any]:
+        """Report the most recent extraction run's status for a retailer agreement.
+
+        Prefers the reviewer-facing workflow thread when one exists, whether still
+        awaiting review or resolved. Falls back to the staged rules themselves for a
+        touchless run that never created a thread, and reports `NOT_STARTED` when
+        extraction has never run at all.
+        """
+        self._require_retailer_agreement(retailer_agreement_id)
+        thread = self._workflow_threads.get_latest_by_subject(
+            WorkflowThreadSubjectType.RETAILER_AGREEMENT, retailer_agreement_id
+        )
+        if thread is not None:
+            metadata = thread["metadata_json"] or {}
+            raw_run_id = metadata.get("agent_run_id")
+            return {
+                "retailer_agreement_id": retailer_agreement_id,
+                "agent_run_id": UUID(raw_run_id) if raw_run_id else None,
+                "workflow_thread_id": thread["id"],
+                "status": thread["status"],
+                "stage": thread["stage"],
+                "current_node": thread["current_node"],
+                "completed_at": thread["completed_at"],
+                "error": thread["error"],
+            }
+
+        run_id = self._latest_run_id_or_none(retailer_agreement_id)
+        if run_id is None:
+            return {
+                "retailer_agreement_id": retailer_agreement_id,
+                "agent_run_id": None,
+                "workflow_thread_id": None,
+                "status": _NOT_STARTED_STATUS,
+                "stage": None,
+                "current_node": None,
+                "completed_at": None,
+                "error": None,
+            }
+
+        return {
+            "retailer_agreement_id": retailer_agreement_id,
+            "agent_run_id": run_id,
+            "workflow_thread_id": None,
+            "status": _COMPLETED_STATUS,
+            "stage": _COMPLETED_STAGE,
+            "current_node": None,
+            "completed_at": None,
+            "error": None,
+        }
 
     def resume_review(self, thread_id: UUID, *, actor: str, expected_updated_at: str) -> dict[str, Any]:
         """Resume a rule-extraction run paused at `human_review`.
@@ -236,13 +292,15 @@ class PenaltyRuleExtractionService:
         pending = self._require_open_pending(thread_id, _INTERRUPT_REASON)
 
         metadata = stage["metadata_json"] or {}
-        contract_id = UUID(metadata["contract_id"])
+        retailer_agreement_id = UUID(metadata["retailer_agreement_id"])
         run_id = UUID(metadata["agent_run_id"])
         checkpoint_thread_id = metadata["checkpoint_thread_id"]
 
         decided_count = sum(
             1
-            for row in self._extracted_rules.list_for_contract(contract_id, agent_run_id=run_id)
+            for row in self._extracted_rules.list_for_retailer_agreement(
+                retailer_agreement_id, agent_run_id=run_id
+            )
             if row.status in ("APPROVED", "REJECTED")
         )
         answer: dict[str, Any] = (
@@ -257,7 +315,7 @@ class PenaltyRuleExtractionService:
             raise self._resume_failed(thread_id, pending["id"], exc) from exc
 
         return self._handle_graph_state(
-            contract_id=contract_id,
+            retailer_agreement_id=retailer_agreement_id,
             run_id=run_id,
             checkpoint_thread_id=checkpoint_thread_id,
             state=state,
@@ -271,51 +329,66 @@ class PenaltyRuleExtractionService:
         )
 
     def list_extracted_rules(
-        self, contract_id: UUID, status: str | None = None
-    ) -> list[ExtractedPenaltyRule]:
-        """List a contract's extracted rules, newest run included, optionally filtered by status."""
-        self._require_contract(contract_id)
-        return self._extracted_rules.list_for_contract(contract_id, status=status)
+        self, retailer_agreement_id: UUID, status: str | None = None
+    ) -> list[dict[str, Any]]:
+        """List a retailer agreement's extracted rules with attributes, optionally filtered by status."""
+        self._require_retailer_agreement(retailer_agreement_id)
+        return self._extracted_rules.list_with_attributes_for_retailer_agreement(
+            retailer_agreement_id, status=status
+        )
+
+    def get_extracted_rule(self, retailer_agreement_id: UUID, extracted_rule_id: UUID) -> dict[str, Any]:
+        """Fetch one extracted rule with its attributes, scoped to its retailer agreement."""
+        self._require_retailer_agreement(retailer_agreement_id)
+        result = self._extracted_rules.get_with_attributes(extracted_rule_id)
+        if result is None or result["retailer_agreement_id"] != retailer_agreement_id:
+            raise NotFoundError(
+                code="EXTRACTED_RULE_NOT_FOUND",
+                message=f"No extracted rule found with id={extracted_rule_id} for retailer agreement "
+                f"{retailer_agreement_id}.",
+            )
+        return result
 
     def submit_review(
         self,
-        contract_id: UUID,
+        retailer_agreement_id: UUID,
         extracted_rule_id: UUID,
         status: str,
         review_notes: str | None = None,
-    ) -> ExtractedPenaltyRule:
-        """Record one reviewer decision. Only APPROVED and REJECTED are decisions.
+    ) -> dict[str, Any]:
+        """Record one reviewer decision and return the rule with its attributes.
 
-        `status` membership is validated by
+        Only APPROVED and REJECTED are decisions. `status` membership is validated by
         `ExtractedPenaltyRuleRepository.set_review_decision`, the single site for that
         check; this method does not repeat it.
         """
-        self._require_contract(contract_id)
-        return self._extracted_rules.set_review_decision(extracted_rule_id, status, review_notes=review_notes)
+        self._require_retailer_agreement(retailer_agreement_id)
+        self._extracted_rules.set_review_decision(extracted_rule_id, status, review_notes=review_notes)
+        return self.get_extracted_rule(retailer_agreement_id, extracted_rule_id)
 
-    def publish(self, contract_id: UUID) -> PublicationResult:
-        """Turn a contract's approved extracted rules into live penalty rules.
+    def publish(self, retailer_agreement_id: UUID) -> PublicationResult:
+        """Turn a retailer agreement's approved extracted rules into live penalty rules.
 
         Every staged rule produces a `rule_publication` row whether it publishes or not,
         so the set the engine will never see stays countable and carries its reason.
         """
-        contract = self._require_contract(contract_id)
-        run_id = self._latest_run_id(contract_id)
+        retailer_agreement = self._require_retailer_agreement(retailer_agreement_id)
+        run_id = self._latest_run_id(retailer_agreement_id)
 
-        retailer = self._master_data.get_retailer(contract["retailer_id"])
+        retailer = self._master_data.get_retailer(retailer_agreement["retailer_id"])
         if retailer is None:
             raise NotFoundError(
                 code="RETAILER_NOT_FOUND",
-                message=f"Contract {contract['contract_code']!r} references an unknown retailer.",
+                message=f"Retailer agreement {retailer_agreement['contract_code']!r} references an unknown retailer.",
             )
         retailer_code = retailer["retailer_code"]
-        effective_date = contract["effective_date"] or business_today()
+        effective_date = retailer_agreement["effective_date"] or business_today()
 
         outcomes: list[RulePublication] = []
         published = 0
         rejected = 0
 
-        for staged in self._extracted_rules.list_publishable(contract_id, run_id):
+        for staged in self._extracted_rules.list_publishable(retailer_agreement_id, run_id):
             result = self._publisher.publish(staged, retailer_code, effective_date)
             if isinstance(result, RejectedPublication):
                 outcomes.append(
@@ -330,7 +403,25 @@ class PenaltyRuleExtractionService:
                 rejected += 1
                 continue
 
-            rule = self._rules.add_rule(**published_rule_insert_kwargs(result, contract["retailer_id"]))
+            if self._rules.get_by_rule_code(result.rule_code) is not None:
+                # `rule_code` is deterministic from retailer/category/fingerprint, so a
+                # second publish over an already-published run would otherwise hit
+                # `penalty_rule`'s unique constraint as a raw IntegrityError.
+                outcomes.append(
+                    self._publications.record(
+                        extracted_rule_id=UUID(staged.id),
+                        agent_run_id=run_id,
+                        outcome="REJECTED",
+                        reason_code=RejectionReason.ALREADY_PUBLISHED.value,
+                        reason_detail=f"rule_code={result.rule_code!r} is already published.",
+                    )
+                )
+                rejected += 1
+                continue
+
+            rule = self._rules.add_rule(
+                **published_rule_insert_kwargs(result, retailer_agreement["retailer_id"])
+            )
             outcomes.append(
                 self._publications.record(
                     extracted_rule_id=UUID(staged.id),
@@ -345,12 +436,15 @@ class PenaltyRuleExtractionService:
             published_count=published, rejected_count=rejected, agent_run_id=run_id, outcomes=outcomes
         )
 
-    def _require_contract(self, contract_id: UUID) -> dict:
-        """Fetch a contract or raise the API's standard not-found error."""
-        contract = self._contracts.get(contract_id)
-        if contract is None:
-            raise NotFoundError(code="CONTRACT_NOT_FOUND", message=f"Contract {contract_id} does not exist.")
-        return contract
+    def _require_retailer_agreement(self, retailer_agreement_id: UUID) -> dict:
+        """Fetch a retailer agreement or raise the API's standard not-found error."""
+        retailer_agreement = self._retailer_agreements.get(retailer_agreement_id)
+        if retailer_agreement is None:
+            raise NotFoundError(
+                code="RETAILER_AGREEMENT_NOT_FOUND",
+                message=f"Retailer agreement {retailer_agreement_id} does not exist.",
+            )
+        return retailer_agreement
 
     def _ensure_registered(self) -> UUID:
         """Ensure the run-owner and per-stage prompt rows all exist, returning the run-owner id.
@@ -389,15 +483,22 @@ class PenaltyRuleExtractionService:
             domain="penalties",
         )
 
-    def _latest_run_id(self, contract_id: UUID) -> UUID:
-        """The run that staged the most recent rules for this contract."""
-        staged = self._extracted_rules.list_for_contract(contract_id)
+    def _latest_run_id_or_none(self, retailer_agreement_id: UUID) -> UUID | None:
+        """The run that staged the most recent rules for this retailer agreement, or None if there isn't one."""
+        staged = self._extracted_rules.list_for_retailer_agreement(retailer_agreement_id)
         if not staged:
+            return None
+        return max(staged, key=lambda row: row.created_at).agent_run_id
+
+    def _latest_run_id(self, retailer_agreement_id: UUID) -> UUID:
+        """The run that staged the most recent rules for this retailer agreement."""
+        run_id = self._latest_run_id_or_none(retailer_agreement_id)
+        if run_id is None:
             raise ValidationError(
                 code="NO_EXTRACTION_RUN",
-                message="This contract has no extracted rules to publish. Run extraction first.",
+                message="This retailer agreement has no extracted rules to publish. Run extraction first.",
             )
-        return max(staged, key=lambda row: row.created_at).agent_run_id
+        return run_id
 
     @staticmethod
     def _thread_config(checkpoint_thread_id: str) -> RunnableConfig:
@@ -441,12 +542,12 @@ class PenaltyRuleExtractionService:
             details={"thread_id": str(thread_id), "expected": expected, "actual": actual},
         )
 
-    def _create_review_thread(self, *, contract_id: UUID, metadata: dict[str, Any]) -> UUID:
+    def _create_review_thread(self, *, retailer_agreement_id: UUID, metadata: dict[str, Any]) -> UUID:
         """Create the reviewer-facing workflow thread for one rule-extraction run."""
         thread = self._workflow_threads.create(
             _AWAITING_STAGE,
             subject_type=WorkflowThreadSubjectType.RETAILER_AGREEMENT,
-            subject_id=contract_id,
+            subject_id=retailer_agreement_id,
             status=_AWAITING_STATUS,
             current_node=_REVIEW_NODE,
             metadata=metadata,
@@ -482,7 +583,7 @@ class PenaltyRuleExtractionService:
     def _handle_graph_state(
         self,
         *,
-        contract_id: UUID,
+        retailer_agreement_id: UUID,
         run_id: UUID,
         checkpoint_thread_id: str,
         state: dict[str, Any],
@@ -493,11 +594,11 @@ class PenaltyRuleExtractionService:
             payload = state[INTERRUPT_KEY][0].value
             if resume_context is None:
                 workflow_thread_id = self._create_review_thread(
-                    contract_id=contract_id,
+                    retailer_agreement_id=retailer_agreement_id,
                     metadata={
                         "checkpoint_thread_id": checkpoint_thread_id,
                         "agent_run_id": str(run_id),
-                        "contract_id": str(contract_id),
+                        "retailer_agreement_id": str(retailer_agreement_id),
                         "latest_snapshot": {"pending_count": payload.get("pending_count")},
                     },
                 )

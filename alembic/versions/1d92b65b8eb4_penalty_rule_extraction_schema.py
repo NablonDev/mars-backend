@@ -6,7 +6,7 @@ Create Date: 2026-09-10
 
 Creates `retailer_agreement` (public). Creates `penalties.extracted_penalty_rule`,
 `.extracted_penalty_rule_attribute`, and `.rule_publication`;
-`extracted_penalty_rule.contract_id` FKs into `retailer_agreement.id`.
+`extracted_penalty_rule.retailer_agreement_id` FKs into `retailer_agreement.id`.
 `penalties.penalty_rule` gains `basis_type`, `applies_per`, and
 `currency_code`.
 
@@ -15,9 +15,13 @@ Creates `retailer_agreement` (public). Creates `penalties.extracted_penalty_rule
 replacing both with a polymorphic `subject_type`/`subject_id` pair backed
 by a composite index.
 
-`ix_extracted_penalty_rule_contract_status` is a partial index (`WHERE
-deleted_at IS NULL`), branched by dialect since `postgresql_where=` on a
-declarative `Index` is silently dropped on SQLite.
+`ix_extracted_penalty_rule_retailer_agreement_status`, `uq_retailer_agreement_contract_code`,
+and `uq_retailer_agreement_document_sha256` are partial indexes (`WHERE deleted_at IS
+NULL`), branched by dialect since `postgresql_where=` on a declarative `Index` is
+silently dropped on SQLite.
+
+Also corrects `process.job_item`'s `ck_job_item_item_type` CHECK constraint, which never
+gained `'DISPUTE_SUMMARY_REGEN'` when that value was added to `JobTaskType`.
 """
 
 from collections.abc import Sequence
@@ -37,6 +41,17 @@ PENALTIES = "penalties"
 PROCESS = "process"
 
 _JSONB_OR_JSON = sa.JSON().with_variant(postgresql.JSONB(astext_type=sa.Text()), "postgresql")
+
+_ITEM_TYPE_CHECK = "ck_job_item_item_type"
+_NEW_ITEM_TYPE_CONDITION = (
+    "item_type IN ('DISPUTE_SUMMARY_REGEN', 'EMAIL_INGEST', 'MITIGATION_RUN', "
+    "'MITIGATION_SUMMARY_REGEN', 'ORDER_RUN', 'PENALTY_FULL_RUN', 'PO_VALIDATION', "
+    "'PROJECTION_SUMMARY_REGEN')"
+)
+_OLD_ITEM_TYPE_CONDITION = (
+    "item_type IN ('EMAIL_INGEST', 'MITIGATION_RUN', 'MITIGATION_SUMMARY_REGEN', "
+    "'ORDER_RUN', 'PENALTY_FULL_RUN', 'PO_VALIDATION', 'PROJECTION_SUMMARY_REGEN')"
+)
 
 
 def _resolve_schema(schema: str) -> str | None:
@@ -65,16 +80,32 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index(
-        op.f("ix_retailer_agreement_contract_code"), "retailer_agreement", ["contract_code"], unique=True
+        op.f("ix_retailer_agreement_contract_code"), "retailer_agreement", ["contract_code"], unique=False
     )
     op.create_index(
-        op.f("ix_retailer_agreement_document_sha256"), "retailer_agreement", ["document_sha256"], unique=True
+        op.f("ix_retailer_agreement_document_sha256"),
+        "retailer_agreement",
+        ["document_sha256"],
+        unique=False,
+    )
+    # Partial unique indexes, not plain UNIQUE constraints: a contract re-uploaded after
+    # its prior row was soft-deleted must not collide with the deleted row. Raw DDL only
+    # (see this migration's docstring). Unlike the penalties-schema indexes below, no
+    # dialect branch is needed: retailer_agreement carries no schema qualifier to vary
+    # between Postgres and SQLite.
+    op.execute(
+        "CREATE UNIQUE INDEX uq_retailer_agreement_contract_code ON "
+        "retailer_agreement (contract_code) WHERE deleted_at IS NULL"
+    )
+    op.execute(
+        "CREATE UNIQUE INDEX uq_retailer_agreement_document_sha256 ON "
+        "retailer_agreement (document_sha256) WHERE deleted_at IS NULL"
     )
 
     op.create_table(
         "extracted_penalty_rule",
         sa.Column("id", sa.Uuid(), nullable=False),
-        sa.Column("contract_id", sa.Uuid(), nullable=False),
+        sa.Column("retailer_agreement_id", sa.Uuid(), nullable=False),
         sa.Column("agent_run_id", sa.Uuid(), nullable=False),
         sa.Column("section", sa.String(length=200), nullable=True),
         sa.Column("clause_text", sa.Text(), nullable=False),
@@ -91,17 +122,7 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
-        sa.CheckConstraint(
-            "pricing_readiness IN ('READY', 'NEEDS_EXTERNAL_FIGURE', 'AWAITING_DATA', "
-            "'UNSUPPORTED_SHAPE', 'NOT_A_CHARGE')",
-            name="ck_extracted_penalty_rule_pricing_readiness",
-        ),
-        sa.CheckConstraint(
-            "status IN ('PENDING_REVIEW', 'APPROVED', 'REJECTED')",
-            name="ck_extracted_penalty_rule_status",
-        ),
-        sa.CheckConstraint("confidence BETWEEN 0 AND 1", name="ck_extracted_penalty_rule_confidence"),
-        sa.ForeignKeyConstraint(["contract_id"], ["retailer_agreement.id"]),
+        sa.ForeignKeyConstraint(["retailer_agreement_id"], ["retailer_agreement.id"]),
         sa.ForeignKeyConstraint(["agent_run_id"], [f"{PROCESS}.agent_run.id"]),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint(
@@ -111,13 +132,13 @@ def upgrade() -> None:
     )
     if op.get_bind().dialect.name == "postgresql":
         op.execute(
-            "CREATE INDEX ix_extracted_penalty_rule_contract_status ON "
-            "penalties.extracted_penalty_rule (contract_id, status) WHERE deleted_at IS NULL"
+            "CREATE INDEX ix_extracted_penalty_rule_retailer_agreement_status ON "
+            "penalties.extracted_penalty_rule (retailer_agreement_id, status) WHERE deleted_at IS NULL"
         )
     else:
         op.execute(
-            "CREATE INDEX ix_extracted_penalty_rule_contract_status ON "
-            "extracted_penalty_rule (contract_id, status) WHERE deleted_at IS NULL"
+            "CREATE INDEX ix_extracted_penalty_rule_retailer_agreement_status ON "
+            "extracted_penalty_rule (retailer_agreement_id, status) WHERE deleted_at IS NULL"
         )
 
     op.create_table(
@@ -144,50 +165,6 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
-        sa.CheckConstraint(
-            "attribute_role IN ('THRESHOLD', 'RATE', 'CAP', 'FLOOR', 'GRACE_PERIOD', "
-            "'CURE_PERIOD', 'TIME_WINDOW', 'QUANTITY', 'BASIS', 'ESCALATION_FACTOR', "
-            "'ROUNDING_RULE', 'EXCLUSION_CONDITION', 'OTHER')",
-            name="ck_extracted_penalty_rule_attribute_attribute_role",
-        ),
-        sa.CheckConstraint(
-            "operator IS NULL OR operator IN ('EQ', 'GT', 'GTE', 'LT', 'LTE', 'BETWEEN', 'ALWAYS')",
-            name="ck_extracted_penalty_rule_attribute_operator",
-        ),
-        sa.CheckConstraint(
-            "value_status IN ('PRESENT', 'NOT_APPLICABLE', 'NOT_STATED', 'REDACTED', "
-            "'EXTERNAL_REFERENCE', 'EXTRACTION_UNCERTAIN')",
-            name="ck_extracted_penalty_rule_attribute_value_status",
-        ),
-        sa.CheckConstraint(
-            "tier_application IS NULL OR tier_application IN ('CLIFF', 'MARGINAL', 'NOT_APPLICABLE')",
-            name="ck_extracted_penalty_rule_attribute_tier_application",
-        ),
-        sa.CheckConstraint(
-            "cap_scope IS NULL OR cap_scope IN ('RATE_CEILING', 'AMOUNT_CEILING', "
-            "'DURATION_CEILING', 'QUANTITY_CEILING')",
-            name="ck_extracted_penalty_rule_attribute_cap_scope",
-        ),
-        sa.CheckConstraint(
-            "confidence BETWEEN 0 AND 1", name="ck_extracted_penalty_rule_attribute_confidence"
-        ),
-        sa.CheckConstraint(
-            "metric_code NOT IN ('FILL_RATE_PCT', 'OTIF_PCT', 'SHORTFALL_PCT', "
-            "'DAMAGE_RATE_PCT', 'EXPIRED_UNSALABLE_PCT') OR metric_denominator IS NOT NULL",
-            name="ck_attribute_denominator_required",
-        ),
-        sa.CheckConstraint(
-            "attribute_role NOT IN ('RATE', 'CAP') OR basis_type IS NOT NULL",
-            name="ck_attribute_basis_required",
-        ),
-        sa.CheckConstraint(
-            "value_unit NOT IN ('USD', 'EUR', 'GBP', 'OTHER_CURRENCY') OR currency_code IS NOT NULL",
-            name="ck_attribute_currency_required",
-        ),
-        sa.CheckConstraint(
-            "value_status <> 'PRESENT' OR value IS NOT NULL OR value_max IS NOT NULL",
-            name="ck_attribute_present_has_value",
-        ),
         sa.ForeignKeyConstraint(
             ["extracted_rule_id"],
             [f"{PENALTIES}.extracted_penalty_rule.id"],
@@ -216,7 +193,6 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         sa.Column("deleted_at", sa.DateTime(timezone=True), nullable=True),
-        sa.CheckConstraint("outcome IN ('PUBLISHED', 'REJECTED')", name="ck_rule_publication_outcome"),
         sa.ForeignKeyConstraint(["extracted_rule_id"], [f"{PENALTIES}.extracted_penalty_rule.id"]),
         sa.ForeignKeyConstraint(["penalty_rule_id"], [f"{PENALTIES}.penalty_rule.id"]),
         sa.ForeignKeyConstraint(["agent_run_id"], [f"{PROCESS}.agent_run.id"]),
@@ -250,8 +226,16 @@ def upgrade() -> None:
         schema=PROCESS,
     )
 
+    with op.batch_alter_table("job_item", schema=_resolve_schema(PROCESS)) as batch_op:
+        batch_op.drop_constraint(_ITEM_TYPE_CHECK, type_="check")
+        batch_op.create_check_constraint(_ITEM_TYPE_CHECK, _NEW_ITEM_TYPE_CONDITION)
+
 
 def downgrade() -> None:
+    with op.batch_alter_table("job_item", schema=_resolve_schema(PROCESS)) as batch_op:
+        batch_op.drop_constraint(_ITEM_TYPE_CHECK, type_="check")
+        batch_op.create_check_constraint(_ITEM_TYPE_CHECK, _OLD_ITEM_TYPE_CONDITION)
+
     op.drop_index(
         "ix_workflow_thread_subject_subject_type_subject_id",
         table_name="workflow_thread_subject",
@@ -286,11 +270,13 @@ def downgrade() -> None:
     op.drop_table("extracted_penalty_rule_attribute", schema=PENALTIES)
 
     if op.get_bind().dialect.name == "postgresql":
-        op.execute("DROP INDEX penalties.ix_extracted_penalty_rule_contract_status")
+        op.execute("DROP INDEX penalties.ix_extracted_penalty_rule_retailer_agreement_status")
     else:
-        op.execute("DROP INDEX ix_extracted_penalty_rule_contract_status")
+        op.execute("DROP INDEX ix_extracted_penalty_rule_retailer_agreement_status")
     op.drop_table("extracted_penalty_rule", schema=PENALTIES)
 
+    op.execute("DROP INDEX uq_retailer_agreement_document_sha256")
+    op.execute("DROP INDEX uq_retailer_agreement_contract_code")
     op.drop_index(op.f("ix_retailer_agreement_document_sha256"), table_name="retailer_agreement")
     op.drop_index(op.f("ix_retailer_agreement_contract_code"), table_name="retailer_agreement")
     op.drop_table("retailer_agreement")

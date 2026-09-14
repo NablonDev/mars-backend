@@ -112,6 +112,13 @@ class PenaltyRuleRepository:
         self._session.flush()
         return _rule_to_dict(rule)
 
+    def get_by_rule_code(self, rule_code: str) -> dict | None:
+        """Return the penalty rule with this `rule_code`, or None; backs publish's republish guard."""
+        row = self._session.scalars(
+            select(PenaltyRuleModel).where(PenaltyRuleModel.rule_code == rule_code)
+        ).first()
+        return _rule_to_dict(row) if row is not None else None
+
     def list_rules_for_retailer(self, retailer_id: UUID) -> list[PenaltyRuleValue]:
         """Fetch a retailer's active rules as pure-engine `PenaltyRuleValue` objects.
 

@@ -37,7 +37,7 @@ def _staged(
 ) -> StagedRule:
     return StagedRule(
         id="extracted-rule-1",
-        contract_id="contract-1",
+        retailer_agreement_id="contract-1",
         clause_fingerprint=FINGERPRINT,
         penalty_category=penalty_category,
         calc_type=calc_type,

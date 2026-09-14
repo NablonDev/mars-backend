@@ -68,6 +68,7 @@ def _as_fraction(value: Decimal, value_unit: str | None) -> Decimal:
 
 class PenaltyRulePublisher:
     """Maps one `StagedRule` to a `PublishedRule` or a `RejectedPublication`. Holds no state."""
+
     def publish(
         self, staged: StagedRule, retailer_code: str, contract_effective_date: date
     ) -> PublishedRule | RejectedPublication:
