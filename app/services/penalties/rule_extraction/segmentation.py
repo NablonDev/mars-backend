@@ -19,6 +19,30 @@ _FENCE_RE = re.compile(r"^\s*(```|~~~)")
 _MAX_UNIT_CHARS = 6_000
 _OVERLAP_BLOCKS = 1
 
+# Trigger phrases for the penalty categories a bundled clause most plausibly mixes,
+# restricted to the categories `clause_matching.CATEGORY_SCOPE` actually prices
+# (TRIGGER_SHORTAGE/TRIGGER_BOTH/TRIGGER_DELAY/TRIGGER_QUANTITY roles). Categories with no
+# safely distinguishing phrase (an escape value, a generic liability-cap clause) are
+# deliberately left out rather than guessed at.
+_CATEGORY_TRIGGER_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "SHORT_SHIP": ("short-shipment", "short shipment", "short-ship"),
+    "MINIMUM_VOLUME_SHORTFALL": (
+        "minimum volume commitment",
+        "annual volume commitment",
+        "purchase volume shortfall",
+    ),
+    "OTIF_LATE": ("late delivery", "on-time-in-full"),
+    "DELIVERY_WINDOW_VIOLATION": ("early delivery", "delivery window"),
+    "DELIVERY_ACCEPTANCE_COST_SHIFT": ("delivery acceptance", "acceptance delay"),
+    "ALTERNATE_SOURCING_MARKUP": ("cover purchase", "alternate sourcing"),
+    "STORAGE_DURATION_FEE": ("storage fee", "warehousing fee", "demurrage"),
+    "OVERAGE_CHARGEBACK": ("over-delivery", "over-shipment", "overage charge"),
+}
+
+# The floor on how much of a clause its deduplicated split windows must collectively
+# cover for `split_bundled_clause` to trust the split; below this, it returns no split.
+_MIN_SPLIT_COVERAGE = 0.3
+
 
 @dataclass(frozen=True)
 class ScreeningUnit:
@@ -67,6 +91,24 @@ def split_into_screening_units(markdown_text: str) -> list[ScreeningUnit]:
     return [
         ScreeningUnit(i, u.section_path, u.text, u.start_offset, u.end_offset) for i, u in enumerate(units)
     ]
+
+
+def split_bundled_clause(clause_text: str) -> list[str]:
+    """Split a clause into per-category sub-excerpts when it bundles more than one remedy.
+
+    Returns an empty list, meaning "do not split", when the text carries a trigger
+    keyword for at most one distinct penalty category (the common case, left untouched),
+    or when the candidate windows collectively cover too little of the clause to trust:
+    the caller then keeps processing the whole clause instead of losing it to a bad split.
+    """
+    hits = _category_hits_by_line(clause_text)
+    if len({category for category, _position in hits}) < 2:
+        return []
+    windows = [_block_window(clause_text, position) for _category, position in hits]
+    deduplicated = _drop_duplicate_windows(windows)
+    if len(deduplicated) < 2 or not _looks_complete(clause_text, deduplicated):
+        return []
+    return deduplicated
 
 
 def _fenced_line_spans(text: str) -> list[tuple[int, int]]:
@@ -216,3 +258,61 @@ def _split_oversized_section(section: _Section) -> list[ScreeningUnit]:
             )
         out.append(ScreeningUnit(0, section.breadcrumb, body, section.start, section.end))
     return out
+
+
+def _category_hits_by_line(text: str) -> list[tuple[str, int]]:
+    """Every (category, offset) hit, detected one physical line at a time.
+
+    Scanning line by line, rather than taking one global first-hit position per
+    category, means an incidental keyword mention on an earlier, unrelated line can
+    never mask a distinct category's real hit on a later line: both are recorded, and
+    `split_bundled_clause` windows and deduplicates each independently. Matches against
+    `text` directly with `re.IGNORECASE`, never a lowered copy, so a hit's offset is
+    always valid against `text` even where casefolding is not length-preserving.
+    """
+    hits: list[tuple[str, int]] = []
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        for category, phrases in _CATEGORY_TRIGGER_KEYWORDS.items():
+            match = next(
+                (m for phrase in phrases if (m := re.search(re.escape(phrase), line, re.IGNORECASE))), None
+            )
+            if match:
+                hits.append((category, offset + match.start()))
+        offset += len(line)
+    return hits
+
+
+def _block_window(text: str, position: int) -> str:
+    """The stripped text of the blank-line-delimited block containing offset `position`.
+
+    A block, not a single line, so a sentence hard-wrapped across lines with no blank
+    line between them (routine in a PDF-extracted contract) is never truncated.
+    """
+    cursor = 0
+    for block in _split_into_blocks(text):
+        start = text.find(block, cursor)
+        end = start + len(block)
+        if start <= position < end:
+            return block.strip()
+        cursor = end
+    return text.strip()
+
+
+def _drop_duplicate_windows(windows: list[str]) -> list[str]:
+    """Collapse windows with identical text, keeping the first, preserving order."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for window in windows:
+        if window in seen:
+            continue
+        seen.add(window)
+        out.append(window)
+    return out
+
+
+def _looks_complete(clause_text: str, windows: list[str]) -> bool:
+    """Whether the deduplicated windows cover enough of `clause_text` to trust the split."""
+    total = len(clause_text.strip())
+    covered = sum(len(w) for w in windows)
+    return total == 0 or covered / total >= _MIN_SPLIT_COVERAGE

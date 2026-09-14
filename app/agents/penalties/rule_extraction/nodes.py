@@ -3,10 +3,12 @@
 Two `Send` fan-outs drive the per-unit screening and per-clause processing stages,
 joining back into one fan-in node each (`resolve_candidates`, `stage_rules`). A `Send`
 lane receives only its own `ScreenUnitInput`/`ProcessClauseInput` dict, never the full
-state, so it structurally cannot reach `contract_id`, `run_id`, or a session; every
-database write lives in a fan-in node instead. A screening or classification failure on
-one lane is carried home as a plain dict in `extraction_errors` and flushed to
-`process.processing_error` by `stage_rules`; it never aborts the run.
+state, so it structurally cannot reach `retailer_agreement_id`, `run_id`, or a session; every
+database write lives in a fan-in node instead. A screening, classification, or
+fact-extraction failure on one lane is carried home as a plain dict in `extraction_errors`
+and flushed to `process.processing_error` by `stage_rules`; it never aborts the run. A
+candidate whose facts still fail `consistency_checks.consistency_issues` after retrying is
+not a failure: it stages normally, with the unresolved issues folded into its review notes.
 
 No node closes over a long-lived session: each one that touches the database opens its
 own scoped session via `self._database.session()`, mirroring
@@ -49,7 +51,12 @@ from app.services.penalties.rule_extraction.clause_matching import (
 )
 from app.services.penalties.rule_extraction.consistency_checks import consistency_issues
 from app.services.penalties.rule_extraction.fact_processing import evaluate_readiness, normalize_facts
-from app.services.penalties.rule_extraction.segmentation import ScreeningUnit, split_into_screening_units
+from app.services.penalties.rule_extraction.segmentation import (
+    ScreeningUnit,
+    split_bundled_clause,
+    split_into_screening_units,
+)
+from app.utils.sanitize import strip_nul_bytes
 
 # The exact columns `ExtractedPenaltyRuleAttribute` accepts; anything else a fact row
 # carries is folded into `extra` rather than raising on an unexpected constructor kwarg.
@@ -87,6 +94,8 @@ _MASTER_EXTRA_FIELDS = (
 # The only two decisions a reviewer can leave on a staged rule; anything else (most
 # commonly PENDING_REVIEW, still undecided) is ignored rather than applied.
 _DECISION_STATUSES = ("APPROVED", "REJECTED")
+
+_MAX_FACT_EXTRACTION_ATTEMPTS = 3
 
 
 def _extraction_error(
@@ -153,7 +162,7 @@ class RuleExtractionNodes:
 
     def split_document(self, state: RuleExtractionState) -> dict[str, Any]:
         """Split the contract markdown into small, section-aligned screening units. Pure."""
-        units = split_into_screening_units(state["contract_text"])
+        units = split_into_screening_units(state["retailer_agreement_text"])
         return {"screening_units": [asdict(u) for u in units]}
 
     def route_after_split_document(self, state: RuleExtractionState) -> list[Send]:
@@ -196,7 +205,7 @@ class RuleExtractionNodes:
 
     def resolve_candidates(self, state: RuleExtractionState) -> dict[str, Any]:
         """Confirm every screened excerpt against the source text and collapse overlapping finds. Pure."""
-        source_text = state["contract_text"]
+        source_text = state["retailer_agreement_text"]
         pairs = [
             (candidate, match_excerpt(source_text, candidate["excerpt"], ScreeningUnit(**candidate["unit"])))
             for candidate in state.get("screened_candidates", [])
@@ -227,74 +236,33 @@ class RuleExtractionNodes:
     # ---- classification and fact extraction (fan-out 2) ---- #
 
     def process_clause(self, arg: ProcessClauseInput) -> dict[str, Any]:
-        """Classify one clause, extract its facts, and normalize/validate them. Never touches the database."""
+        """Classify one clause, extract its facts, and normalize/validate them. Never touches the database.
+
+        A clause bundling more than one distinct penalty category (see
+        `segmentation.split_bundled_clause`) is split into per-category sub-excerpts
+        first, each processed exactly like a standalone clause; a single-category clause
+        takes the unchanged, unsplit path with no extra LLM call.
+        """
         clause = arg["clause"]
         clause_text = clause["clause_text"]
-        try:
-            classification = self._classify(
-                ClauseClassificationContext(
-                    section_title=clause.get("section_title"), clause_text=clause_text
-                )
-            )
-        except Exception as exc:  # noqa: BLE001
-            return {
-                "extraction_errors": [
-                    _extraction_error(
-                        "RULE_EXTRACTION_CLASSIFICATION_FAILED",
-                        str(exc),
-                        "process_clause",
-                        {"excerpt": clause_text[:500]},
-                    )
-                ]
-            }
+        section_title = clause.get("section_title")
+        sub_excerpts = split_bundled_clause(clause_text) or [clause_text]
 
-        master = classification.model_dump()
-        attributes: list[dict[str, Any]] = []
-        if master.get("is_penalty_rule"):
-            try:
-                fact_list = self._extract_facts(
-                    RuleFactContext(
-                        clause_text=clause_text,
-                        penalty_category=master["penalty_category"],
-                        calc_type=master["calc_type"],
-                    )
-                )
-            except Exception as exc:  # noqa: BLE001
-                return {
-                    "extraction_errors": [
-                        _extraction_error(
-                            "RULE_EXTRACTION_FACT_EXTRACTION_FAILED",
-                            str(exc),
-                            "process_clause",
-                            {"penalty_category": master.get("penalty_category")},
-                        )
-                    ]
-                }
-            attributes = [_fact_to_dict(fact) for fact in fact_list.facts]
+        drafts: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        for excerpt_text in sub_excerpts:
+            outcome = self._classify_and_extract(section_title, excerpt_text)
+            if "error" in outcome:
+                errors.append(outcome["error"])
+            else:
+                drafts.append(outcome["draft"])
 
-        scope = decide_po_scope(
-            master["penalty_category"],
-            bool(master.get("po_shortage_flag")),
-            bool(master.get("po_delay_flag")),
-        )
-        master["po_shortage_flag"] = scope.shortage
-        master["po_delay_flag"] = scope.delay
-        master["po_scope_reason"] = scope.reason
-
-        normalized = normalize_facts(attributes)
-        issues = consistency_issues(normalized, master["calc_type"])
-        readiness, readiness_notes = evaluate_readiness(master["calc_type"], normalized)
-
-        draft = {
-            "clause_text": clause_text,
-            "section_title": clause.get("section_title"),
-            "master": master,
-            "attributes": normalized,
-            "issues": issues,
-            "readiness_notes": readiness_notes,
-            "pricing_readiness": readiness,
-        }
-        return {"drafts": [draft]}
+        result: dict[str, Any] = {}
+        if drafts:
+            result["drafts"] = drafts
+        if errors:
+            result["extraction_errors"] = errors
+        return result
 
     # ---- staging (fan-in 2) ---- #
 
@@ -312,9 +280,9 @@ class RuleExtractionNodes:
                 processing_errors.log(
                     error["error_code"],
                     agent_run_id=state["run_id"],
-                    error_message=error["message"],
+                    error_message=strip_nul_bytes(error["message"]),
                     node_name=error["node_name"],
-                    raw_error_detail=error["detail"],
+                    raw_error_detail=strip_nul_bytes(error["detail"]),
                 )
 
             staged_ids: list[UUID] = []
@@ -332,7 +300,7 @@ class RuleExtractionNodes:
                     # skipped rule.
                     with session.begin_nested():
                         rule = extracted_rules.add_extracted_rule(
-                            contract_id=state["contract_id"],
+                            retailer_agreement_id=state["retailer_agreement_id"],
                             agent_run_id=state["run_id"],
                             clause_text=clause_text,
                             clause_fingerprint=hashlib.md5(clause_text.encode("utf-8")).hexdigest(),
@@ -354,7 +322,7 @@ class RuleExtractionNodes:
                     processing_errors.log(
                         "RULE_EXTRACTION_PERSIST_FAILED",
                         agent_run_id=state["run_id"],
-                        error_message=str(exc),
+                        error_message=strip_nul_bytes(str(exc)),
                         node_name="stage_rules",
                         raw_error_detail={"penalty_category": master.get("penalty_category")},
                     )
@@ -377,8 +345,8 @@ class RuleExtractionNodes:
         database.
         """
         with self._database.session() as session:
-            pending = ExtractedPenaltyRuleRepository(session).list_for_contract(
-                state["contract_id"], status="PENDING_REVIEW", agent_run_id=state["run_id"]
+            pending = ExtractedPenaltyRuleRepository(session).list_for_retailer_agreement(
+                state["retailer_agreement_id"], status="PENDING_REVIEW", agent_run_id=state["run_id"]
             )
         if not pending:
             return {}
@@ -386,7 +354,7 @@ class RuleExtractionNodes:
             {
                 "reason": "rule_review_required",
                 "run_id": str(state["run_id"]),
-                "contract_id": str(state["contract_id"]),
+                "retailer_agreement_id": str(state["retailer_agreement_id"]),
                 "pending_count": len(pending),
                 "extracted_rule_ids": [str(rule.id) for rule in pending],
                 "instructions": (
@@ -405,8 +373,102 @@ class RuleExtractionNodes:
         the run still reaches END.
         """
         with self._database.session() as session:
-            rows = ExtractedPenaltyRuleRepository(session).list_for_contract(
-                state["contract_id"], agent_run_id=state["run_id"]
+            rows = ExtractedPenaltyRuleRepository(session).list_for_retailer_agreement(
+                state["retailer_agreement_id"], agent_run_id=state["run_id"]
             )
         applied = [str(row.id) for row in rows if row.status in _DECISION_STATUSES]
         return {"applied_rule_ids": applied}
+
+    # ---- private helpers ---- #
+
+    def _classify_and_extract(self, section_title: str | None, clause_text: str) -> dict[str, Any]:
+        """Classify one excerpt, extract its facts if it is a penalty rule, and build its draft.
+
+        Returns `{"draft": ...}` on success or `{"error": ...}` on a classification or
+        fact-extraction failure, mirroring `process_clause`'s own error record shape. A
+        candidate whose facts still fail `consistency_issues` after
+        `_extract_facts_until_consistent` exhausts its retries is staged anyway, with the
+        unresolved issues folded into `review_notes` for a human to resolve.
+        """
+        try:
+            classification = self._classify(
+                ClauseClassificationContext(section_title=section_title, clause_text=clause_text)
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "error": _extraction_error(
+                    "RULE_EXTRACTION_CLASSIFICATION_FAILED",
+                    str(exc),
+                    "process_clause",
+                    {"excerpt": clause_text[:500]},
+                )
+            }
+
+        master = classification.model_dump()
+        normalized: list[dict[str, Any]] = []
+        issues: list[str] = []
+        if master.get("is_penalty_rule"):
+            try:
+                normalized, issues, _attempts = self._extract_facts_until_consistent(
+                    clause_text, master["penalty_category"], master["calc_type"]
+                )
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    "error": _extraction_error(
+                        "RULE_EXTRACTION_FACT_EXTRACTION_FAILED",
+                        str(exc),
+                        "process_clause",
+                        {"penalty_category": master.get("penalty_category")},
+                    )
+                }
+
+        scope = decide_po_scope(
+            master["penalty_category"],
+            bool(master.get("po_shortage_flag")),
+            bool(master.get("po_delay_flag")),
+        )
+        master["po_shortage_flag"] = scope.shortage
+        master["po_delay_flag"] = scope.delay
+        master["po_scope_reason"] = scope.reason
+
+        readiness, readiness_notes = evaluate_readiness(master["calc_type"], normalized)
+
+        draft = {
+            "clause_text": clause_text,
+            "section_title": section_title,
+            "master": master,
+            "attributes": normalized,
+            "issues": issues,
+            "readiness_notes": readiness_notes,
+            "pricing_readiness": readiness,
+        }
+        return {"draft": draft}
+
+    def _extract_facts_until_consistent(
+        self, clause_text: str, penalty_category: str, calc_type: str
+    ) -> tuple[list[dict[str, Any]], list[str], int]:
+        """Extract one clause's facts, retrying up to `_MAX_FACT_EXTRACTION_ATTEMPTS` attempts total.
+
+        Feeds the previous attempt's `consistency_issues` back into the next `RuleFactContext`
+        as corrective context and stops at the first clean attempt, so the dominant,
+        first-attempt-clean path makes exactly one `extract_facts` call. Any issues still
+        outstanding after the last attempt are returned, not raised: `_classify_and_extract`
+        stages the candidate regardless, with those issues folded into its review notes.
+        """
+        issues: list[str] = []
+        normalized: list[dict[str, Any]] = []
+        attempt = 0
+        for attempt in range(1, _MAX_FACT_EXTRACTION_ATTEMPTS + 1):
+            fact_list = self._extract_facts(
+                RuleFactContext(
+                    clause_text=clause_text,
+                    penalty_category=penalty_category,
+                    calc_type=calc_type,
+                    previous_issues=issues or None,
+                )
+            )
+            normalized = normalize_facts([_fact_to_dict(fact) for fact in fact_list.facts])
+            issues = consistency_issues(normalized, calc_type)
+            if not issues:
+                break
+        return normalized, issues, attempt

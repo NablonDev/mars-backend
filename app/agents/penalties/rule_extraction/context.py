@@ -30,11 +30,16 @@ class ClauseClassificationContext(BaseModel):
 
 
 class RuleFactContext(BaseModel):
-    """One classified rule handed to the fact stage; category/calc_type are pipeline decisions, not retrieved text."""
+    """One classified rule handed to the fact stage; category/calc_type are pipeline decisions, not retrieved text.
+
+    `previous_issues` is set on a repair retry: the prior attempt's `consistency_issues`
+    findings, fed back in as corrective context, never as a system-level instruction.
+    """
 
     clause_text: str
     penalty_category: str
     calc_type: str
+    previous_issues: list[str] | None = None
 
 
 def build_screening_messages(system_prompt: str, context: ScreeningUnitContext) -> list[BaseMessage]:

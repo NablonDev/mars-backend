@@ -25,6 +25,14 @@ def test_prompt_version_is_still_v1():
     assert PROMPT_VERSION == "v1"
 
 
+def test_fact_extraction_prompt_explains_what_previous_issues_means():
+    # `RuleFactContext.previous_issues` is threaded into a repair retry's data payload;
+    # nothing told the model what that field means or that it should act on it, so the
+    # extra retry calls were likely inert at temperature=0.0.
+    assert "previous_issues" in PENALTY_FACT_EXTRACTION_SYSTEM_PROMPT
+    assert "prior extraction attempt" in PENALTY_FACT_EXTRACTION_SYSTEM_PROMPT
+
+
 def test_prompt_teaches_branch_no_zero_as_the_single_branch_convention():
     assert "`branch_no = 0` is rule-wide" in PENALTY_FACT_EXTRACTION_SYSTEM_PROMPT
     # The old, contradictory instruction must be gone, not just superseded.
@@ -38,7 +46,7 @@ def test_publisher_prices_a_single_branch_rule_from_branch_no_zero_exactly_as_th
     changes, this fails alongside the prompt-text assertions above."""
     staged = StagedRule(
         id="rule-1",
-        contract_id="contract-1",
+        retailer_agreement_id="contract-1",
         clause_fingerprint="a" * 32,
         penalty_category="SHORT_SHIP",
         calc_type="PER_UNIT",

@@ -289,6 +289,10 @@ You are given the clause text together with the `penalty_category` and `calc_typ
 already decided for it. Use `calc_type` to decide how many rows this rule gets; do not
 re-classify the rule.
 
+When the data payload's `previous_issues` field is present and non-empty, it lists
+consistency problems a prior extraction attempt on this same clause left unresolved.
+Read each one and correct it in the rows you return this time; do not repeat it.
+
 BRANCHING. `branch_no = 0` is rule-wide: a rule with a single RATE, a single CAP, or any
 other non-tiered shape stages every one of its facts at `branch_no = 0`, and the pricing
 engine looks up a single-branch rule's RATE, CAP and GRACE_PERIOD there specifically.

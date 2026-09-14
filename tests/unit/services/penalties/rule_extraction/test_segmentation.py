@@ -3,7 +3,36 @@
 Zero DB dependency: pure text splitting.
 """
 
-from app.services.penalties.rule_extraction.segmentation import split_into_screening_units
+from app.services.penalties.rule_extraction import segmentation
+from app.services.penalties.rule_extraction.clause_matching import CATEGORY_SCOPE
+from app.services.penalties.rule_extraction.segmentation import (
+    split_bundled_clause,
+    split_into_screening_units,
+)
+
+# Modeled on ground-truth clause GT-04 (`data/rule_extraction_ground_truth/contract_3.yaml`,
+# `contract_intelligence/Synthetic_Contracts/contract_3_full_text_gemini.md` section 3.4): one
+# "OTIF Penalties" clause bundling three distinct charge types under lettered sub-items, each
+# its own blank-line-delimited block, matching how a PDF-extracted contract renders distinct
+# list items in markdown.
+_BUNDLED_CLAUSE = (
+    "3.4. OTIF Penalties. In the event Vendor fails to meet the delivery requirements "
+    "specified in the P.O., Purchaser shall automatically assess, and Vendor agrees to "
+    "pay, the following chargebacks via invoice deduction:\n"
+    "\n"
+    "(a) Late Delivery: For any Products delivered after the confirmed P.O. delivery "
+    "window, Vendor shall be subject to a late delivery penalty equal to four percent "
+    "(4.0%) of the total Cost of Goods Sold (COGS) of the delayed Products for each "
+    "calendar day the delivery is delayed, capped at a maximum of twenty percent (20.0%).\n"
+    "\n"
+    "(b) Shortages: For any Order where the unit volume delivered is less than ninety-five "
+    "percent (95.0%) of the ordered unit volume, Purchaser shall assess a short-shipment "
+    "penalty of seven percent (7.0%) on the total invoice value of the missing merchandise.\n"
+    "\n"
+    "(c) Early Delivery: Products delivered more than three (3) business days prior to the "
+    "confirmed delivery window may be refused or subject to an early delivery warehousing "
+    "fee of $150.00 per pallet per day.\n"
+)
 
 
 def test_two_adjacent_penalty_sections_produce_two_units_not_one():
@@ -91,3 +120,99 @@ def test_oversized_section_never_splits_a_table_in_half():
     containing = [u for u in units if table_rows[0] in u.text]
     assert len(containing) == 1
     assert all(row in containing[0].text for row in table_rows)
+
+
+def test_bundled_clause_with_three_distinct_charge_types_splits_into_three_sub_excerpts():
+    # GT-04: one clause with three lettered sub-items (late delivery, shortage, early
+    # delivery) collapsed to a single candidate before this fix. Each sub-item must now
+    # surface as its own, distinct sub-excerpt.
+    sub_excerpts = split_bundled_clause(_BUNDLED_CLAUSE)
+
+    assert len(sub_excerpts) == 3
+    # Pinned on the actual clause_text content, not just which categories a downstream
+    # FakeLLM happens to return: this would fail if the splitter picked the wrong spans.
+    late_delivery = next(e for e in sub_excerpts if "late delivery penalty" in e)
+    shortage = next(e for e in sub_excerpts if "short-shipment penalty" in e)
+    early_delivery = next(e for e in sub_excerpts if "early delivery warehousing fee" in e)
+    assert late_delivery.startswith("(a) Late Delivery:")
+    assert "four percent (4.0%)" in late_delivery
+    assert shortage.startswith("(b) Shortages:")
+    assert "seven percent (7.0%)" in shortage
+    assert early_delivery.startswith("(c) Early Delivery:")
+    assert "$150.00 per pallet per day" in early_delivery
+    # Each sub-excerpt is its own distinct string, so a downstream md5 fingerprint per
+    # sub-excerpt can never collide with another.
+    assert len(set(sub_excerpts)) == 3
+
+
+def test_category_trigger_keywords_are_all_real_governed_category_codes():
+    # `_CATEGORY_TRIGGER_KEYWORDS`'s category value is discarded and only used for
+    # grouping/deduplication, so a typo'd category code would otherwise be silently
+    # decorative instead of failing loudly.
+    assert set(segmentation._CATEGORY_TRIGGER_KEYWORDS) <= set(CATEGORY_SCOPE)
+
+
+def test_an_incidental_keyword_on_one_block_does_not_mask_a_different_later_block():
+    # Regression: the old global-first-hit algorithm let "late delivery" mentioned in
+    # passing inside the Shortages block win OTIF_LATE's window, so the genuine Late
+    # Delivery block below never got its own sub-excerpt and its remedy was lost.
+    clause = (
+        "Shortages: A short-shipment penalty applies when volume delivered is below "
+        "ninety-five percent; this provision is unrelated to any late delivery scenario.\n"
+        "\n"
+        "Late Delivery: Vendor shall pay a late delivery penalty of four percent (4.0%) per day.\n"
+    )
+
+    sub_excerpts = split_bundled_clause(clause)
+
+    assert len(sub_excerpts) == 2
+    assert any(e.startswith("Shortages:") for e in sub_excerpts)
+    assert any(e.startswith("Late Delivery:") for e in sub_excerpts)
+
+
+def test_hard_wrapped_clause_widens_the_window_to_the_full_paragraph_not_one_line():
+    # Regression: the old one-line window truncated a hard-wrapped sentence, dropping
+    # whichever fact landed on the sentence's continuation line.
+    clause = (
+        "Late Delivery: Vendor shall pay a late delivery penalty equal to the rate stated\n"
+        "below, four percent (4.0%) of COGS per day delayed.\n"
+        "\n"
+        "Shortages: A short-shipment penalty applies to any order missing units, at a rate\n"
+        "of seven percent (7.0%) of the invoice value.\n"
+    )
+
+    sub_excerpts = split_bundled_clause(clause)
+
+    assert len(sub_excerpts) == 2
+    assert any("four percent (4.0%)" in excerpt for excerpt in sub_excerpts)
+    assert any("seven percent (7.0%)" in excerpt for excerpt in sub_excerpts)
+
+
+def test_single_category_clause_is_not_split():
+    clause = "Supplier pays a $50 fee per short-shipped case, capped at $5,000 per invoice."
+
+    assert split_bundled_clause(clause) == []
+
+
+def test_clause_with_no_governed_category_signal_is_not_split():
+    clause = "This Agreement is governed by the laws of the State of Delaware."
+
+    assert split_bundled_clause(clause) == []
+
+
+def test_two_categories_sharing_one_line_collapse_to_a_single_sub_excerpt():
+    # "early delivery" (DELIVERY_WINDOW_VIOLATION) and "warehousing fee"
+    # (STORAGE_DURATION_FEE) both land on the same line here, so they must not produce
+    # two identical drafts (which would trip the run-scoped fingerprint uniqueness
+    # constraint downstream). Blank-line-separated from the Late Delivery line above it
+    # so each lands in its own block, isolating this from the hard-wrap widening.
+    clause = (
+        "Late Delivery: subject to a late delivery penalty of 4% of COGS per day.\n"
+        "\n"
+        "Early Delivery: subject to an early delivery warehousing fee of $150 per pallet.\n"
+    )
+
+    sub_excerpts = split_bundled_clause(clause)
+
+    assert len(sub_excerpts) == 2
+    assert len(set(sub_excerpts)) == 2
