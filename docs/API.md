@@ -269,7 +269,7 @@ under Common above).
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/api/v1/penalties/disputes` (body: `actual_penalty_id`, `reason_code`, `claimed_amount`, `notes?`) | Open a dispute against an existing actual penalty (`201`) |
+| POST | `/api/v1/penalties/disputes` (body: `actual_penalty_id`, `reason_code`, `claimed_amount`, `notes?`, `claim_facts?`) | Open a dispute against an existing actual penalty (`201`). `claim_facts` (defect_units, defect_rate_pct, replacement_cost_paid, occurrence_count, storage_days -- all optional, bounds-checked, unknown keys rejected) is written once onto the charge, never mutated after (`409 CLAIM_FACTS_ALREADY_SET` on a second attempt); only QUALITY/COVER_PURCHASE/FINANCIAL/STORAGE_DURATION_FEE-family disputes need it |
 | GET | `/api/v1/penalties/disputes?purchase_order_id=` | List disputes, optionally filtered to one PO (`404` if the PO itself doesn't exist); omitted lists across every PO |
 | GET | `/api/v1/penalties/disputes/{dispute_id}` | Single dispute read (`404 DISPUTE_NOT_FOUND`) |
 | POST | `/api/v1/penalties/disputes/{dispute_id}/analyze` | Compute and persist the verdict against the original rule (synchronous -- no job-queue involvement, no blocking human-approval gate by design), moving the dispute to `ANALYZED` |
