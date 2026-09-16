@@ -64,3 +64,10 @@ dev = [
 # separate, later decision, not part of this tooling-gate phase.
 python_version = "3.12"
 ignore_missing_imports = true
+
+[project.scripts]
+mars-bff = "mars_bff:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
