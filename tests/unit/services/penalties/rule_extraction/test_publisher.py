@@ -1,7 +1,7 @@
 """Tests for the pure publication engine (`app.services.penalties.rule_extraction.publisher`):
 the admission gate, the field mapping for all four supported calc types, tier
-construction, and one case for each of the fifteen rejection reasons in
-`penalty-rule-extraction.md` section 6.3.
+construction, and one case for each of the seventeen rejection reasons the
+publisher itself can return (`ALREADY_PUBLISHED` is set by the service layer, not here).
 
 Zero DB dependency -- no fixtures beyond the pure dataclasses.
 """
@@ -133,7 +133,11 @@ def _to_penalty_rule(result: PublishedRule) -> PenaltyRule:
         threshold_pct=float(result.threshold_pct),
         cap_amount=float(result.cap_amount) if result.cap_amount is not None else None,
         tiers=[
-            PenaltyRuleTier(band_min=float(t.band_min), band_max=float(t.band_max), rate=float(t.rate))
+            PenaltyRuleTier(
+                band_min=float(t.band_min),
+                band_max=float(t.band_max) if t.band_max is not None else None,
+                rate=float(t.rate),
+            )
             for t in result.tiers
         ]
         or None,
@@ -194,7 +198,7 @@ def test_publish_tiered_happy_path_builds_ascending_half_open_bands():
     assert bands == [
         (Decimal(0), Decimal("0.1"), Decimal("0.01")),
         (Decimal("0.1"), Decimal("0.2"), Decimal("0.02")),
-        (Decimal("0.2"), Decimal("Infinity"), Decimal("0.03")),
+        (Decimal("0.2"), None, Decimal("0.03")),
     ]
 
 
@@ -203,7 +207,7 @@ def test_publish_tiered_happy_path_builds_ascending_half_open_bands():
 # ---------------------------------------------------------------------------
 
 
-def test_delay_flag_maps_to_otif_late_when_no_metric_names_a_family():
+def test_otif_late_category_maps_to_otif_late_when_no_metric_names_a_family():
     staged = _staged(
         calc_type="FLAT_FEE",
         facts=[_rate_fact(10, value_unit="USD", basis_type="NONE")],
@@ -214,6 +218,43 @@ def test_delay_flag_maps_to_otif_late_when_no_metric_names_a_family():
     result = PUBLISHER.publish(staged, RETAILER_CODE, CONTRACT_EFFECTIVE_DATE)
     assert isinstance(result, PublishedRule)
     assert result.violation_type == "OTIF_LATE"
+
+
+def test_minimum_volume_shortfall_publishes_as_its_own_family_rather_than_short_ship():
+    # Extraction used to reject this (UNMAPPED_VIOLATION_TYPE) rather than misrouting it
+    # onto SHORT_SHIP. MINIMUM_VOLUME_SHORTFALL now gets its own VOLUME_COMMITMENT family
+    # and VOLUME_SHORTFALL violation_type, so it publishes and is visible, but still is not
+    # SHORT_SHIP -- projection/mitigation do not select it yet (that is commitment-tracking
+    # work still to come).
+    staged = _staged(
+        calc_type="PERCENT_OF_PO",
+        facts=[_rate_fact(2, value_unit="PERCENT")],
+        po_shortage_flag=True,
+        po_delay_flag=False,
+        penalty_category="MINIMUM_VOLUME_SHORTFALL",
+    )
+    result = PUBLISHER.publish(staged, RETAILER_CODE, CONTRACT_EFFECTIVE_DATE)
+    assert isinstance(result, PublishedRule)
+    assert result.engine_family == "VOLUME_COMMITMENT"
+    assert result.violation_type == "VOLUME_SHORTFALL"
+
+
+def test_alternate_sourcing_markup_publishes_as_its_own_family_rather_than_otif_late():
+    # Extraction used to reject this (UNMAPPED_VIOLATION_TYPE) rather than misrouting it
+    # onto OTIF_LATE. ALTERNATE_SOURCING_MARKUP now gets its own COVER_PURCHASE family and
+    # violation_type, so it publishes and is visible, but is priceable only by dispute,
+    # never by the per-day-late delay engine.
+    staged = _staged(
+        calc_type="PERCENT_OF_PO",
+        facts=[_rate_fact(5, value_unit="PERCENT")],
+        po_shortage_flag=True,
+        po_delay_flag=True,
+        penalty_category="ALTERNATE_SOURCING_MARKUP",
+    )
+    result = PUBLISHER.publish(staged, RETAILER_CODE, CONTRACT_EFFECTIVE_DATE)
+    assert isinstance(result, PublishedRule)
+    assert result.engine_family == "COVER_PURCHASE"
+    assert result.violation_type == "COVER_PURCHASE"
 
 
 def test_fill_rate_pct_metric_maps_to_fill_rate():
@@ -228,6 +269,9 @@ def test_fill_rate_pct_metric_maps_to_fill_rate():
 
 
 def test_fill_rate_pct_metric_wins_over_both_po_flags_true():
+    # penalty_category is SHORT_SHIP (SHORTAGE family), same as the sibling test above;
+    # the point here is that the metric still wins over the category-derived fallback
+    # even when both PO flags are true (flags are reporting-only and play no role either way).
     facts = [
         _threshold_fact(0.02, metric_code="FILL_RATE_PCT"),
         _rate_fact(1, value_unit="PERCENT"),
@@ -237,7 +281,7 @@ def test_fill_rate_pct_metric_wins_over_both_po_flags_true():
         facts=facts,
         po_shortage_flag=True,
         po_delay_flag=True,
-        penalty_category="FILL_RATE",
+        penalty_category="SHORT_SHIP",
     )
     result = PUBLISHER.publish(staged, RETAILER_CODE, CONTRACT_EFFECTIVE_DATE)
     assert isinstance(result, PublishedRule)
@@ -338,10 +382,40 @@ def test_rejects_not_ready():
 
 
 def test_rejects_not_po_scoped():
-    staged = _staged(po_shortage_flag=False, po_delay_flag=False, facts=[_rate_fact(1, value_unit="USD")])
+    # UNMAPPED is the one category whose engine_family is UNPRICEABLE; every other
+    # category is admitted regardless of its PO flags (see the de-restriction test below).
+    staged = _staged(
+        po_shortage_flag=False,
+        po_delay_flag=False,
+        penalty_category="UNMAPPED",
+        facts=[_rate_fact(1, value_unit="USD")],
+    )
     result = PUBLISHER.publish(staged, RETAILER_CODE, CONTRACT_EFFECTIVE_DATE)
     assert isinstance(result, RejectedPublication)
     assert result.reason_code == RejectionReason.NOT_PO_SCOPED
+
+
+def test_admits_short_ship_with_both_po_flags_false_since_admission_is_family_based():
+    # Admission is gated on engine_family, not on the PO flags, so
+    # a SHORT_SHIP rule with both flags false (previously NOT_PO_SCOPED) now publishes.
+    staged = _staged(po_shortage_flag=False, po_delay_flag=False, facts=[_rate_fact(2.5, value_unit="USD")])
+    result = PUBLISHER.publish(staged, RETAILER_CODE, CONTRACT_EFFECTIVE_DATE)
+    assert isinstance(result, PublishedRule)
+    assert result.engine_family == "SHORTAGE"
+
+
+def test_quality_defect_chargeback_publishes_with_its_own_engine_family():
+    staged = _staged(
+        calc_type="PER_UNIT",
+        facts=[_rate_fact(10, value_unit="USD", basis_type="NONE")],
+        po_shortage_flag=False,
+        po_delay_flag=False,
+        penalty_category="QUALITY_DEFECT_CHARGEBACK",
+    )
+    result = PUBLISHER.publish(staged, RETAILER_CODE, CONTRACT_EFFECTIVE_DATE)
+    assert isinstance(result, PublishedRule)
+    assert result.engine_family == "QUALITY"
+    assert result.violation_type == "QUALITY_DEFECT"
 
 
 def test_rejects_unsupported_calc_type():
@@ -365,10 +439,41 @@ def test_rejects_no_rate_value():
     assert result.reason_code == RejectionReason.NO_RATE_VALUE
 
 
-def test_rejects_marginal_tiers():
+def test_rejects_ambiguous_rate_branch_when_rate_facts_exist_off_the_expected_branch():
+    # A non-tiered calc_type looks for RATE at branch_no=0; per-category rates staged
+    # on branches 1-3 (none at 0) can't flatten to one rule-level number, so this rejects,
+    # but as AMBIGUOUS_RATE_BRANCH, not the misleading "no RATE fact anywhere" NO_RATE_VALUE.
+    facts = [
+        _rate_fact(1, value_unit="USD", branch_no=1),
+        _rate_fact(2, value_unit="USD", branch_no=2),
+        _rate_fact(3, value_unit="USD", branch_no=3),
+    ]
+    staged = _staged(calc_type="PERCENT_OF_PO", facts=facts)
+    result = PUBLISHER.publish(staged, RETAILER_CODE, CONTRACT_EFFECTIVE_DATE)
+    assert isinstance(result, RejectedPublication)
+    assert result.reason_code == RejectionReason.AMBIGUOUS_RATE_BRANCH
+    assert "1" in result.reason_detail and "2" in result.reason_detail and "3" in result.reason_detail
+
+
+def test_marginal_tiers_publish_now_that_the_engine_supports_them():
+    # shortage.price_tiered now supports marginal accumulation, so a staged MARGINAL
+    # rule publishes instead of rejecting; tier_application round-trips onto the tier.
     facts = [
         _threshold_fact(0, branch_no=1, tier_application="MARGINAL"),
         _rate_fact(1, value_unit="PERCENT", branch_no=1),
+    ]
+    staged = _staged(calc_type="TIERED", facts=facts)
+    result = PUBLISHER.publish(staged, RETAILER_CODE, CONTRACT_EFFECTIVE_DATE)
+    assert isinstance(result, PublishedRule)
+    assert result.tiers[0].tier_application == "MARGINAL"
+
+
+def test_rejects_tier_bands_that_mix_tier_application_values():
+    facts = [
+        _threshold_fact(0, branch_no=1, tier_application="CLIFF"),
+        _rate_fact(1, value_unit="PERCENT", branch_no=1),
+        _threshold_fact(10, branch_no=2, tier_application="MARGINAL"),
+        _rate_fact(2, value_unit="PERCENT", branch_no=2),
     ]
     staged = _staged(calc_type="TIERED", facts=facts)
     result = PUBLISHER.publish(staged, RETAILER_CODE, CONTRACT_EFFECTIVE_DATE)
@@ -406,30 +511,38 @@ def test_rejects_unsupported_basis():
     assert result.reason_code == RejectionReason.UNSUPPORTED_BASIS
 
 
-def test_po_value_and_unit_cost_basis_map_onto_cost_of_goods_for_the_pricing_engine():
-    # PO_VALUE and UNIT_COST are extraction-side basis values; the pricing engine
-    # (`app.services.penalties.projection.types`) only understands COST_OF_GOODS and
-    # SHORTFALL_VALUE. A published rule must carry a basis the engine recognizes, not
-    # the raw extraction value, or it silently falls back to the wrong basis downstream.
-    for basis_type in ("PO_VALUE", "UNIT_COST"):
-        staged = _staged(
-            calc_type="PERCENT_OF_PO", facts=[_rate_fact(2.5, value_unit="PERCENT", basis_type=basis_type)]
-        )
-        result = PUBLISHER.publish(staged, RETAILER_CODE, CONTRACT_EFFECTIVE_DATE)
-        assert isinstance(result, PublishedRule)
-        assert result.basis_type == "COST_OF_GOODS"
-
-
-def test_rejects_shortfall_units_basis_as_unsupported_by_the_pricing_engine():
-    # SHORTFALL_UNITS has no correct pricing-engine equivalent: mapping it onto
-    # SHORTFALL_VALUE would multiply an already-per-unit rate by unit_price a second
-    # time, so the rule must be rejected rather than published and mispriced.
+def test_po_value_basis_is_stored_verbatim_not_folded_onto_cost_of_goods():
+    # `basis_type` is stored verbatim once accepted; the map is a validation gate
+    # only, not a translation table. The engine decides what it can price at read time.
     staged = _staged(
-        calc_type="PERCENT_OF_PO", facts=[_rate_fact(2.5, value_unit="PERCENT", basis_type="SHORTFALL_UNITS")]
+        calc_type="PERCENT_OF_PO", facts=[_rate_fact(2.5, value_unit="PERCENT", basis_type="PO_VALUE")]
+    )
+    result = PUBLISHER.publish(staged, RETAILER_CODE, CONTRACT_EFFECTIVE_DATE)
+    assert isinstance(result, PublishedRule)
+    assert result.basis_type == "PO_VALUE"
+
+
+def test_rejects_unit_cost_basis_rather_than_folding_onto_cost_of_goods():
+    # UNIT_COST names a real, different price (the retailer's own unit cost) that the
+    # data model doesn't have; folding it onto COST_OF_GOODS, as this used to do, would
+    # silently price it against the PO's own order value instead.
+    staged = _staged(
+        calc_type="PERCENT_OF_PO", facts=[_rate_fact(2.5, value_unit="PERCENT", basis_type="UNIT_COST")]
     )
     result = PUBLISHER.publish(staged, RETAILER_CODE, CONTRACT_EFFECTIVE_DATE)
     assert isinstance(result, RejectedPublication)
     assert result.reason_code == RejectionReason.UNSUPPORTED_BASIS
+
+
+def test_shortfall_units_basis_publishes_now_that_the_engine_branches_on_it():
+    # shortage.py now has a dedicated SHORTFALL_UNITS branch (a flat per-unit
+    # rate, never multiplied by unit_price), so it publishes and carries the basis verbatim.
+    staged = _staged(
+        calc_type="PER_UNIT", facts=[_rate_fact(2.5, value_unit="USD", basis_type="SHORTFALL_UNITS")]
+    )
+    result = PUBLISHER.publish(staged, RETAILER_CODE, CONTRACT_EFFECTIVE_DATE)
+    assert isinstance(result, PublishedRule)
+    assert result.basis_type == "SHORTFALL_UNITS"
 
 
 def test_rejects_unsupported_accrual():

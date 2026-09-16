@@ -6,6 +6,7 @@ Pure: no session, no network, no clock, no randomness.
 from datetime import date
 from decimal import Decimal
 from itertools import pairwise
+from typing import Any
 
 from app.services.penalties.rule_extraction.types import (
     PublishedRule,
@@ -15,32 +16,56 @@ from app.services.penalties.rule_extraction.types import (
     StagedFact,
     StagedRule,
 )
-from app.services.penalties.rule_extraction.vocabulary import DURATION_APPLIES_PER, tier_bands_are_contiguous
+from app.services.penalties.rule_extraction.vocabulary import (
+    DURATION_APPLIES_PER,
+    ROUNDING_CONVENTIONS,
+    CategoryDefaults,
+    tier_bands_are_contiguous,
+)
 
 _SUPPORTED_CALC_TYPES = {"PER_UNIT", "PERCENT_OF_PO", "FLAT_FEE", "TIERED"}
-# `app.services.penalties.projection.types` prices only off COST_OF_GOODS, off
-# SHORTFALL_VALUE, or off no basis at all; it has no concept of PO_VALUE, UNIT_COST, or
-# SHORTFALL_UNITS. PO_VALUE and UNIT_COST both price off the order's full value in that
-# single-unit-price engine, so they map onto COST_OF_GOODS unchanged. SHORTFALL_UNITS has
-# no engine equivalent: mapping it onto SHORTFALL_VALUE would multiply a per-unit rate by
-# unit_price a second time, so a rule carrying it is rejected rather than mispriced.
-_BASIS_TYPE_MAP: dict[str | None, str | None] = {
-    None: None,
-    "NONE": None,
-    "PO_VALUE": "COST_OF_GOODS",
-    "UNIT_COST": "COST_OF_GOODS",
-    "COST_OF_GOODS": "COST_OF_GOODS",
-    "SHORTFALL_VALUE": "SHORTFALL_VALUE",
+# `app.services.penalties.projection.types` has no real cost-of-goods, wholesale, retail,
+# or invoice figure. `basis_type` only changes the math for SHORTFALL_VALUE (a fill-rate-floor
+# calculation) and SHORTFALL_UNITS (a flat per-unit rate); every other accepted
+# value, PO_VALUE and COST_OF_GOODS included, prices off the PO's own order_qty * unit_price.
+# `basis_type` is stored verbatim: this set is only a validation gate, not a
+# translation table, and the engine decides what it can use. UNIT_COST, WHOLESALE_PRICE,
+# RETAIL_PRICE, and PRICE_DIFFERENTIAL each name a real, different price the data model
+# doesn't have, so storing them would misrepresent what the rule actually prices against;
+# they're rejected instead.
+_SUPPORTED_BASIS_TYPES = {
+    None,
+    "NONE",
+    "PO_VALUE",
+    "COST_OF_GOODS",
+    "SHORTFALL_VALUE",
+    "SHORTFALL_UNITS",
 }
+# Families projection/mitigation actually select today (`ProjectionEngine.project`,
+# `SHORTAGE_VIOLATION_TYPES`/`DELAY_VIOLATION_TYPES`). `is_engine_priceable` is a stored
+# snapshot of this, not derived at read time: it does NOT update itself, so this set (and every
+# `penalty_rule.is_engine_priceable` value already written) must be reviewed and potentially
+# updated whenever engine capability changes, e.g. a future family gaining a real pricing model.
+_ENGINE_PRICEABLE_FAMILIES = {"SHORTAGE", "DELAY"}
 # A grace period is written straight into `penalty_rule.grace_period_days`, so any other
 # unit would be read as days and understate the band by its own multiple.
 _GRACE_PERIOD_UNITS = {"CALENDAR_DAYS", "BUSINESS_DAYS"}
-# `app.services.penalties.projection.types.APPLIES_PER_DAY` is the only applies_per
-# value the pricing engine accrues over: `price_delay_penalty` multiplies by day count
-# only when it sees this exact value. Every other duration unit here (WEEK, MONTH,
-# QUARTER, YEAR) would price as a single flat application instead of accruing, silently
-# undercharging a per-week/month/quarter/year clause, so those stay rejected.
-_SUPPORTED_DURATION_APPLIES_PER = {"DAY"}
+# Every `DURATION_APPLIES_PER` value now accrues in `price_delay_penalty` (DAY
+# multiplies by day count directly, WEEK/MONTH/QUARTER/YEAR convert through
+# `rounding_convention`), so this set matches `DURATION_APPLIES_PER` itself rather than
+# narrowing it.
+_SUPPORTED_DURATION_APPLIES_PER = set(DURATION_APPLIES_PER)
+# The fractional-period subset of _SUPPORTED_DURATION_APPLIES_PER: `price_delay_penalty`'s
+# `_accrual_periods` raises NotImplementedError, uncaught, inside `ProjectionEngine.project`'s
+# per-PO loop for one of these without a governed `rounding_convention`. A TIERED rule ignores
+# `applies_per`/`rounding_convention` entirely (it bands directly on the measure), so the
+# requirement below is calc_type-specific, not a blanket one.
+_FRACTIONAL_PERIOD_APPLIES_PER = {"WEEK", "MONTH", "QUARTER", "YEAR"}
+# Fallback for a tier band whose fact states no metric_code and whose rule carries no
+# dominant one either. Matches the migration's own backfill value for tier rows written
+# before `metric_code` existed, and every tiered rule the engine actually prices today is a
+# shortfall-percentage ladder.
+_DEFAULT_TIER_BASIS = "SHORTFALL_PCT"
 # The metric names the measurement precisely; the PO flags only say which families the
 # clause touches, and a category's governed defaults can legitimately raise both.
 _VIOLATION_TYPE_BY_METRIC = {
@@ -48,6 +73,39 @@ _VIOLATION_TYPE_BY_METRIC = {
     "SHORTFALL_PCT": "SHORT_SHIP",
     "SHORTFALL_QTY": "SHORT_SHIP",
     "OTIF_PCT": "OTIF_LATE",
+}
+# Fallback for a rule whose metric doesn't name a family: the category's own governed
+# violation_type. Every admitted category (see `CategoryDefaults.engine_family_for`) gets an
+# entry; a category with no entry here has nothing to fall back to and rejects instead of
+# being assigned to whichever family its PO flags happen to raise. Categories whose
+# engine_family is UNPRICEABLE (UNSPECIFIED_EXTERNAL/INTERNAL, UNMAPPED) never reach this map:
+# `_check_admission` rejects them first.
+#
+# Every value below other than SHORT_SHIP/OTIF_LATE is deliberately a new violation_type,
+# distinct from `projection.types.SHORTAGE_VIOLATION_TYPES`/`DELAY_VIOLATION_TYPES`:
+# extraction/publication admission is de-restricted from engine pricing support, so admitting
+# a category here does not by itself widen what projection/mitigation can price. Reusing an
+# existing engine-recognized value here would silently route a category through pricing math
+# built for a different shape, misrouting it under a new name.
+_VIOLATION_TYPE_BY_CATEGORY = {
+    "SHORT_SHIP": "SHORT_SHIP",
+    "OTIF_LATE": "OTIF_LATE",
+    "DELIVERY_WINDOW_VIOLATION": "DELIVERY_WINDOW_VIOLATION",
+    "DELIVERY_ACCEPTANCE_COST_SHIFT": "DELIVERY_ACCEPTANCE_COST_SHIFT",
+    "QUALITY_DEFECT_CHARGEBACK": "QUALITY_DEFECT",
+    "NON_CONFORMANCE_COST_RECOVERY": "QUALITY_DEFECT",
+    "DEFECT_RECTIFICATION_COST_SHIFT": "QUALITY_DEFECT",
+    "RECALL_COST_RECOVERY": "QUALITY_DEFECT",
+    "ALTERNATE_SOURCING_MARKUP": "COVER_PURCHASE",
+    "MINIMUM_VOLUME_SHORTFALL": "VOLUME_SHORTFALL",
+    "OVERAGE_CHARGEBACK": "OVERAGE_CHARGEBACK",
+    "OVERAGE_NONPAYMENT": "OVERAGE_NONPAYMENT",
+    "STORAGE_DURATION_FEE": "STORAGE_DURATION",
+    "AGGREGATE_LIABILITY_CAP": "LIABILITY_CAP",
+    "PRICE_PARITY_CLAWBACK": "FINANCIAL_ADJUSTMENT",
+    "LATE_PAYMENT_INTEREST": "FINANCIAL_ADJUSTMENT",
+    "EARLY_PAYMENT_DISCOUNT": "FINANCIAL_ADJUSTMENT",
+    "AUDIT_FINDING_PENALTY": "FINANCIAL_ADJUSTMENT",
 }
 
 
@@ -86,9 +144,11 @@ class PenaltyRulePublisher:
             return RejectedPublication(
                 RejectionReason.NOT_READY, f"pricing_readiness={staged.pricing_readiness!r}"
             )
-        if not (staged.po_shortage_flag or staged.po_delay_flag):
+        engine_family = CategoryDefaults.engine_family_for(staged.penalty_category)
+        if engine_family == "UNPRICEABLE":
             return RejectedPublication(
-                RejectionReason.NOT_PO_SCOPED, "po_shortage_flag and po_delay_flag are both false"
+                RejectionReason.NOT_PO_SCOPED,
+                f"penalty_category={staged.penalty_category!r} has engine_family=UNPRICEABLE",
             )
         return None
 
@@ -96,14 +156,32 @@ class PenaltyRulePublisher:
         """Deterministic from retailer, category, and clause fingerprint: same input, same code."""
         return f"{retailer_code}-{staged.penalty_category}-{staged.clause_fingerprint[:8]}"
 
-    def _dominant_metric_code(self, facts: list[StagedFact]) -> str | None:
-        """The rule-wide THRESHOLD's metric, else the lowest-branch fact that names one."""
+    def _dominant_metric_fact(self, facts: list[StagedFact]) -> StagedFact | None:
+        """The rule-wide THRESHOLD fact if it names a metric, else the lowest-branch fact that does."""
         threshold = _find_fact(facts, "THRESHOLD", branch_no=0)
         if threshold is not None and threshold.metric_code is not None:
-            return threshold.metric_code
+            return threshold
         for fact in sorted(facts, key=lambda f: f.branch_no):
             if fact.metric_code is not None:
-                return fact.metric_code
+                return fact
+        return None
+
+    def _dominant_metric_code(self, facts: list[StagedFact]) -> str | None:
+        """The rule-wide THRESHOLD's metric, else the lowest-branch fact that names one."""
+        fact = self._dominant_metric_fact(facts)
+        return fact.metric_code if fact is not None else None
+
+    def _first_extra_value(self, facts: list[StagedFact], key: str) -> Any:
+        """First non-None `extra[key]` across `facts`, in branch order; None if none is staged.
+
+        `window_type`/`window_length`/`window_length_unit`/`rounding_convention` live in
+        `StagedFact.extra` (see `ExtractedPenaltyRuleAttribute.extra`), not a typed column, and
+        the extraction prompt does not pin them to one particular `attribute_role`.
+        """
+        for fact in sorted(facts, key=lambda f: f.branch_no):
+            value = fact.extra.get(key)
+            if value is not None:
+                return value
         return None
 
     def _check_mixed_currency(self, facts: list[StagedFact]) -> RejectedPublication | None:
@@ -115,17 +193,25 @@ class PenaltyRulePublisher:
             )
         return None
 
-    def _map_violation_type(self, staged: StagedRule) -> str:
-        """The metric decides when it names one, since a category may raise both PO flags.
+    def _map_violation_type(self, staged: StagedRule) -> str | RejectedPublication:
+        """The metric decides when it names one; the category otherwise, only when it is itself a family.
 
-        Falling back to the flags would price a fill-rate clause as a delay whenever its
-        category defaults both on, silently charging against the wrong measurement.
+        Falling back to the PO flags would price a fill-rate clause as a delay whenever its
+        category defaults both on, silently charging against the wrong measurement; that is
+        how MINIMUM_VOLUME_SHORTFALL and ALTERNATE_SOURCING_MARKUP were misrouted onto
+        SHORT_SHIP and OTIF_LATE. Anything neither map recognizes rejects instead.
         """
         metric_code = self._dominant_metric_code(staged.facts)
         mapped = _VIOLATION_TYPE_BY_METRIC.get(metric_code or "")
         if mapped is not None:
             return mapped
-        return "OTIF_LATE" if staged.po_delay_flag else "SHORT_SHIP"
+        mapped = _VIOLATION_TYPE_BY_CATEGORY.get(staged.penalty_category)
+        if mapped is not None:
+            return mapped
+        return RejectedPublication(
+            RejectionReason.UNMAPPED_VIOLATION_TYPE,
+            f"penalty_category={staged.penalty_category!r} metric_code={metric_code!r}",
+        )
 
     def _map_threshold_pct(self, facts: list[StagedFact]) -> Decimal | RejectedPublication:
         """Rule-wide grace band from the branch-0 THRESHOLD fact; 0 when none is staged."""
@@ -165,9 +251,21 @@ class PenaltyRulePublisher:
     def _map_rate(
         self, facts: list[StagedFact], branch_no: int, calc_type: str
     ) -> tuple[Decimal, str | None, str | None, str | None] | RejectedPublication:
-        """RATE fact at one branch, converted, basis- and accrual-checked."""
+        """RATE fact at one branch, converted, basis- and accrual-checked.
+
+        A clause can legitimately stage RATE facts on branches other than the expected one
+        (e.g. per-category rates, each its own branch) when a rule-level number can't
+        capture a rate that varies by an orthogonal dimension; that case rejects as
+        `AMBIGUOUS_RATE_BRANCH` rather than the misleading `NO_RATE_VALUE`.
+        """
         fact = _find_fact(facts, "RATE", branch_no=branch_no)
         if fact is None:
+            other_branches = sorted({f.branch_no for f in facts if f.attribute_role == "RATE"})
+            if other_branches:
+                return RejectedPublication(
+                    RejectionReason.AMBIGUOUS_RATE_BRANCH,
+                    f"branch_no={branch_no}: no RATE fact there, but branch_no {other_branches} carry one",
+                )
             return RejectedPublication(RejectionReason.NO_RATE_VALUE, f"branch_no={branch_no}: no RATE fact")
         if fact.value_status == "EXTERNAL_REFERENCE":
             return RejectedPublication(
@@ -185,6 +283,15 @@ class PenaltyRulePublisher:
             return RejectedPublication(
                 RejectionReason.UNSUPPORTED_ACCRUAL, f"applies_per={fact.applies_per!r}"
             )
+        if (
+            calc_type != "TIERED"
+            and fact.applies_per in _FRACTIONAL_PERIOD_APPLIES_PER
+            and self._first_extra_value(facts, "rounding_convention") not in ROUNDING_CONVENTIONS
+        ):
+            return RejectedPublication(
+                RejectionReason.UNSUPPORTED_ACCRUAL,
+                f"applies_per={fact.applies_per!r} has no supported rounding_convention",
+            )
         basis_type = self._map_basis_type(fact.basis_type, calc_type)
         if isinstance(basis_type, RejectedPublication):
             return basis_type
@@ -192,16 +299,16 @@ class PenaltyRulePublisher:
         return rate, basis_type, fact.currency_code, fact.applies_per
 
     def _map_basis_type(self, basis_type: str | None, calc_type: str) -> str | None | RejectedPublication:
-        """Extraction basis onto the pricing engine's accepted set, or a rejection.
+        """Extraction basis stored verbatim once accepted, or a rejection.
 
         A flat fee multiplies nothing, so `NONE` is its only coherent basis regardless
-        of what else `_BASIS_TYPE_MAP` would otherwise accept.
+        of what else `_SUPPORTED_BASIS_TYPES` would otherwise accept.
         """
         if calc_type == "FLAT_FEE" and basis_type not in (None, "NONE"):
             return RejectedPublication(RejectionReason.UNSUPPORTED_BASIS, f"basis_type={basis_type!r}")
-        if basis_type not in _BASIS_TYPE_MAP:
+        if basis_type not in _SUPPORTED_BASIS_TYPES:
             return RejectedPublication(RejectionReason.UNSUPPORTED_BASIS, f"basis_type={basis_type!r}")
-        return _BASIS_TYPE_MAP[basis_type]
+        return basis_type
 
     def _build_tiers(
         self, facts: list[StagedFact], rule_code: str, calc_type: str
@@ -210,7 +317,7 @@ class PenaltyRulePublisher:
 
         A branch's THRESHOLD carries either an explicit upper bound (`operator=BETWEEN`,
         `value_max` set) or an open lower bound (`operator=GTE`) whose upper bound is the
-        next branch's lower bound, or infinity for the last branch.
+        next branch's lower bound, or `None` (unbounded) for the last branch.
         """
         tier_facts = sorted(
             (f for f in facts if f.attribute_role == "THRESHOLD" and f.branch_no >= 1),
@@ -221,17 +328,22 @@ class PenaltyRulePublisher:
                 RejectionReason.TIER_BAND_GAP, "calc_type=TIERED but no tier bands were staged"
             )
 
-        bounds: list[tuple[Decimal, Decimal]] = []
+        tier_applications = {fact.tier_application or "CLIFF" for fact in tier_facts}
+        if len(tier_applications) > 1:
+            return RejectedPublication(
+                RejectionReason.MARGINAL_TIERS,
+                f"tier bands mix tier_application values {sorted(tier_applications)}; "
+                "shortage.price_tiered prices a whole rule under one value",
+            )
+
+        bounds: list[tuple[Decimal, Decimal | None]] = []
         for i, fact in enumerate(tier_facts):
-            if fact.tier_application == "MARGINAL":
-                return RejectedPublication(
-                    RejectionReason.MARGINAL_TIERS, f"branch_no={fact.branch_no}: tier_application=MARGINAL"
-                )
             if fact.value is None:
                 return RejectedPublication(
                     RejectionReason.NON_HALF_OPEN_TIERS, f"branch_no={fact.branch_no}: no band_min value"
                 )
             band_min = _as_fraction(fact.value, fact.value_unit)
+            band_max: Decimal | None
             if fact.operator == "BETWEEN":
                 if fact.value_max is None:
                     return RejectedPublication(
@@ -244,14 +356,14 @@ class PenaltyRulePublisher:
                 band_max = (
                     _as_fraction(next_fact.value, next_fact.value_unit)
                     if next_fact is not None and next_fact.value is not None
-                    else Decimal("Infinity")
+                    else None
                 )
             else:
                 return RejectedPublication(
                     RejectionReason.NON_HALF_OPEN_TIERS,
                     f"branch_no={fact.branch_no}: operator={fact.operator!r} does not define a half-open band",
                 )
-            if band_max <= band_min:
+            if band_max is not None and band_max <= band_min:
                 return RejectedPublication(
                     RejectionReason.NON_HALF_OPEN_TIERS,
                     f"branch_no={fact.branch_no}: band_max <= band_min",
@@ -259,6 +371,9 @@ class PenaltyRulePublisher:
             bounds.append((band_min, band_max))
 
         for (_, prev_max), (next_min, _) in pairwise(bounds):
+            # Only the last band can be unbounded (band_max=None), and pairwise never
+            # yields the last band as a `prev`, so `prev_max` is always a real bound here.
+            assert prev_max is not None
             if not tier_bands_are_contiguous(prev_max, next_min):
                 return RejectedPublication(
                     RejectionReason.TIER_BAND_GAP, f"tier bands are not contiguous at {prev_max}"
@@ -267,18 +382,26 @@ class PenaltyRulePublisher:
         basis_type: str | None = None
         currency_code: str | None = None
         applies_per: str | None = None
+        dominant_metric = self._dominant_metric_fact(facts)
         tiers: list[PublishedTier] = []
         for fact, (band_min, band_max) in zip(tier_facts, bounds, strict=True):
             priced = self._map_rate(facts, branch_no=fact.branch_no, calc_type=calc_type)
             if isinstance(priced, RejectedPublication):
                 return priced
             rate, basis_type, currency_code, applies_per = priced
+            tier_basis = (
+                fact.metric_code
+                or (dominant_metric.metric_code if dominant_metric is not None else None)
+                or _DEFAULT_TIER_BASIS
+            )
             tiers.append(
                 PublishedTier(
                     tier_code=f"{rule_code}-T{fact.branch_no}",
                     band_min=band_min,
                     band_max=band_max,
                     rate=rate,
+                    tier_application=fact.tier_application or "CLIFF",
+                    tier_basis=tier_basis,
                 )
             )
         return basis_type, currency_code, applies_per, tiers
@@ -293,6 +416,10 @@ class PenaltyRulePublisher:
             )
         if calc_type not in _SUPPORTED_CALC_TYPES:
             return RejectedPublication(RejectionReason.UNSUPPORTED_CALC_TYPE, f"calc_type={calc_type!r}")
+
+        violation_type = self._map_violation_type(staged)
+        if isinstance(violation_type, RejectedPublication):
+            return violation_type
 
         currency_rejection = self._check_mixed_currency(staged.facts)
         if currency_rejection is not None:
@@ -326,10 +453,13 @@ class PenaltyRulePublisher:
             rate, basis_type, currency_code, applies_per = priced
             tiers = []
 
+        engine_family = CategoryDefaults.engine_family_for(staged.penalty_category)
+        metric_fact = self._dominant_metric_fact(staged.facts)
+
         return PublishedRule(
             rule_code=rule_code,
             retailer_code=retailer_code,
-            violation_type=self._map_violation_type(staged),
+            violation_type=violation_type,
             calc_type=calc_type,
             rate=rate,
             threshold_pct=threshold_pct,
@@ -340,5 +470,15 @@ class PenaltyRulePublisher:
             applies_per=applies_per,
             effective_start_date=contract_effective_date,
             extracted_rule_id=staged.id,
+            engine_family=engine_family,
+            penalty_category=staged.penalty_category,
+            retailer_agreement_id=staged.retailer_agreement_id,
+            metric_code=metric_fact.metric_code if metric_fact is not None else None,
+            metric_denominator=metric_fact.metric_denominator if metric_fact is not None else None,
+            measurement_window_type=self._first_extra_value(staged.facts, "window_type"),
+            measurement_window_length=self._first_extra_value(staged.facts, "window_length"),
+            measurement_window_unit=self._first_extra_value(staged.facts, "window_length_unit"),
+            rounding_convention=self._first_extra_value(staged.facts, "rounding_convention"),
+            is_engine_priceable=engine_family in _ENGINE_PRICEABLE_FAMILIES,
             tiers=tiers,
         )
