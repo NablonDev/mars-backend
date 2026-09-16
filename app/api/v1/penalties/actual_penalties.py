@@ -13,11 +13,11 @@ from app.repositories.common.purchase_order import PurchaseOrderRepository
 from app.repositories.penalties.projection import ActualPenaltyRepository
 from app.schemas.common.fulfillment import ActualPenaltyRequest, ActualPenaltyResponse
 
-router = APIRouter(tags=["actual-penalties"])
+router = APIRouter(prefix="/penalties", tags=["actual-penalties"])
 
 
 @router.post(
-    "/penalties/actual-penalties",
+    "/actual-penalties",
     response_model=Envelope[ActualPenaltyResponse],
     status_code=status.HTTP_201_CREATED,
 )
@@ -36,7 +36,7 @@ def add_actual_penalty(
 
 
 @router.get(
-    "/penalties/actual-penalties",
+    "/actual-penalties",
     response_model=Envelope[list[ActualPenaltyResponse]],
 )
 def list_actual_penalties(
@@ -59,7 +59,7 @@ def list_actual_penalties(
 # `app.api.v1.penalties.projections`/`mitigations`. Registered last anyway,
 # for consistency with those modules.
 @router.get(
-    "/penalties/actual-penalties/{actual_penalty_id}",
+    "/actual-penalties/{actual_penalty_id}",
     response_model=Envelope[ActualPenaltyResponse],
 )
 def get_actual_penalty(

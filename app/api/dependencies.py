@@ -358,6 +358,7 @@ def get_dispute_service(
     actual_penalties: ActualPenaltyRepository = Depends(get_actual_penalty_repository),
     rules: PenaltyRuleRepository = Depends(get_penalty_rule_repository),
     projection_service: ProjectionService = Depends(get_projection_service),
+    retailer_agreements: RetailerAgreementRepository = Depends(get_retailer_agreement_repository),
 ) -> DisputeResolutionService:
     """Provide a dispute service for opening and managing penalty disputes."""
     return DisputeResolutionService(
@@ -366,6 +367,7 @@ def get_dispute_service(
         actual_penalties=actual_penalties,
         rules=rules,
         projection_service=projection_service,
+        retailer_agreements=retailer_agreements,
     )
 
 
@@ -485,6 +487,7 @@ def get_penalty_rule_extraction_service(
 
 def get_penalty_seeding_service(
     master_data: MasterDataRepository = Depends(get_master_data_repository),
+    retailer_agreements: RetailerAgreementRepository = Depends(get_retailer_agreement_repository),
     rules: PenaltyRuleRepository = Depends(get_penalty_rule_repository),
     purchase_orders: PurchaseOrderRepository = Depends(get_purchase_order_repository),
     fulfillment: FulfillmentRepository = Depends(get_fulfillment_repository),
@@ -507,6 +510,7 @@ def get_penalty_seeding_service(
     """Provide a penalty seeding service for populating test data and simulations."""
     return PenaltySeedingService(
         master_data=master_data,
+        retailer_agreements=retailer_agreements,
         rules=rules,
         purchase_orders=purchase_orders,
         fulfillment=fulfillment,

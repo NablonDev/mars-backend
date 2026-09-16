@@ -1,8 +1,7 @@
 """Exhaustive tests for the pure, framework-free dispute engine
 (`app.services.penalties.dispute.engine`): every `calc_type` x both
 violation families x all four classification branches, the missing-data
-guard for each family, the grace-period boundary, and the known
-TIERED-delay limitation inherited unchanged from the projection engine.
+guard for each family, the grace-period boundary, and TIERED delay pricing.
 
 Zero DB dependency -- no fixtures beyond the pure dataclasses.
 """
@@ -287,27 +286,202 @@ def test_delay_one_day_beyond_grace_period_is_penalized():
     assert calc_trace["is_late"] is True
 
 
-def test_delay_tiered_raises_unsupported_calc():
-    """Known, documented gap inherited unchanged from
-    `app.services.penalties.projection.delay.price_delay_penalty` -- tiered
-    pricing is implemented for shortage rules only. `DisputeResolutionService.analyze`
-    is the layer that turns this into a `BusinessRuleError(code=
-    "DISPUTE_CALC_NOT_SUPPORTED")`."""
+def test_delay_tiered_prices_via_days_late_bands():
+    """TIERED delay pricing bands directly on days_late (tier_basis=DAYS_LATE), CLIFF
+    lookup: [0, 5) at 1%, [5, None) at 3% of order value. Required 2026-06-10, actual
+    2026-06-20, no grace period -> 10 days late, landing in the open top band:
+    0.03 x (100 x $10.00) = $30."""
     rule = PenaltyRule(
         rule_id="r1",
         violation_type="OTIF_LATE",
         calc_type=CalcType.TIERED,
-        tiers=[PenaltyRuleTier(band_min=0.0, band_max=1.0, rate=0.05)],
+        tiers=[
+            PenaltyRuleTier(band_min=0, band_max=5, rate=0.01, tier_basis="DAYS_LATE"),
+            PenaltyRuleTier(band_min=5, band_max=None, rate=0.03, tier_basis="DAYS_LATE"),
+        ],
     )
     facts = _delay_facts(actual_delivery_date=date(2026, 6, 20))
-    with pytest.raises(UnsupportedDisputeCalcError):
+    amount, calc_trace = price_violation(rule, facts)
+    assert amount == pytest.approx(30.0)
+    assert calc_trace["violation_family"] == "DELAY"
+    assert calc_trace["days_late"] == 10
+
+
+def test_price_violation_unmapped_violation_type_raises_unsupported_dispute_calc():
+    # A rule with no engine_family (published before Phase 1, or seeded directly) and a
+    # violation_type outside both legacy sets has no dispatch family at all. A raw
+    # ValueError would reach the API as an unhandled 500; UnsupportedDisputeCalcError is
+    # caught by DisputeResolutionService.analyze and turned into a clean BusinessRuleError.
+    rule = PenaltyRule(rule_id="r1", violation_type="QUALITY_DEFECT", calc_type=CalcType.FLAT_FEE, rate=1.0)
+    facts = _shortage_facts(order_qty=100, delivered_qty=90)
+    with pytest.raises(UnsupportedDisputeCalcError, match="not mapped"):
         price_violation(rule, facts)
 
 
-def test_price_violation_unmapped_violation_type_raises():
-    rule = PenaltyRule(rule_id="r1", violation_type="SOMETHING_ELSE", calc_type=CalcType.FLAT_FEE, rate=1.0)
+def test_price_violation_unsupported_engine_family_raises_unsupported_dispute_calc():
+    # An engine_family Phase 1 admits (e.g. LIABILITY_CAP) but Phase 4 has no dispatch
+    # entry for yet: same fail-OPEN posture as an unrecognized violation_type.
+    rule = PenaltyRule(
+        rule_id="r1",
+        violation_type="LIABILITY_CAP",
+        calc_type=CalcType.FLAT_FEE,
+        rate=1.0,
+        engine_family="LIABILITY_CAP",
+    )
     facts = _shortage_facts(order_qty=100, delivered_qty=90)
-    with pytest.raises(ValueError, match="not mapped"):
+    with pytest.raises(UnsupportedDisputeCalcError, match="not mapped"):
+        price_violation(rule, facts)
+
+
+# ---------------------------------------------------------------------------
+# price_violation() -- Phase 4 family dispatch table
+# ---------------------------------------------------------------------------
+
+
+def _base_facts(**overrides) -> DisputeFacts:
+    defaults = {
+        "order_qty": 100,
+        "unit_price": 10.0,
+        "delivered_qty": 100.0,
+        "required_delivery_date": REQUIRED_DELIVERY,
+        "actual_delivery_date": None,
+        "grace_period_days": 0,
+    }
+    defaults.update(overrides)
+    return DisputeFacts(**defaults)
+
+
+def test_quality_per_unit_recomputes_from_defect_units():
+    """Acceptance criterion: a QUALITY_DEFECT_CHARGEBACK claim with defect_units and a
+    PER_UNIT rule recomputes to defect_units * rate and classifies correctly."""
+    rule = PenaltyRule(
+        rule_id="r1",
+        violation_type="QUALITY_DEFECT",
+        calc_type=CalcType.PER_UNIT,
+        rate=4.0,
+        engine_family="QUALITY",
+    )
+    facts = _base_facts(defect_units=12.0)
+    amount, calc_trace = price_violation(rule, facts)
+    assert amount == 48.0
+    assert calc_trace["violation_family"] == "QUALITY"
+    assert calc_trace["claim_supplied_keys"] == ["defect_units"]
+
+    calculation = recompute_dispute(rule, facts, claimed_amount=48.0)
+    assert calculation.verdict is DisputeVerdict.PAY_FULL
+
+
+def test_quality_missing_defect_units_raises_insufficient_data():
+    rule = PenaltyRule(
+        rule_id="r1",
+        violation_type="QUALITY_DEFECT",
+        calc_type=CalcType.PER_UNIT,
+        rate=4.0,
+        engine_family="QUALITY",
+    )
+    facts = _base_facts(defect_units=None)
+    with pytest.raises(InsufficientDataForDisputeError):
+        price_violation(rule, facts)
+
+
+def test_quality_percent_of_po_uses_defect_rate_pct():
+    rule = PenaltyRule(
+        rule_id="r1",
+        violation_type="QUALITY_DEFECT",
+        calc_type=CalcType.PERCENT_OF_PO,
+        rate=0.05,
+        engine_family="QUALITY",
+    )
+    facts = _base_facts(defect_rate_pct=0.2)
+    amount, calc_trace = price_violation(rule, facts)
+    assert amount == pytest.approx(0.05 * 100 * 10.0)
+    assert calc_trace["claim_supplied_keys"] == ["defect_rate_pct"]
+
+
+def test_cover_purchase_prices_the_markup_over_original_cost():
+    rule = PenaltyRule(
+        rule_id="r1",
+        violation_type="COVER_PURCHASE",
+        calc_type=CalcType.PER_UNIT,
+        rate=1.0,
+        engine_family="COVER_PURCHASE",
+    )
+    facts = _base_facts(replacement_cost_paid=1300.0, original_cost=1000.0)
+    amount, calc_trace = price_violation(rule, facts)
+    assert amount == 300.0  # markup = 1300 - 1000, PER_UNIT at rate=1.0 is a dollar-for-dollar charge
+    assert calc_trace["mars_derived_keys"] == ["original_cost"]
+
+
+def test_cover_purchase_missing_replacement_cost_raises_insufficient_data():
+    rule = PenaltyRule(
+        rule_id="r1",
+        violation_type="COVER_PURCHASE",
+        calc_type=CalcType.PER_UNIT,
+        rate=1.0,
+        engine_family="COVER_PURCHASE",
+    )
+    facts = _base_facts(original_cost=1000.0)
+    with pytest.raises(InsufficientDataForDisputeError):
+        price_violation(rule, facts)
+
+
+def test_financial_generic_family_recomputes_from_occurrence_count():
+    rule = PenaltyRule(
+        rule_id="r1",
+        violation_type="FINANCIAL_ADJUSTMENT",
+        calc_type=CalcType.PER_UNIT,
+        rate=25.0,
+        engine_family="FINANCIAL",
+    )
+    facts = _base_facts(occurrence_count=3.0)
+    amount, calc_trace = price_violation(rule, facts)
+    assert amount == 75.0
+    assert calc_trace["claim_supplied_keys"] == ["occurrence_count"]
+
+
+def test_storage_duration_fee_missing_storage_days_raises_insufficient_data():
+    rule = PenaltyRule(
+        rule_id="r1",
+        violation_type="STORAGE_DURATION",
+        calc_type=CalcType.PER_UNIT,
+        rate=2.0,
+        engine_family="STORAGE_DURATION_FEE",
+    )
+    facts = _base_facts()
+    with pytest.raises(InsufficientDataForDisputeError):
+        price_violation(rule, facts)
+
+
+def test_volume_commitment_prices_shortfall_and_ignores_nothing_from_claim():
+    """VOLUME_COMMITMENT carries no claim_supplied_keys at all: both committed_quantity and
+    actual_purchase_quantity are Mars-derived, populated by the service layer, never read
+    from a claim (4f)."""
+    rule = PenaltyRule(
+        rule_id="r1",
+        violation_type="VOLUME_SHORTFALL",
+        calc_type=CalcType.PER_UNIT,
+        rate=2.0,
+        engine_family="VOLUME_COMMITMENT",
+        commitment_quantity=1000.0,
+    )
+    facts = _base_facts(committed_quantity=1000.0, actual_purchase_quantity=700.0)
+    amount, calc_trace = price_violation(rule, facts)
+    assert amount == 600.0  # (1000 - 700) shortfall units x $2/unit
+    assert calc_trace["claim_supplied_keys"] == []
+    assert calc_trace["mars_derived_keys"] == ["committed_quantity", "actual_purchase_quantity"]
+
+
+def test_volume_commitment_missing_actual_purchase_quantity_raises_insufficient_data():
+    rule = PenaltyRule(
+        rule_id="r1",
+        violation_type="VOLUME_SHORTFALL",
+        calc_type=CalcType.PER_UNIT,
+        rate=2.0,
+        engine_family="VOLUME_COMMITMENT",
+        commitment_quantity=1000.0,
+    )
+    facts = _base_facts(committed_quantity=1000.0)
+    with pytest.raises(InsufficientDataForDisputeError):
         price_violation(rule, facts)
 
 

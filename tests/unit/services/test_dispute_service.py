@@ -18,7 +18,10 @@ import pytest
 
 from app.core.exceptions import BusinessRuleError, ConflictError, NotFoundError, ValidationError
 from app.services.penalties.dispute.service import DisputeResolutionService
+from app.services.penalties.projection.delay import price_delay_penalty
 from app.services.penalties.projection.service import ProjectionService
+from app.services.penalties.projection.types import APPLIES_PER_DAY
+from tests.conftest import make_retailer_agreement
 
 _ORDER_QTY = 100
 _UNIT_PRICE = 10.0
@@ -39,6 +42,7 @@ def _build_service(repos) -> DisputeResolutionService:
         actual_penalties=repos.actual_penalties,
         rules=repos.penalty_rules,
         projection_service=projection_service,
+        retailer_agreements=repos.retailer_agreements,
     )
 
 
@@ -52,6 +56,7 @@ def _seed_order(
     grace_period_days: int = 0,
     rule_effective_start: date = date(2026, 1, 1),
     rule_effective_end: date | None = None,
+    applies_per: str | None = None,
 ):
     """Seeds a PO with one penalty rule, no fulfillment facts of its own --
     callers attach delivery/delivery_line and/or shipment rows themselves.
@@ -63,11 +68,14 @@ def _seed_order(
         rule_code=f"RULE-{po_number}",
         retailer_id=retailer["id"],
         violation_type=violation_type,
+        penalty_category=violation_type,
+        retailer_agreement_id=make_retailer_agreement(repos, retailer["id"]),
         calc_type=calc_type,
         rate=rate,
         grace_period_days=grace_period_days,
         effective_start_date=rule_effective_start,
         effective_end_date=rule_effective_end,
+        applies_per=applies_per,
     )
 
     purchase_order = repos.purchase_orders.create_purchase_order(
@@ -383,10 +391,49 @@ def test_analyze_delay_no_pay_when_within_grace_period(repos):
     assert analyzed["analysis_breakdown"]["facts"]["is_late"] is False
 
 
-def test_analyze_raises_dispute_calc_not_supported_for_tiered_delay_rule(repos):
-    """A TIERED delay rule is a real, documented gap
-    (`price_delay_penalty` has no tiered branch) -- `analyze()` must turn
-    it into a clear `BusinessRuleError`, never a raw `NotImplementedError`."""
+def test_analyze_delay_applies_per_day_accrues_same_as_projection(repos):
+    """Regression: `_to_rule_value` used to drop `applies_per`/`basis_type`
+    from the rule row, so a `DAY`-accrued rule recomputed in dispute as a
+    single flat application instead of accruing per day late, same as
+    `ProjectionService`'s `price_delay_penalty` call would for identical
+    facts. 5 days late x $3/unit x 100 units accrues to $1500; a flat
+    application would wrongly land on $300."""
+    purchase_order_id, _line_id, retailer_id = _seed_order(
+        repos,
+        "ORD-DSP-PERDAY",
+        violation_type="OTIF_LATE",
+        calc_type="PER_UNIT",
+        rate=3.0,
+        applies_per=APPLIES_PER_DAY,
+    )
+    # 5 days late: requested 2026-06-10, delivered 2026-06-15, no grace period.
+    _seed_shipment(
+        repos, purchase_order_id, actual_delivery_date=date(2026, 6, 15), recorded_at=date(2026, 6, 15)
+    )
+    actual_penalty = repos.actual_penalties.add_actual_penalty(
+        actual_penalty_number="AP-ORD-DSP-PERDAY",
+        purchase_order_id=purchase_order_id,
+        violation_type="OTIF_LATE",
+        actual_penalty_amount=1500.0,
+        invoice_or_deduction_date=date(2026, 6, 20),
+    )
+    service = _build_service(repos)
+    dispute = service.open_dispute(actual_penalty["id"], "AMOUNT_INCORRECT", 1500.0)
+
+    analyzed = service.analyze(dispute["id"])
+
+    rule_value = repos.penalty_rules.list_rules_for_retailer(retailer_id)[0]
+    expected_amount = price_delay_penalty(rule_value, _ORDER_QTY, _UNIT_PRICE, days_late=5)
+    assert expected_amount == 1500.0  # sanity: matches what Projection would price
+    assert analyzed["computed_amount"] == expected_amount
+    assert analyzed["verdict"] == "PAY_FULL"
+
+
+def test_analyze_prices_tiered_delay_rule_via_days_late_bands(repos):
+    """A TIERED delay rule bands directly on days_late (tier_basis=DAYS_LATE): [0, 5) at
+    1%, [5, None) at 3% of order value. Required 2026-06-10, actual 2026-06-20, no grace
+    period -> 10 days late, landing in the open top band: 0.03 x (100 x $10.00) = $30,
+    against a $100 claim -> PAY_PARTIAL."""
     retailer = repos.master_data.add_retailer("RET-DSP-TIERDELAY", "Dispute Test Retailer", None, "SUM")
     material = repos.master_data.add_material("MAT-DSP-TIERDELAY", None)
     plant = repos.master_data.add_plant("PLANT-DSP-TIERDELAY", None, None)
@@ -394,10 +441,15 @@ def test_analyze_raises_dispute_calc_not_supported_for_tiered_delay_rule(repos):
         rule_code="RULE-DSP-TIERDELAY",
         retailer_id=retailer["id"],
         violation_type="OTIF_LATE",
+        penalty_category="OTIF_LATE",
+        retailer_agreement_id=make_retailer_agreement(repos, retailer["id"]),
         calc_type="TIERED",
         rate=0.0,
         effective_start_date=date(2026, 1, 1),
-        tiers=[{"band_min": 0.0, "band_max": 1.0, "rate": 0.05}],
+        tiers=[
+            {"band_min": 0.0, "band_max": 5.0, "rate": 0.01, "tier_basis": "DAYS_LATE"},
+            {"band_min": 5.0, "band_max": None, "rate": 0.03, "tier_basis": "DAYS_LATE"},
+        ],
     )
     purchase_order = repos.purchase_orders.create_purchase_order(
         purchase_order_number="ORD-DSP-TIERDELAY",
@@ -429,12 +481,10 @@ def test_analyze_raises_dispute_calc_not_supported_for_tiered_delay_rule(repos):
     service = _build_service(repos)
     dispute = service.open_dispute(actual_penalty["id"], "AMOUNT_INCORRECT", 100.0)
 
-    with pytest.raises(BusinessRuleError) as exc_info:
-        service.analyze(dispute["id"])
-    assert exc_info.value.code == "DISPUTE_CALC_NOT_SUPPORTED"
+    analyzed = service.analyze(dispute["id"])
 
-    unchanged = service.get(dispute["id"])
-    assert unchanged["dispute_status"] == "OPEN"
+    assert analyzed["computed_amount"] == 30.0
+    assert analyzed["verdict"] == "PAY_PARTIAL"
 
 
 # ---------------------------------------------------------------------------
@@ -516,3 +566,203 @@ def test_full_lifecycle_open_analyze_resolve_with_override(repos):
 
     listed = service.list_for_purchase_order(purchase_order_id)
     assert [d["id"] for d in listed] == [dispute["id"]]
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: claim_facts (QUALITY dispatch, write-once, VOLUME_COMMITMENT authority split)
+# ---------------------------------------------------------------------------
+
+
+def _seed_quality_rule_and_po(repos, po_number: str = "ORD-DSP-QUALITY", rate: float = 4.0):
+    """Seeds a PO with one QUALITY-family rule; no delivery/shipment facts (unneeded: QUALITY
+    dispatch reads claim_facts and the PO's own order value, never delivered_qty/
+    actual_delivery_date). Returns purchase_order_id."""
+    retailer = repos.master_data.add_retailer(f"RET-{po_number}", "Dispute Test Retailer", None, "SUM")
+    material = repos.master_data.add_material(f"MAT-{po_number}", None)
+    plant = repos.master_data.add_plant(f"PLANT-{po_number}", None, None)
+    repos.penalty_rules.add_rule(
+        rule_code=f"RULE-{po_number}",
+        retailer_id=retailer["id"],
+        violation_type="QUALITY_DEFECT",
+        penalty_category="QUALITY_DEFECT_CHARGEBACK",
+        retailer_agreement_id=make_retailer_agreement(repos, retailer["id"]),
+        calc_type="PER_UNIT",
+        rate=rate,
+        engine_family="QUALITY",
+        effective_start_date=date(2026, 1, 1),
+    )
+    purchase_order = repos.purchase_orders.create_purchase_order(
+        purchase_order_number=po_number,
+        retailer_id=retailer["id"],
+        order_date=date(2026, 5, 1),
+        requested_delivery_date=_REQUESTED_DELIVERY_DATE,
+        required_ship_date=date(2026, 6, 8),
+        order_status="DELIVERED",
+    )
+    repos.purchase_orders.add_line(
+        purchase_order_id=purchase_order["id"],
+        line_number="10",
+        ordered_quantity=_ORDER_QTY,
+        unit_price=_UNIT_PRICE,
+        material_id=material["id"],
+        plant_id=plant["id"],
+    )
+    return purchase_order["id"]
+
+
+def test_analyze_quality_defect_chargeback_recomputes_from_claim_defect_units(repos):
+    """Acceptance criterion: a QUALITY_DEFECT_CHARGEBACK claim with defect_units and a
+    PER_UNIT rule recomputes to defect_units * rate and classifies correctly against the
+    claimed amount."""
+    purchase_order_id = _seed_quality_rule_and_po(repos, rate=4.0)
+    actual_penalty = repos.actual_penalties.add_actual_penalty(
+        actual_penalty_number="AP-ORD-DSP-QUALITY-OK",
+        purchase_order_id=purchase_order_id,
+        violation_type="QUALITY_DEFECT",
+        actual_penalty_amount=48.0,
+        invoice_or_deduction_date=date(2026, 6, 12),
+    )
+    service = _build_service(repos)
+    dispute = service.open_dispute(
+        actual_penalty["id"], "AMOUNT_INCORRECT", 48.0, claim_facts={"defect_units": 12}
+    )
+
+    analyzed = service.analyze(dispute["id"])
+
+    assert analyzed["computed_amount"] == 48.0  # 12 defect_units x $4/unit
+    assert analyzed["verdict"] == "PAY_FULL"
+    assert analyzed["analysis_breakdown"]["violation_family"] == "QUALITY"
+    assert analyzed["analysis_breakdown"]["claim_supplied_keys"] == ["defect_units"]
+    assert analyzed["analysis_breakdown"]["facts"]["defect_units"] == 12
+
+
+def test_analyze_quality_missing_defect_units_raises_insufficient_data_with_no_write(repos):
+    """A claim missing a required fact for its family raises
+    InsufficientDataForDisputeError and leaves the dispute OPEN, with no write."""
+    purchase_order_id = _seed_quality_rule_and_po(repos, rate=4.0)
+    actual_penalty = repos.actual_penalties.add_actual_penalty(
+        actual_penalty_number="AP-ORD-DSP-QUALITY-MISSING",
+        purchase_order_id=purchase_order_id,
+        violation_type="QUALITY_DEFECT",
+        actual_penalty_amount=48.0,
+        invoice_or_deduction_date=date(2026, 6, 12),
+    )
+    service = _build_service(repos)
+    dispute = service.open_dispute(actual_penalty["id"], "AMOUNT_INCORRECT", 48.0)  # no claim_facts
+
+    with pytest.raises(BusinessRuleError) as exc_info:
+        service.analyze(dispute["id"])
+    assert exc_info.value.code == "INSUFFICIENT_DATA_FOR_DISPUTE"
+
+    unchanged = service.get(dispute["id"])
+    assert unchanged["dispute_status"] == "OPEN"
+    assert unchanged["computed_amount"] is None
+    assert unchanged["analysis_breakdown"] is None
+
+
+def test_set_claim_facts_is_write_once(repos):
+    """Any code path writing claim_facts a second time on the same row is refused, not just
+    the open_dispute() call path."""
+    purchase_order_id = _seed_quality_rule_and_po(repos)
+    actual_penalty = repos.actual_penalties.add_actual_penalty(
+        actual_penalty_number="AP-ORD-DSP-QUALITY-WO",
+        purchase_order_id=purchase_order_id,
+        violation_type="QUALITY_DEFECT",
+        actual_penalty_amount=48.0,
+        invoice_or_deduction_date=date(2026, 6, 12),
+    )
+    repos.actual_penalties.set_claim_facts(actual_penalty["id"], {"defect_units": 12})
+
+    with pytest.raises(ValueError):
+        repos.actual_penalties.set_claim_facts(actual_penalty["id"], {"defect_units": 99})
+
+
+def test_open_dispute_rejects_claim_facts_already_set(repos):
+    purchase_order_id = _seed_quality_rule_and_po(repos)
+    actual_penalty = repos.actual_penalties.add_actual_penalty(
+        actual_penalty_number="AP-ORD-DSP-QUALITY-DUP",
+        purchase_order_id=purchase_order_id,
+        violation_type="QUALITY_DEFECT",
+        actual_penalty_amount=48.0,
+        invoice_or_deduction_date=date(2026, 6, 12),
+    )
+    repos.actual_penalties.set_claim_facts(actual_penalty["id"], {"defect_units": 12})
+    service = _build_service(repos)
+
+    with pytest.raises(ConflictError):
+        service.open_dispute(actual_penalty["id"], "AMOUNT_INCORRECT", 48.0, claim_facts={"defect_units": 99})
+
+
+def test_analyze_volume_commitment_ignores_claim_supplied_purchase_total(repos):
+    """Acceptance criterion: a volume-commitment dispute recomputes from
+    PurchaseOrderRepository's own purchase-history aggregation, ignoring any purchase
+    total supplied in claim_facts even if one is present and different -- proven here via
+    a raw dict passed straight to the service, bypassing the ClaimFacts schema's
+    extra="forbid" guard entirely, so the service/engine layer's own enforcement of
+    decision #2/4f is what is actually under test."""
+    retailer = repos.master_data.add_retailer("RET-DSP-VC", "Dispute Test Retailer", None, "SUM")
+    agreement = repos.retailer_agreements.add_retailer_agreement(
+        retailer_id=retailer["id"],
+        contract_code="TEST-DSP-VC",
+        title="Volume commitment test agreement",
+        document_sha256="deadbeef" * 8,
+        effective_date=date(2026, 1, 1),
+    )
+    repos.penalty_rules.add_rule(
+        rule_code="RULE-DSP-VC",
+        retailer_id=retailer["id"],
+        violation_type="VOLUME_SHORTFALL",
+        penalty_category="MINIMUM_VOLUME_SHORTFALL",
+        retailer_agreement_id=agreement["id"],
+        calc_type="PER_UNIT",
+        rate=2.0,
+        engine_family="VOLUME_COMMITMENT",
+        effective_start_date=date(2026, 1, 1),
+        measurement_window_type="ROLLING",
+        measurement_window_length=1,
+        measurement_window_unit="YEARS",
+        commitment_quantity=1000.0,
+    )
+    material = repos.master_data.add_material("MAT-DSP-VC", None)
+    plant = repos.master_data.add_plant("PLANT-DSP-VC", None, None)
+    purchase_order = repos.purchase_orders.create_purchase_order(
+        purchase_order_number="ORD-DSP-VC",
+        retailer_id=retailer["id"],
+        order_date=date(2026, 3, 1),
+        requested_delivery_date=date(2026, 3, 10),
+        required_ship_date=date(2026, 3, 8),
+        order_status="DELIVERED",
+    )
+    repos.purchase_orders.add_line(
+        purchase_order_id=purchase_order["id"],
+        line_number="10",
+        ordered_quantity=700,
+        unit_price=_UNIT_PRICE,
+        material_id=material["id"],
+        plant_id=plant["id"],
+    )
+    actual_penalty = repos.actual_penalties.add_actual_penalty(
+        actual_penalty_number="AP-ORD-DSP-VC",
+        purchase_order_id=purchase_order["id"],
+        violation_type="VOLUME_SHORTFALL",
+        actual_penalty_amount=600.0,
+        invoice_or_deduction_date=date(2026, 6, 1),
+    )
+    service = _build_service(repos)
+    dispute = service.open_dispute(
+        actual_penalty["id"],
+        "AMOUNT_INCORRECT",
+        600.0,
+        claim_facts={"actual_purchase_quantity": 999999.0},
+    )
+
+    analyzed = service.analyze(dispute["id"])
+
+    # committed 1000 - actual 700 (this PO's own order_qty, the only purchase in the
+    # rolling window) = 300 shortfall units x $2/unit = $600, never the claim's 999999.
+    assert analyzed["computed_amount"] == 600.0
+    assert analyzed["verdict"] == "PAY_FULL"
+    assert analyzed["analysis_breakdown"]["violation_family"] == "VOLUME_COMMITMENT"
+    assert analyzed["analysis_breakdown"]["claim_supplied_keys"] == []
+    assert analyzed["analysis_breakdown"]["facts"]["actual_purchase_quantity"] == 700.0
+    assert analyzed["analysis_breakdown"]["facts"]["committed_quantity"] == 1000.0

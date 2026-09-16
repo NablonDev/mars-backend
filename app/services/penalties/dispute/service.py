@@ -17,12 +17,13 @@ with one method per lifecycle transition.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from uuid import UUID
 
 from app.core.exceptions import BusinessRuleError, ConflictError, NotFoundError, ValidationError
 from app.models.enums import DisputeStatus
 from app.repositories.common.purchase_order import PurchaseOrderRepository
+from app.repositories.common.retailer_agreement import RetailerAgreementRepository
 from app.repositories.penalties.dispute import PenaltyDisputeRepository
 from app.repositories.penalties.projection import ActualPenaltyRepository
 from app.repositories.penalties.rule import PenaltyRuleRepository
@@ -32,30 +33,12 @@ from app.services.penalties.dispute.types import (
     InsufficientDataForDisputeError,
     UnsupportedDisputeCalcError,
 )
+from app.services.penalties.projection.commitment import resolve_measurement_window
 from app.services.penalties.projection.service import ProjectionService
-from app.services.penalties.projection.types import CalcType
-from app.services.penalties.projection.types import PenaltyRule as PenaltyRuleValue
+from app.services.penalties.projection.types import ENGINE_FAMILY_VOLUME_COMMITMENT
 from app.utils.clock import utc_now
 
 _TERMINAL_STATUSES = {DisputeStatus.RESOLVED, DisputeStatus.OVERRIDDEN}
-
-
-def _to_rule_value(rule_row: dict, tiers) -> PenaltyRuleValue:
-    """Convert a `list_rules_effective_on` dict row into the pure-engine rule dataclass.
-
-    `list_rules_for_retailer` does the same conversion inline for the projection
-    engine, but hands back dataclasses that carry no `grace_period_days`, so it
-    cannot be reused here.
-    """
-    return PenaltyRuleValue(
-        rule_id=str(rule_row["id"]),
-        violation_type=rule_row["violation_type"],
-        calc_type=CalcType(rule_row["calc_type"]),
-        rate=rule_row["rate"],
-        threshold_pct=rule_row["threshold_pct"],
-        cap_amount=rule_row["cap_amount"],
-        tiers=tiers or None,
-    )
 
 
 @dataclass
@@ -73,6 +56,9 @@ class DisputeResolutionService:
     actual_penalties: ActualPenaltyRepository
     rules: PenaltyRuleRepository
     projection_service: ProjectionService
+    # Only needed for a VOLUME_COMMITMENT dispute's actual-purchase-quantity lookup; every
+    # other family works without it.
+    retailer_agreements: RetailerAgreementRepository | None = None
 
     def open_dispute(
         self,
@@ -80,12 +66,20 @@ class DisputeResolutionService:
         reason_code: str,
         claimed_amount: float,
         notes: str | None = None,
+        claim_facts: dict | None = None,
     ) -> dict:
         """Open a new dispute against an already-recorded `actual_penalty` charge.
 
         At most one OPEN or ANALYZED dispute may exist per charge. A retailer
         amending a charge gets a second dispute cycle only once the first has
         reached a terminal status.
+
+        `claim_facts` (validated at the schema layer, see
+        `app.schemas.penalties.disputes.ClaimFacts`) is written once onto the charge's
+        `actual_penalty` row, never mutated after: raises `ConflictError` if this charge
+        already carries claim_facts from an earlier dispute cycle. A charge needing
+        different facts requires a new charge, not a second write here (decision #3,
+        docs/architecture/extraction-engine-integration-plan.md Phase 4).
         """
         actual_penalty = self.actual_penalties.get(actual_penalty_id)
         if actual_penalty is None:
@@ -106,6 +100,15 @@ class DisputeResolutionService:
 
         purchase_order_id = actual_penalty["purchase_order_id"]
         self.purchase_orders.require_purchase_order(purchase_order_id)
+
+        if claim_facts is not None:
+            try:
+                self.actual_penalties.set_claim_facts(actual_penalty_id, claim_facts)
+            except ValueError as exc:
+                raise ConflictError(
+                    code="CLAIM_FACTS_ALREADY_SET",
+                    message=(f"claim_facts already recorded for actual_penalty {actual_penalty_id}: {exc}"),
+                ) from exc
 
         return self.disputes.create(
             actual_penalty_id=actual_penalty_id,
@@ -160,13 +163,7 @@ class DisputeResolutionService:
         # expected: effective date ranges for the same retailer and
         # violation_type should never overlap. Most recently effective wins.
         rule_row = max(matching, key=lambda r: r["effective_start_date"])
-
-        tiers = (
-            self.rules.get_tiers_for_rule(rule_row["id"])
-            if rule_row["calc_type"] == CalcType.TIERED.value
-            else []
-        )
-        rule_value = _to_rule_value(rule_row, tiers)
+        rule_value = self.rules.get_rule_value(rule_row["id"])
 
         fulfillment = self.projection_service.fulfillment
         # order_qty, unit_price, and required_delivery_date reuse the projection
@@ -183,6 +180,17 @@ class DisputeResolutionService:
         )
         actual_delivery_date = shipment["actual_delivery_date"] if shipment is not None else None
 
+        # claim_facts is the only claim-supplied input; every other DisputeFacts field
+        # below is Mars-derived (from the snapshot, the rule row, or a repository), never
+        # read from claim_facts even when one happens to carry a same-named key (decision
+        # #2, docs/architecture/extraction-engine-integration-plan.md Phase 4).
+        claim_facts = actual_penalty.get("claim_facts") or {}
+        actual_purchase_quantity = None
+        if rule_value.engine_family == ENGINE_FAMILY_VOLUME_COMMITMENT:
+            actual_purchase_quantity = self._resolve_commitment_actual_purchase_quantity(
+                rule_row, purchase_order["retailer_id"], as_of_date
+            )
+
         facts = DisputeFacts(
             order_qty=snapshot.order_qty,
             unit_price=snapshot.unit_price,
@@ -190,6 +198,14 @@ class DisputeResolutionService:
             required_delivery_date=snapshot.requested_delivery_date,
             actual_delivery_date=actual_delivery_date,
             grace_period_days=rule_row["grace_period_days"],
+            defect_units=claim_facts.get("defect_units"),
+            defect_rate_pct=claim_facts.get("defect_rate_pct"),
+            replacement_cost_paid=claim_facts.get("replacement_cost_paid"),
+            original_cost=snapshot.order_qty * snapshot.unit_price,
+            occurrence_count=claim_facts.get("occurrence_count"),
+            storage_days=claim_facts.get("storage_days"),
+            committed_quantity=rule_value.commitment_quantity,
+            actual_purchase_quantity=actual_purchase_quantity,
         )
 
         try:
@@ -213,6 +229,12 @@ class DisputeResolutionService:
             "calc_type": rule_row["calc_type"],
             "violation_family": calc_trace.get("violation_family"),
             "as_of_date": as_of_date.isoformat(),
+            # Audit trail (4g) proving the claim-supplied/Mars-derived authority boundary:
+            # which DisputeFacts keys this specific dispute's measure function read from
+            # the claim vs from Mars's own records. See DisputeFamilyKeys/
+            # FAMILY_REQUIRED_KEYS in app.services.penalties.dispute.types.
+            "claim_supplied_keys": calc_trace.get("claim_supplied_keys", []),
+            "mars_derived_keys": calc_trace.get("mars_derived_keys", []),
             "facts": {
                 "order_qty": facts.order_qty,
                 "unit_price": facts.unit_price,
@@ -225,6 +247,14 @@ class DisputeResolutionService:
                 "deadline": deadline.isoformat() if deadline is not None else None,
                 "is_late": calc_trace.get("is_late"),
                 "grace_period_days": facts.grace_period_days,
+                "defect_units": facts.defect_units,
+                "defect_rate_pct": facts.defect_rate_pct,
+                "replacement_cost_paid": facts.replacement_cost_paid,
+                "original_cost": facts.original_cost,
+                "occurrence_count": facts.occurrence_count,
+                "storage_days": facts.storage_days,
+                "committed_quantity": facts.committed_quantity,
+                "actual_purchase_quantity": facts.actual_purchase_quantity,
             },
             "cap_amount": calc_trace.get("cap_amount"),
             "cap_applied": calc_trace.get("cap_applied"),
@@ -298,3 +328,34 @@ class DisputeResolutionService:
                 code="DISPUTE_NOT_FOUND", message=f"No penalty dispute found with dispute_id={dispute_id}"
             )
         return dispute
+
+    def _resolve_commitment_actual_purchase_quantity(
+        self, rule_row: dict, retailer_id: UUID, as_of_date: date
+    ) -> float | None:
+        """Mars-derived actual-to-date purchase quantity for a VOLUME_COMMITMENT rule's window.
+
+        Reuses `resolve_measurement_window` so the window anchors identically to
+        `ProjectionService.run_commitment_projection`. Raises `BusinessRuleError` if this
+        service was built without a `retailer_agreements` repository: a VOLUME_COMMITMENT
+        dispute cannot be adjudicated without it, never silently priced off a claim-supplied
+        purchase total instead (decision #2/4f).
+        """
+        if self.retailer_agreements is None:
+            raise BusinessRuleError(
+                code="COMMITMENT_DISPUTE_NOT_CONFIGURED",
+                message="DisputeResolutionService was built without a retailer_agreements repository.",
+            )
+        agreement = self.retailer_agreements.get(rule_row["retailer_agreement_id"])
+        contract_anchor_date = (agreement["effective_date"] if agreement else None) or as_of_date
+        window_start, window_end = resolve_measurement_window(
+            rule_row["measurement_window_type"] or "ROLLING",
+            rule_row["measurement_window_length"] or 1,
+            rule_row["measurement_window_unit"] or "YEARS",
+            contract_anchor_date,
+            as_of_date,
+        )
+        query_end = min(as_of_date, window_end)
+        total_qty, _total_value = self.purchase_orders.get_ordered_totals_for_retailer_between(
+            retailer_id, window_start, query_end
+        )
+        return total_qty

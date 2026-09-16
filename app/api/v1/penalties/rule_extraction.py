@@ -32,7 +32,7 @@ from app.utils.hashing import content_sha256
 if TYPE_CHECKING:
     from app.services.penalties.rule_extraction.service import PenaltyRuleExtractionService
 
-router = APIRouter(tags=["penalty-rule-extraction"])
+router = APIRouter(prefix="/penalties", tags=["penalty-rule-extraction"])
 
 
 def _require_retailer_agreement(
@@ -49,7 +49,7 @@ def _require_retailer_agreement(
 
 
 @router.post(
-    "/penalties/retailer-agreements",
+    "/retailer-agreements",
     response_model=Envelope[RetailerAgreementResponse],
     status_code=status.HTTP_201_CREATED,
 )
@@ -83,7 +83,7 @@ def create_retailer_agreement(
 
 
 @router.get(
-    "/penalties/retailer-agreements",
+    "/retailer-agreements",
     response_model=Envelope[list[RetailerAgreementResponse]],
 )
 def list_retailer_agreements(
@@ -100,7 +100,7 @@ def list_retailer_agreements(
 
 
 @router.get(
-    "/penalties/retailer-agreements/{retailer_agreement_id}",
+    "/retailer-agreements/{retailer_agreement_id}",
     response_model=Envelope[RetailerAgreementResponse],
 )
 def get_retailer_agreement(
@@ -113,7 +113,7 @@ def get_retailer_agreement(
 
 
 @router.post(
-    "/penalties/retailer-agreements/{retailer_agreement_id}/extract",
+    "/retailer-agreements/{retailer_agreement_id}/extract",
     response_model=Envelope[ExtractionStartResponse],
     status_code=status.HTTP_202_ACCEPTED,
 )
@@ -134,7 +134,7 @@ def start_extraction(
 
 
 @router.get(
-    "/penalties/retailer-agreements/{retailer_agreement_id}/extraction",
+    "/retailer-agreements/{retailer_agreement_id}/extraction",
     response_model=Envelope[ExtractionStatusResponse],
 )
 def get_extraction_status(
@@ -147,7 +147,7 @@ def get_extraction_status(
 
 
 @router.get(
-    "/penalties/retailer-agreements/{retailer_agreement_id}/extracted-rules",
+    "/retailer-agreements/{retailer_agreement_id}/extracted-rules",
     response_model=Envelope[list[ExtractedPenaltyRuleResponse]],
 )
 def list_extracted_rules(
@@ -164,7 +164,7 @@ def list_extracted_rules(
 
 
 @router.get(
-    "/penalties/retailer-agreements/{retailer_agreement_id}/extracted-rules/{extracted_rule_id}",
+    "/retailer-agreements/{retailer_agreement_id}/extracted-rules/{extracted_rule_id}",
     response_model=Envelope[ExtractedPenaltyRuleResponse],
 )
 def get_extracted_rule(
@@ -178,7 +178,7 @@ def get_extracted_rule(
 
 
 @router.post(
-    "/penalties/retailer-agreements/{retailer_agreement_id}/extracted-rules/{extracted_rule_id}/review",
+    "/retailer-agreements/{retailer_agreement_id}/extracted-rules/{extracted_rule_id}/review",
     response_model=Envelope[ExtractedPenaltyRuleResponse],
 )
 def review_extracted_rule(
@@ -197,7 +197,7 @@ def review_extracted_rule(
 
 
 @router.post(
-    "/penalties/retailer-agreements/{retailer_agreement_id}/publish",
+    "/retailer-agreements/{retailer_agreement_id}/publish",
     response_model=Envelope[RulePublicationResultResponse],
 )
 def publish_retailer_agreement_rules(
@@ -219,7 +219,7 @@ def publish_retailer_agreement_rules(
 
 
 @router.get(
-    "/penalties/retailer-agreements/{retailer_agreement_id}/publications",
+    "/retailer-agreements/{retailer_agreement_id}/publications",
     response_model=Envelope[PublicationAuditResponse],
 )
 def get_publication_audit(

@@ -36,7 +36,7 @@ class DisputeVerdict(Enum):
 class InsufficientDataForDisputeError(ValueError):
     """A fact the violation family needs was never recorded as of the charge date.
 
-    That is `delivered_qty` for SHORTAGE, `actual_delivery_date` for DELAY.
+    See `FAMILY_REQUIRED_KEYS` below for which fact(s) each `engine_family` needs.
     Missing must never collapse into "confirmed zero" or "confirmed on time",
     which would let the engine refuse or grant a charge on absence of data.
     `DisputeResolutionService.analyze` re-raises this as
@@ -46,13 +46,14 @@ class InsufficientDataForDisputeError(ValueError):
 
 
 class UnsupportedDisputeCalcError(ValueError):
-    """The effective rule's `calc_type` cannot be priced for this violation family.
+    """The rule's `engine_family`/`calc_type` combination has no dispute recompute path.
 
-    Today that means only a TIERED delay rule: tiered pricing exists for
-    shortage rules alone, banded by shortfall percentage rather than days late.
-    `DisputeResolutionService.analyze` re-raises this as
-    `BusinessRuleError(code="DISPUTE_CALC_NOT_SUPPORTED")`, leaving the dispute
-    OPEN.
+    Raised for a family with no dispatch-table entry in
+    `app.services.penalties.dispute.engine`, or a `calc_type` its measure function doesn't
+    branch on. `DisputeResolutionService.analyze` re-raises this as
+    `BusinessRuleError(code="DISPUTE_CALC_NOT_SUPPORTED")`, leaving the dispute OPEN: this
+    backlog grows as more families are admitted upstream, a known operational concern this
+    phase does not solve.
     """
 
 
@@ -61,7 +62,12 @@ class DisputeFacts:
     """Real, final post-delivery facts as of the historical charge date.
 
     Never the probability-driven estimates `app.services.penalties.projection`
-    works from.
+    works from. Fields below the DELAY block are Phase 4's family-specific facts
+    (docs/architecture/extraction-engine-integration-plan.md section 10): each is either
+    claim-supplied (populated from `actual_penalty.claim_facts`, the retailer's own
+    assertion) or Mars-derived (populated by `DisputeResolutionService.analyze` from a
+    repository or the matched rule, never from claim_facts). `FAMILY_REQUIRED_KEYS` below
+    is the authoritative map of which is which per `engine_family`.
     """
 
     order_qty: int
@@ -75,6 +81,68 @@ class DisputeFacts:
     # disputes only.
     actual_delivery_date: date | None
     grace_period_days: int = 0
+    # QUALITY-family claim-supplied fact: a defect count the retailer's DC observed, which
+    # Mars holds nowhere else.
+    defect_units: float | None = None
+    # QUALITY-family claim-supplied fact: a defect rate, used instead of defect_units for a
+    # PERCENT_OF_PO rule.
+    defect_rate_pct: float | None = None
+    # COVER_PURCHASE-family claim-supplied fact: what the retailer actually paid a
+    # substitute vendor. Mars has no record of this.
+    replacement_cost_paid: float | None = None
+    # COVER_PURCHASE-family Mars-derived fact: order_qty * unit_price. Never read from
+    # claim_facts, even when one happens to be present there.
+    original_cost: float | None = None
+    # FINANCIAL-family claim-supplied fact: an occurrence count Mars does not otherwise track.
+    occurrence_count: float | None = None
+    # STORAGE_DURATION_FEE-family claim-supplied fact: days the retailer says product sat in
+    # its own DC. Mars has no record of this.
+    storage_days: float | None = None
+    # VOLUME_COMMITMENT-family Mars-derived fact: the matched rule's own commitment_quantity.
+    # Never read from claim_facts.
+    committed_quantity: float | None = None
+    # VOLUME_COMMITMENT-family Mars-derived fact: PurchaseOrderRepository's own purchase-history
+    # total. Never read from claim_facts, even when a claim asserts a conflicting total (4f).
+    actual_purchase_quantity: float | None = None
+
+
+@dataclass(frozen=True)
+class DisputeFamilyKeys:
+    """One `engine_family`'s dispute-recompute fact-authority contract.
+
+    `claim_supplied_keys` may be populated from `actual_penalty.claim_facts`;
+    `mars_derived_keys` must always be populated from a repository or the matched rule,
+    never from claim_facts, even when claim_facts supplies a conflicting value (decision
+    #2, docs/architecture/extraction-engine-integration-plan.md section 10). Both are
+    `DisputeFacts` field names; QUALITY carries neither, since its bespoke measure function
+    branches between `defect_units`/`defect_rate_pct` by the rule's own `calc_type` rather
+    than requiring one fixed key.
+    """
+
+    claim_supplied_keys: tuple[str, ...]
+    mars_derived_keys: tuple[str, ...]
+
+
+# Structural encoding of the claim-supplied/Mars-derived boundary, keyed by the same
+# `engine_family` values `app.services.penalties.projection.types` and
+# `app.services.penalties.rule_extraction.vocabulary.ENGINE_FAMILIES` use.
+# `app.services.penalties.dispute.engine._require_family_keys` reads this to raise
+# `InsufficientDataForDisputeError` before any pricing math runs.
+FAMILY_REQUIRED_KEYS: dict[str, DisputeFamilyKeys] = {
+    "SHORTAGE": DisputeFamilyKeys(claim_supplied_keys=(), mars_derived_keys=("delivered_qty",)),
+    "DELAY": DisputeFamilyKeys(claim_supplied_keys=(), mars_derived_keys=("actual_delivery_date",)),
+    # Empty on both sides: `_price_quality` requires defect_rate_pct or defect_units
+    # depending on the rule's own calc_type, not one fixed key.
+    "QUALITY": DisputeFamilyKeys(claim_supplied_keys=(), mars_derived_keys=()),
+    "COVER_PURCHASE": DisputeFamilyKeys(
+        claim_supplied_keys=("replacement_cost_paid",), mars_derived_keys=("original_cost",)
+    ),
+    "FINANCIAL": DisputeFamilyKeys(claim_supplied_keys=("occurrence_count",), mars_derived_keys=()),
+    "STORAGE_DURATION_FEE": DisputeFamilyKeys(claim_supplied_keys=("storage_days",), mars_derived_keys=()),
+    "VOLUME_COMMITMENT": DisputeFamilyKeys(
+        claim_supplied_keys=(), mars_derived_keys=("committed_quantity", "actual_purchase_quantity")
+    ),
+}
 
 
 @dataclass

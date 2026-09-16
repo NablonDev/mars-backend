@@ -6,9 +6,44 @@ from datetime import date, datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.enums import SummaryStatus
+
+# Upper bounds are a defense-in-depth backstop, not a business-tuned figure: claim_facts is
+# attacker-controlled input that directly drives a monetary verdict (docs/architecture/
+# extraction-engine-integration-plan.md Phase 4 security concern #1), so every field fails
+# closed here rather than being hand-checked downstream. Every field is optional; which ones
+# a given dispute actually needs is decided per engine_family at analyze() time by
+# app.services.penalties.dispute.types.FAMILY_REQUIRED_KEYS, not by this schema.
+_MAX_COUNT = 10_000_000
+_MAX_AMOUNT = 100_000_000.0
+
+
+class ClaimFacts(BaseModel):
+    """Structured retailer-supplied facts used to recompute a dispute claim.
+
+    Only facts that are not otherwise maintained by Mars belong here.
+    Mars-derived values such as ``original_cost``, ``committed_quantity``,
+    and ``actual_purchase_quantity`` must not be added to this model.
+
+    Extra fields are forbidden to structurally enforce the boundary between
+    claim-supplied and Mars-derived data. The model intentionally contains no
+    free-text fields; claim facts are represented as structured values only.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # QUALITY: a defect count the retailer's DC observed.
+    defect_units: int | None = Field(default=None, ge=0, le=_MAX_COUNT)
+    # QUALITY: defect rate as a fraction (e.g. 0.02 represents 2%).
+    defect_rate_pct: float | None = Field(default=None, ge=0, le=1)
+    # COVER_PURCHASE: what the retailer actually paid a substitute vendor.
+    replacement_cost_paid: float | None = Field(default=None, ge=0, le=_MAX_AMOUNT)
+    # FINANCIAL: an occurrence count Mars does not otherwise track.
+    occurrence_count: int | None = Field(default=None, ge=0, le=_MAX_COUNT)
+    # STORAGE_DURATION_FEE: days the retailer says product sat in its own DC.
+    storage_days: int | None = Field(default=None, ge=0, le=3650)
 
 
 class DisputeOpenRequest(BaseModel):
@@ -18,6 +53,9 @@ class DisputeOpenRequest(BaseModel):
     reason_code: Literal["AMOUNT_INCORRECT", "NOT_LATE", "QTY_CONFIRMED", "RULE_MISAPPLIED", "OTHER"]
     claimed_amount: float
     notes: str | None = None
+    # Write-once on the underlying actual_penalty (see DisputeResolutionService.open_dispute);
+    # omit for a SHORTAGE/DELAY/VOLUME_COMMITMENT dispute, which needs no claim-supplied fact.
+    claim_facts: ClaimFacts | None = None
 
 
 class DisputeResolveRequest(BaseModel):
@@ -41,7 +79,7 @@ class DisputeResolveRequest(BaseModel):
 
 
 class DisputeAnalysisBreakdownFacts(BaseModel):
-    """Raw order/delivery facts the dispute engine used to compute its verdict."""
+    """Raw order/delivery/claim facts the dispute engine used to compute its verdict."""
 
     order_qty: int
     unit_price: float
@@ -52,6 +90,14 @@ class DisputeAnalysisBreakdownFacts(BaseModel):
     deadline: date | None = None
     is_late: bool | None = None
     grace_period_days: int
+    defect_units: float | None = None
+    defect_rate_pct: float | None = None
+    replacement_cost_paid: float | None = None
+    original_cost: float | None = None
+    occurrence_count: float | None = None
+    storage_days: float | None = None
+    committed_quantity: float | None = None
+    actual_purchase_quantity: float | None = None
 
 
 class DisputeAnalysisBreakdown(BaseModel):
@@ -62,6 +108,10 @@ class DisputeAnalysisBreakdown(BaseModel):
     calc_type: str
     violation_family: str
     as_of_date: date
+    # Audit trail (4g): which of `facts` above came from the claim vs from Mars's own
+    # records, proving the authority boundary was enforced for this specific dispute.
+    claim_supplied_keys: list[str] = []
+    mars_derived_keys: list[str] = []
     facts: DisputeAnalysisBreakdownFacts
     cap_amount: float | None = None
     cap_applied: bool | None = None

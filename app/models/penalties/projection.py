@@ -34,3 +34,4 @@ class PenaltyProjection(Base, TimestampMixin):
     expected_penalty_amount: Mapped[float] = mapped_column(Numeric(12, 2))
     days_to_delivery: Mapped[int] = mapped_column(Integer)
     projection_status: Mapped[str] = mapped_column(String(30), default="OPEN")
+    skip_reason: Mapped[str | None] = mapped_column(String(30), nullable=True)

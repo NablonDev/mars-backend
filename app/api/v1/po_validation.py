@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, status
 
 from app.api.dependencies import get_po_service, get_purchase_order_repository
 from app.core.envelope import Envelope, success_envelope
@@ -22,7 +22,7 @@ router = APIRouter(tags=["po-validation"])
 @router.post(
     "/po-validation/purchase-order-lines",
     response_model=Envelope[IngestPurchaseOrderLinesResponse],
-    status_code=202,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 def ingest_purchase_order_lines(
     body: IngestPurchaseOrderLinesRequest,

@@ -6,7 +6,7 @@ from datetime import date
 from typing import Protocol
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, Query, Response, status
 
 from app.api.dependencies import (
     get_mitigation_option_repository,
@@ -38,7 +38,7 @@ from app.services.penalties.mitigation.summary_service import MitigationSummaryS
 from app.services.penalties.projection.service import ProjectionService
 from app.services.penalties.projection.summary_service import ProjectionSummaryService
 
-router = APIRouter(tags=["penalty-projections"])
+router = APIRouter(prefix="/penalties", tags=["penalty-projections"])
 
 # Uniform include allow-list across all GET projection routes.
 # POST /penalties/projections does not accept include= (always returns bare result).
@@ -159,9 +159,9 @@ def _attach_mitigation_summary(
 
 
 @router.post(
-    "/penalties/projections",
+    "/projections",
     response_model=Envelope[PenaltyProjectionResultResponse],
-    status_code=201,
+    status_code=status.HTTP_201_CREATED,
 )
 def run_penalty_projection(
     body: PenaltyProjectionRunRequest,
@@ -176,7 +176,7 @@ def run_penalty_projection(
 
 
 @router.get(
-    "/penalties/projections",
+    "/projections",
     response_model=Envelope[list[PenaltyProjectionDetailResponse]],
 )
 def list_penalty_projections(
@@ -225,7 +225,7 @@ def list_penalty_projections(
 
 
 @router.post(
-    "/penalties/projections/summary",
+    "/projections/summary",
     response_model=Envelope[PenaltyProjectionSummaryStatusResponse],
     responses={202: {"model": Envelope[PenaltyProjectionSummaryStatusResponse]}},
 )
@@ -265,7 +265,7 @@ def trigger_penalty_projection_summary(
 
 
 @router.get(
-    "/penalties/projections/summary",
+    "/projections/summary",
     response_model=Envelope[PenaltyProjectionSummaryStatusResponse],
 )
 def get_penalty_projection_summary(
@@ -309,7 +309,7 @@ def get_penalty_projection_summary(
 # literal `summary` segment too, which would turn that route into a 422
 # UUID-parse failure.
 @router.get(
-    "/penalties/projections/{projection_id}",
+    "/projections/{projection_id}",
     response_model=Envelope[PenaltyProjectionDetailResponse],
 )
 def get_penalty_projection(
@@ -338,7 +338,7 @@ def get_penalty_projection(
 
 
 @router.get(
-    "/penalties/exposure",
+    "/exposure",
     response_model=Envelope[PenaltyExposureResponse],
 )
 def get_penalty_exposure(
