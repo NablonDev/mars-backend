@@ -40,7 +40,8 @@ _VIOLATION_TYPES = (
     "FINANCIAL_ADJUSTMENT",
 )
 # Mirrors `app.services.penalties.rule_extraction.vocabulary.ENGINE_FAMILIES`. Nullable is
-# allowed: a rule written before Phase 1 (or seeded directly with no family) carries NULL.
+# allowed: a rule written before `engine_family` was added to this table (or seeded directly
+# with no family) carries NULL.
 _ENGINE_FAMILIES = (
     "SHORTAGE",
     "DELAY",
@@ -80,8 +81,8 @@ class PenaltyRule(Base, TimestampMixin):
     )
 
     id: Mapped[UUID] = mapped_column(UUID_PK, primary_key=True, default=generate_uuid7)
+    retailer_agreement_id: Mapped[UUID] = mapped_column(UUID_PK, ForeignKey("retailer_agreement.id"))
     rule_code: Mapped[str] = mapped_column(String(50), unique=True, index=True)
-    retailer_id: Mapped[UUID] = mapped_column(UUID_PK, ForeignKey("retailer.id"))
     violation_type: Mapped[str] = mapped_column(String(30))
     threshold_pct: Mapped[float] = mapped_column(Numeric(6, 4), default=0.0)
     calc_type: Mapped[str] = mapped_column(String(20))  # PER_UNIT / PERCENT_OF_PO / FLAT_FEE / TIERED
@@ -99,7 +100,6 @@ class PenaltyRule(Base, TimestampMixin):
     penalty_category: Mapped[str] = mapped_column(String(60))
     metric_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
     metric_denominator: Mapped[str | None] = mapped_column(String(30), nullable=True)
-    retailer_agreement_id: Mapped[UUID] = mapped_column(UUID_PK, ForeignKey("retailer_agreement.id"))
     extracted_rule_id: Mapped[UUID | None] = mapped_column(
         UUID_PK, ForeignKey(f"{PENALTIES_SCHEMA}.extracted_penalty_rule.id"), nullable=True
     )

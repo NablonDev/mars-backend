@@ -78,7 +78,6 @@ def _seed_order(
     plant = repos.master_data.add_plant(plant_code, None, None)
     repos.penalty_rules.add_rule(
         rule_code=f"RULE-{retailer_code}",
-        retailer_id=retailer["id"],
         violation_type="OTIF_LATE",
         penalty_category="OTIF_LATE",
         retailer_agreement_id=make_retailer_agreement(repos, retailer["id"]),

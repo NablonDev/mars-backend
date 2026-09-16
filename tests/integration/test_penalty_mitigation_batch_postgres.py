@@ -26,12 +26,14 @@ from app.queue.types import ClaimedJob
 from app.repositories.common.fulfillment import FulfillmentRepository
 from app.repositories.common.master_data import MasterDataRepository
 from app.repositories.common.purchase_order import PurchaseOrderRepository
+from app.repositories.common.retailer_agreement import RetailerAgreementRepository
 from app.repositories.penalties.job_context import PenaltyJobItemContextRepository
 from app.repositories.penalties.mitigation import MitigationOptionRepository
 from app.repositories.penalties.projection import PenaltyProjectionRepository
 from app.repositories.penalties.rule import PenaltyRuleRepository
 from app.repositories.process.job_queue import JobQueueRepository
 from app.services.penalties.projection.service import ProjectionService
+from app.services.seeding.master_data import ensure_placeholder_retailer_agreement
 from app.workers.penalty_mitigation import run_mitigation
 
 
@@ -157,12 +159,16 @@ def purchase_order_with_projection(pg_database: Database):
         material_id=material["id"],
         plant_id=plant["id"],
     )
+    retailer_agreement_id = ensure_placeholder_retailer_agreement(
+        RetailerAgreementRepository(session), retailer
+    )
     rules.add_rule(
         rule_code="RULE-MIT-BATCH-IT",
-        retailer_id=retailer["id"],
         violation_type="OTIF_LATE",
         calc_type="FLAT_FEE",
         rate=50.0,
+        penalty_category="OTIF_LATE",
+        retailer_agreement_id=retailer_agreement_id,
     )
 
     projection_date = date(2026, 1, 5)
@@ -201,7 +207,11 @@ def purchase_order_with_projection(pg_database: Database):
     )
     cleanup.execute(text("DELETE FROM purchase_order WHERE id = :id"), {"id": purchase_order["id"]})
     cleanup.execute(
-        text("DELETE FROM penalties.penalty_rule WHERE retailer_id = :id"), {"id": retailer["id"]}
+        text("DELETE FROM penalties.penalty_rule WHERE rule_code = :rule_code"),
+        {"rule_code": "RULE-MIT-BATCH-IT"},
+    )
+    cleanup.execute(
+        text("DELETE FROM retailer_agreement WHERE retailer_id = :id"), {"id": retailer["id"]}
     )
     cleanup.execute(text("DELETE FROM retailer WHERE id = :id"), {"id": retailer["id"]})
     cleanup.execute(text("DELETE FROM material WHERE id = :id"), {"id": material["id"]})

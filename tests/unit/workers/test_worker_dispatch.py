@@ -106,7 +106,6 @@ def _seed_purchase_order(database: Database, po_number: str, *, with_rules: bool
             )
             rules.add_rule(
                 rule_code=f"RULE-{po_number}-FLAT",
-                retailer_id=retailer["id"],
                 violation_type="OTIF_LATE",
                 penalty_category="OTIF_LATE",
                 retailer_agreement_id=retailer_agreement["id"],

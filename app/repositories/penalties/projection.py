@@ -266,8 +266,7 @@ class ActualPenaltyRepository:
     def set_claim_facts(self, actual_penalty_id: UUID, claim_facts: dict) -> dict:
         """Write `claim_facts` once; raises `ValueError` if already set or the id is unknown.
 
-        Write-once by design (`docs/architecture/extraction-engine-integration-plan.md`
-        Phase 4, decision #3): a corrected charge needs a new `actual_penalty` row and a
+        Write-once by design: a corrected charge needs a new `actual_penalty` row and a
         new dispute cycle, never a second write to this column on the same row.
         """
         row = self._session.get(ActualPenalty, actual_penalty_id)

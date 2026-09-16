@@ -66,7 +66,6 @@ def _seed_order(
     plant = repos.master_data.add_plant(f"PLANT-{po_number}", None, None)
     repos.penalty_rules.add_rule(
         rule_code=f"RULE-{po_number}",
-        retailer_id=retailer["id"],
         violation_type=violation_type,
         penalty_category=violation_type,
         retailer_agreement_id=make_retailer_agreement(repos, retailer["id"]),
@@ -439,7 +438,6 @@ def test_analyze_prices_tiered_delay_rule_via_days_late_bands(repos):
     plant = repos.master_data.add_plant("PLANT-DSP-TIERDELAY", None, None)
     repos.penalty_rules.add_rule(
         rule_code="RULE-DSP-TIERDELAY",
-        retailer_id=retailer["id"],
         violation_type="OTIF_LATE",
         penalty_category="OTIF_LATE",
         retailer_agreement_id=make_retailer_agreement(repos, retailer["id"]),
@@ -569,7 +567,7 @@ def test_full_lifecycle_open_analyze_resolve_with_override(repos):
 
 
 # ---------------------------------------------------------------------------
-# Phase 4: claim_facts (QUALITY dispatch, write-once, VOLUME_COMMITMENT authority split)
+# claim_facts (QUALITY dispatch, write-once, VOLUME_COMMITMENT authority split)
 # ---------------------------------------------------------------------------
 
 
@@ -582,7 +580,6 @@ def _seed_quality_rule_and_po(repos, po_number: str = "ORD-DSP-QUALITY", rate: f
     plant = repos.master_data.add_plant(f"PLANT-{po_number}", None, None)
     repos.penalty_rules.add_rule(
         rule_code=f"RULE-{po_number}",
-        retailer_id=retailer["id"],
         violation_type="QUALITY_DEFECT",
         penalty_category="QUALITY_DEFECT_CHARGEBACK",
         retailer_agreement_id=make_retailer_agreement(repos, retailer["id"]),
@@ -710,7 +707,6 @@ def test_analyze_volume_commitment_ignores_claim_supplied_purchase_total(repos):
     )
     repos.penalty_rules.add_rule(
         rule_code="RULE-DSP-VC",
-        retailer_id=retailer["id"],
         violation_type="VOLUME_SHORTFALL",
         penalty_category="MINIMUM_VOLUME_SHORTFALL",
         retailer_agreement_id=agreement["id"],

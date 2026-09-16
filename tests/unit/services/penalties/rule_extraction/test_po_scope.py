@@ -25,7 +25,7 @@ def test_flags_above_the_governed_default_are_trusted_not_clipped():
 
 
 def test_quality_family_category_is_in_scope_even_with_both_po_flags_true():
-    # Phase 1 de-restriction: QUALITY is a real, dispute-priceable engine_family, so
+    # QUALITY is a real, dispute-priceable engine_family, so
     # in_scope ("some engine can price this") is True regardless of the PO flags.
     decision = decide_po_scope("QUALITY_DEFECT_CHARGEBACK", po_shortage_flag=True, po_delay_flag=True)
 

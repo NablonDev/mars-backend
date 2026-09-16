@@ -68,7 +68,6 @@ def _seed_shortage_order(repos, projection_service, po_number: str = "ORD-MIT"):
     )
     repos.penalty_rules.add_rule(
         rule_code=f"RULE-{po_number}-SHORT",
-        retailer_id=retailer["id"],
         violation_type="SHORT_SHIP",
         penalty_category="SHORT_SHIP",
         retailer_agreement_id=make_retailer_agreement(repos, retailer["id"]),
@@ -240,7 +239,6 @@ def test_reconstructed_projection_result_handles_max_stacking(repos):
     retailer_agreement_id = make_retailer_agreement(repos, retailer["id"])
     repos.penalty_rules.add_rule(
         rule_code="RULE-MAX-SHORT",
-        retailer_id=retailer["id"],
         violation_type="SHORT_SHIP",
         penalty_category="SHORT_SHIP",
         retailer_agreement_id=retailer_agreement_id,
@@ -249,7 +247,6 @@ def test_reconstructed_projection_result_handles_max_stacking(repos):
     )
     repos.penalty_rules.add_rule(
         rule_code="RULE-MAX-OTIF",
-        retailer_id=retailer["id"],
         violation_type="OTIF_LATE",
         penalty_category="OTIF_LATE",
         retailer_agreement_id=retailer_agreement_id,

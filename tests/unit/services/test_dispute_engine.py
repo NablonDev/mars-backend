@@ -308,8 +308,8 @@ def test_delay_tiered_prices_via_days_late_bands():
 
 
 def test_price_violation_unmapped_violation_type_raises_unsupported_dispute_calc():
-    # A rule with no engine_family (published before Phase 1, or seeded directly) and a
-    # violation_type outside both legacy sets has no dispatch family at all. A raw
+    # A rule with no engine_family (published before that column existed, or seeded
+    # directly) and a violation_type outside both legacy sets has no dispatch family at all. A raw
     # ValueError would reach the API as an unhandled 500; UnsupportedDisputeCalcError is
     # caught by DisputeResolutionService.analyze and turned into a clean BusinessRuleError.
     rule = PenaltyRule(rule_id="r1", violation_type="QUALITY_DEFECT", calc_type=CalcType.FLAT_FEE, rate=1.0)
@@ -319,7 +319,7 @@ def test_price_violation_unmapped_violation_type_raises_unsupported_dispute_calc
 
 
 def test_price_violation_unsupported_engine_family_raises_unsupported_dispute_calc():
-    # An engine_family Phase 1 admits (e.g. LIABILITY_CAP) but Phase 4 has no dispatch
+    # An engine_family the model admits (e.g. LIABILITY_CAP) but the dispatch table has no
     # entry for yet: same fail-OPEN posture as an unrecognized violation_type.
     rule = PenaltyRule(
         rule_id="r1",
@@ -334,7 +334,7 @@ def test_price_violation_unsupported_engine_family_raises_unsupported_dispute_ca
 
 
 # ---------------------------------------------------------------------------
-# price_violation() -- Phase 4 family dispatch table
+# price_violation() -- family dispatch table
 # ---------------------------------------------------------------------------
 
 

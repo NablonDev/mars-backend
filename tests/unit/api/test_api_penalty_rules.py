@@ -37,7 +37,6 @@ def test_create_flat_rate_rule(client, retailer, retailer_agreement):
         "/api/v1/penalties/rules",
         json={
             "rule_code": "RULE-FLAT",
-            "retailer_id": retailer["id"],
             "retailer_agreement_id": retailer_agreement,
             "penalty_category": "SHORT_SHIP",
             "violation_type": "SHORT_SHIP",
@@ -56,7 +55,6 @@ def test_tiered_rule_without_tiers_is_rejected(client, retailer, retailer_agreem
         "/api/v1/penalties/rules",
         json={
             "rule_code": "RULE-BAD-TIERED",
-            "retailer_id": retailer["id"],
             "retailer_agreement_id": retailer_agreement,
             "penalty_category": "SHORT_SHIP",
             "violation_type": "SHORT_SHIP",
@@ -80,7 +78,6 @@ def test_list_rules_filters_by_retailer(client, repos, retailer, retailer_agreem
         "/api/v1/penalties/rules",
         json={
             "rule_code": "RULE-MINE",
-            "retailer_id": retailer["id"],
             "retailer_agreement_id": retailer_agreement,
             "penalty_category": "OTIF_LATE",
             "violation_type": "OTIF_LATE",
@@ -92,7 +89,6 @@ def test_list_rules_filters_by_retailer(client, repos, retailer, retailer_agreem
         "/api/v1/penalties/rules",
         json={
             "rule_code": "RULE-THEIRS",
-            "retailer_id": other_retailer["id"],
             "retailer_agreement_id": other_retailer_agreement,
             "penalty_category": "OTIF_LATE",
             "violation_type": "OTIF_LATE",

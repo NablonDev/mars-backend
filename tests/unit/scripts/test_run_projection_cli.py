@@ -70,7 +70,6 @@ def _seed_purchase_order(database: Database) -> str:
         )
         rules.add_rule(
             rule_code="RULE-CLI-FLAT",
-            retailer_id=retailer["id"],
             violation_type="OTIF_LATE",
             penalty_category="OTIF_LATE",
             retailer_agreement_id=retailer_agreement["id"],

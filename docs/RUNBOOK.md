@@ -222,6 +222,16 @@ alembic upgrade head          # run from the repo root, not app/
 This creates every table in `docs/DATABASE.md`'s table list. Safe to
 re-run (Alembic tracks the applied revision in `alembic_version`).
 
+**A database with `penalty_rule` rows predating the `ddf0ca3bea0e` migration
+needs a manual backfill first.** That migration adds `penalty_category` and
+`retailer_agreement_id` as `NOT NULL`-bound columns but carries no data
+backfill of its own, so `alembic upgrade head` fails partway through on any
+database that already has `penalty_rule` rows from before this schema
+change. Before upgrading such a database, backfill `penalty_category` to a
+non-null value and `retailer_agreement_id` to a real `retailer_agreement` row
+(one per retailer) on every existing `penalty_rule` row (a fresh database with
+no pre-existing `penalty_rule` rows does not need it).
+
 **Switching database backends.** Changing `DATABASE_URL` and re-running
 `alembic upgrade head` builds the schema on either backend -- the DDL
 itself compiles on both (`docs/DATABASE.md` "Primary keys" -- the
@@ -1082,16 +1092,33 @@ the charge's `invoice_or_deduction_date`. Add or correct the rule (§8),
 then re-analyze.
 
 #### Analyze returns `INSUFFICIENT_DATA_FOR_DISPUTE` (409)
-The real, final fact this violation family needs was never recorded as of
-the charge date -- `delivered_qty` for a `SHORTAGE`-family dispute,
-`actual_delivery_date` for a `DELAY`-family one. This is never silently
-treated as "confirmed zero"/"confirmed on time" -- post the missing
-delivery/shipment fact (§8) then re-analyze.
+The real, final fact this `engine_family` needs was never recorded as of
+the charge date -- `delivered_qty` for `SHORTAGE`, `actual_delivery_date`
+for `DELAY`, a required `claim_facts` key (e.g. `defect_units`,
+`replacement_cost_paid`) for `QUALITY`/`COVER_PURCHASE`/`FINANCIAL`/
+`STORAGE_DURATION_FEE`, or the commitment/actual-purchase totals for
+`VOLUME_COMMITMENT`. This is never silently treated as "confirmed zero" --
+post the missing delivery/shipment fact (§8) or open a new dispute with the
+missing `claim_facts` key, then re-analyze.
 
 #### Analyze returns `DISPUTE_CALC_NOT_SUPPORTED` (409)
-The effective rule's `calc_type` can't be priced for this violation family
--- today, only a `TIERED` delay rule (tiered pricing is implemented for
-shortage rules, banded by shortfall %, not for delay rules).
+Either the rule's `engine_family` has no entry in
+`app.services.penalties.dispute.engine`'s dispatch table at all (a family that publishes
+and projects/mitigates but has no dispute recompute path wired yet -- this backlog is a
+known, not-yet-solved operational concern), or its `calc_type` isn't one the matched
+family's measure function branches on.
+
+#### Open returns `CLAIM_FACTS_ALREADY_SET` (409)
+The charge's `actual_penalty.claim_facts` was already written by an
+earlier dispute cycle against it -- write-once, never mutated (§8's
+`ActualPenaltyRepository.set_claim_facts`). If the facts need correcting,
+that requires a new charge (`actual_penalty` row), not a second write here.
+
+#### Analyze returns `COMMITMENT_DISPUTE_NOT_CONFIGURED` (409)
+A `VOLUME_COMMITMENT`-family dispute was analyzed against a
+`DisputeResolutionService` built without a `retailer_agreements`
+repository -- a wiring defect (`get_dispute_service` in
+`app/api/dependencies.py` should always inject one), not a data problem.
 
 #### Resolve returns `DISPUTE_NOT_ANALYZED` (422)
 The dispute isn't `ANALYZED` yet. Run `POST .../analyze` first.
@@ -1345,13 +1372,15 @@ with a `reason_code`. The common ones and what to do about them:
 |---|---|---|
 | `NOT_APPROVED` | The rule is still `PENDING_REVIEW`, or was `REJECTED` | Review it (step 4) before the next publication run, if it should be priced |
 | `NOT_READY` | `pricing_readiness` isn't `READY` | Read the rule's own `pricing_readiness` value; `NEEDS_EXTERNAL_FIGURE`/`AWAITING_DATA` usually means a fact the contract doesn't state has to be entered by hand instead |
-| `NOT_PO_SCOPED` | Neither `po_shortage_flag` nor `po_delay_flag` is set | Expected for a clause outside this engine's scope (liability caps, indemnities); no action needed |
+| `NOT_PO_SCOPED` | The rule's `penalty_category` has `engine_family=UNPRICEABLE` (an escape value: `UNSPECIFIED_EXTERNAL`, `UNSPECIFIED_INTERNAL`, `UNMAPPED`), not a real category the classifier misfired on | Expected; there is genuinely no quantifiable rate to price. `po_shortage_flag`/`po_delay_flag` are reporting-only labels now and no longer gate admission |
 | `UNSUPPORTED_CALC_TYPE` | `calc_type` is `FORMULA_OTHER`, `UNSPECIFIED`, `NON_MONETARY`, or `LIMIT_ONLY` | The engine has no pricing function for this shape; write the rule by hand if it must be priced, or leave it out |
-| `NO_RATE_VALUE` | A monetary rule has no `RATE` fact carrying a number | Re-check the source clause; if the rate really is stated, this is an extraction miss worth reporting |
-| `MARGINAL_TIERS` | The rule's tiers are `MARGINAL`, and the engine only prices `CLIFF` | Write the rule by hand if `MARGINAL` tiering must be priced |
+| `UNMAPPED_VIOLATION_TYPE` | Neither the rule's metric nor its `penalty_category` names a `violation_type` (every one of the 20 governed, non-escape categories now has one; this fires only for a metric/category combination that genuinely isn't governed) | Extraction-side data error; re-check the source clause and the category/metric the classifier assigned |
+| `NO_RATE_VALUE` | A monetary rule has no `RATE` fact carrying a number anywhere | Re-check the source clause; if the rate really is stated, this is an extraction miss worth reporting |
+| `AMBIGUOUS_RATE_BRANCH` | A non-tiered rule has no `RATE` fact at the expected branch, but other branches do carry one (e.g. per-category rates that can't flatten to one rule-level number) | Expected; the clause needs the category/segment split represented some other way, or entered by hand |
+| `MARGINAL_TIERS` | A `TIERED` rule's bands mix `CLIFF` and `MARGINAL` `tier_application` across branches (`MARGINAL` alone now publishes and prices fine; `price_tiered` prices a whole rule under one value) | Extraction-side data error; re-check the source clause, since a single clause shouldn't mix tiering styles |
 | `NON_HALF_OPEN_TIERS` / `TIER_BAND_GAP` | The tier bands aren't clean half-open intervals, or gap/overlap | Read `review_notes` and the flagged attribute rows; usually needs a person to re-derive the bands from the clause and enter them by hand |
 | `NON_AMOUNT_CAP` | The cap is a rate, duration, or quantity ceiling, not an amount ceiling | Expected; the engine only applies amount caps today |
-| `UNSUPPORTED_BASIS` / `UNSUPPORTED_ACCRUAL` | `basis_type` isn't `PO_VALUE`/`UNIT_COST`/`SHORTFALL_UNITS`, or `applies_per` is a per-period accrual the engine can't price | Write the rule by hand if it must be priced |
+| `UNSUPPORTED_BASIS` / `UNSUPPORTED_ACCRUAL` | `basis_type` isn't `PO_VALUE`/`COST_OF_GOODS`/`SHORTFALL_VALUE`/`SHORTFALL_UNITS` (`UNIT_COST`, `WHOLESALE_PRICE`, `RETAIL_PRICE`, and `PRICE_DIFFERENTIAL` all reject, since there's no cost or sale-price figure in the data model to price them against), or a `WEEK`/`MONTH`/`QUARTER`/`YEAR` `applies_per` has no governed `rounding_convention` to accrue by | Write the rule by hand if it must be priced, or supply the missing `rounding_convention` and re-extract |
 | `THRESHOLD_OUT_OF_RANGE` | A threshold falls outside `[0, 1]` after unit conversion | Almost always an extraction error (percent vs. fraction); re-extract or correct by hand |
 | `EXTERNAL_FIGURE` | The value lives outside the contract (an index, a separately negotiated rate) | Expected; enter the rule by hand once the external figure is known |
 | `PERCENT_OF_INVOICE` | No invoice value in the projection snapshot | Needs an engine change, not an operator fix; the fact the rule needs isn't tracked yet |

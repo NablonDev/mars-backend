@@ -40,7 +40,6 @@ class PenaltyRuleRequest(BaseModel):
     """Request body for creating/updating a `penalty_rule`."""
 
     rule_code: str
-    retailer_id: UUID
     retailer_agreement_id: UUID
     penalty_category: str
     violation_type: Literal[*_VIOLATION_TYPES]  # type: ignore[valid-type]
@@ -72,7 +71,7 @@ class PenaltyRuleResponse(BaseModel):
 
     id: UUID
     rule_code: str
-    retailer_id: UUID
+    retailer_agreement_id: UUID
     violation_type: str
     calc_type: str
     rate: float

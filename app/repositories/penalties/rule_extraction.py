@@ -18,12 +18,8 @@ from app.services.penalties.rule_extraction.types import PublishedRule, StagedFa
 _REVIEW_STATUSES = ("APPROVED", "REJECTED")
 
 
-def published_rule_insert_kwargs(published: PublishedRule, retailer_id: UUID) -> dict[str, Any]:
-    """Shape a `PublishedRule` into `PenaltyRuleRepository.add_rule`'s keyword arguments.
-
-    `retailer_id` is the retailer's surrogate id, not on `PublishedRule` itself (which
-    carries only `retailer_code`, the business key the publisher had to work with).
-    """
+def published_rule_insert_kwargs(published: PublishedRule) -> dict[str, Any]:
+    """Shape a `PublishedRule` into `PenaltyRuleRepository.add_rule`'s keyword arguments."""
     tiers = (
         [
             {
@@ -40,7 +36,6 @@ def published_rule_insert_kwargs(published: PublishedRule, retailer_id: UUID) ->
     )
     return {
         "rule_code": published.rule_code,
-        "retailer_id": retailer_id,
         "violation_type": published.violation_type,
         "calc_type": published.calc_type,
         "rate": float(published.rate),

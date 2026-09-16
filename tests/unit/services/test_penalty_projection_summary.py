@@ -101,7 +101,6 @@ def _seed_flat_rule_order(repos, po_number: str = "ORD-EXP"):
     )
     rule = repos.penalty_rules.add_rule(
         rule_code=f"RULE-{po_number}-FLAT",
-        retailer_id=retailer["id"],
         violation_type="OTIF_LATE",
         penalty_category="OTIF_LATE",
         retailer_agreement_id=make_retailer_agreement(repos, retailer["id"]),
@@ -578,7 +577,6 @@ def test_get_tier_bands_for_rule_tool_cannot_be_pointed_at_a_different_retailers
     other_retailer = repos.master_data.add_retailer("RET-OTHER", "Retailer Other", None, "SUM")
     other_rule = repos.penalty_rules.add_rule(
         rule_code="RULE-OTHER-TIERED",
-        retailer_id=other_retailer["id"],
         violation_type="SHORT_SHIP",
         penalty_category="SHORT_SHIP",
         retailer_agreement_id=make_retailer_agreement(repos, other_retailer["id"]),

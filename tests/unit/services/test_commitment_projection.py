@@ -1,4 +1,4 @@
-"""Tests for `ProjectionService.run_commitment_projection` (Phase 3c) and the pure
+"""Tests for `ProjectionService.run_commitment_projection` and the pure
 `projection/commitment.py` helpers it's built on.
 
 Zero-LLM, DB-backed via the SQLite test session (see `tests/conftest.py`).
@@ -45,7 +45,6 @@ def test_50000_committed_38000_ordered_projects_12000_shortfall_no_per_po_violat
     as_of_date = date(2026, 12, 31)
     repos.penalty_rules.add_rule(
         rule_code="RULE-VC-COMMIT",
-        retailer_id=retailer["id"],
         violation_type="VOLUME_SHORTFALL",
         penalty_category="MINIMUM_VOLUME_SHORTFALL",
         retailer_agreement_id=agreement_id,

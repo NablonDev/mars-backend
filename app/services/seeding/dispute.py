@@ -62,7 +62,6 @@ def seed(
         retailer_agreement_id = ensure_placeholder_retailer_agreement(retailer_agreements, retailer)
         rules.add_rule(
             rule_code=rule_fixture.rule_code,
-            retailer_id=retailer["id"],
             violation_type=rule_fixture.violation_type,
             penalty_category=_PENALTY_CATEGORY_BY_VIOLATION_TYPE[rule_fixture.violation_type],
             retailer_agreement_id=retailer_agreement_id,

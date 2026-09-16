@@ -263,8 +263,9 @@ class TestStackingModes:
 
 
 class TestUnpriceableFamilyIsSkippedNotRaised:
-    """Phase 1: a rule whose violation_type this engine cannot price is skipped and
-    recorded, never raised on (fixes D5's retailer-wide ValueError blast radius)."""
+    """A rule whose violation_type this engine cannot price is skipped and
+    recorded, never raised on, so one unpriceable rule cannot blow up an entire
+    retailer's projection run with an unhandled ValueError."""
 
     def test_quality_and_shortage_rules_together_return_exactly_one_violation(self):
         snap = make_snapshot(confirmed_qty=900)  # guarantees a nonzero shortage penalty

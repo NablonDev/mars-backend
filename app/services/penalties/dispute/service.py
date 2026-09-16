@@ -78,8 +78,7 @@ class DisputeResolutionService:
         `app.schemas.penalties.disputes.ClaimFacts`) is written once onto the charge's
         `actual_penalty` row, never mutated after: raises `ConflictError` if this charge
         already carries claim_facts from an earlier dispute cycle. A charge needing
-        different facts requires a new charge, not a second write here (decision #3,
-        docs/architecture/extraction-engine-integration-plan.md Phase 4).
+        different facts requires a new charge, not a second write here.
         """
         actual_penalty = self.actual_penalties.get(actual_penalty_id)
         if actual_penalty is None:
@@ -182,8 +181,7 @@ class DisputeResolutionService:
 
         # claim_facts is the only claim-supplied input; every other DisputeFacts field
         # below is Mars-derived (from the snapshot, the rule row, or a repository), never
-        # read from claim_facts even when one happens to carry a same-named key (decision
-        # #2, docs/architecture/extraction-engine-integration-plan.md Phase 4).
+        # read from claim_facts even when one happens to carry a same-named key.
         claim_facts = actual_penalty.get("claim_facts") or {}
         actual_purchase_quantity = None
         if rule_value.engine_family == ENGINE_FAMILY_VOLUME_COMMITMENT:

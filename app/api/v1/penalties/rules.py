@@ -31,7 +31,6 @@ def create_penalty_rule(
     tiers = [t.model_dump() for t in body.tiers] if body.tiers else None
     created = rules.add_rule(
         rule_code=body.rule_code,
-        retailer_id=body.retailer_id,
         retailer_agreement_id=body.retailer_agreement_id,
         penalty_category=body.penalty_category,
         violation_type=body.violation_type,

@@ -419,9 +419,7 @@ class PenaltyRuleExtractionService:
                 rejected += 1
                 continue
 
-            rule = self._rules.add_rule(
-                **published_rule_insert_kwargs(result, retailer_agreement["retailer_id"])
-            )
+            rule = self._rules.add_rule(**published_rule_insert_kwargs(result))
             outcomes.append(
                 self._publications.record(
                     extracted_rule_id=UUID(staged.id),

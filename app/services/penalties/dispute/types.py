@@ -62,9 +62,8 @@ class DisputeFacts:
     """Real, final post-delivery facts as of the historical charge date.
 
     Never the probability-driven estimates `app.services.penalties.projection`
-    works from. Fields below the DELAY block are Phase 4's family-specific facts
-    (docs/architecture/extraction-engine-integration-plan.md section 10): each is either
-    claim-supplied (populated from `actual_penalty.claim_facts`, the retailer's own
+    works from. Fields below the DELAY block are non-SHORTAGE/DELAY family-specific facts:
+    each is either claim-supplied (populated from `actual_penalty.claim_facts`, the retailer's own
     assertion) or Mars-derived (populated by `DisputeResolutionService.analyze` from a
     repository or the matched rule, never from claim_facts). `FAMILY_REQUIRED_KEYS` below
     is the authoritative map of which is which per `engine_family`.
@@ -112,8 +111,7 @@ class DisputeFamilyKeys:
 
     `claim_supplied_keys` may be populated from `actual_penalty.claim_facts`;
     `mars_derived_keys` must always be populated from a repository or the matched rule,
-    never from claim_facts, even when claim_facts supplies a conflicting value (decision
-    #2, docs/architecture/extraction-engine-integration-plan.md section 10). Both are
+    never from claim_facts, even when claim_facts supplies a conflicting value. Both are
     `DisputeFacts` field names; QUALITY carries neither, since its bespoke measure function
     branches between `defect_units`/`defect_rate_pct` by the rule's own `calc_type` rather
     than requiring one fixed key.

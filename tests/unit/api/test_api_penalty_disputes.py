@@ -58,7 +58,6 @@ def dispute_fixture(database) -> dict:
         )
         rules.add_rule(
             rule_code="RULE-API-DSP",
-            retailer_id=retailer["id"],
             violation_type="SHORT_SHIP",
             penalty_category="SHORT_SHIP",
             retailer_agreement_id=retailer_agreement["id"],
@@ -144,8 +143,7 @@ def test_open_dispute_accepts_valid_claim_facts(client, dispute_fixture):
 
 def test_open_dispute_rejects_out_of_bounds_claim_facts(client, dispute_fixture):
     """Fail closed at the Pydantic layer: claim_facts is attacker-controlled input that
-    directly drives a monetary verdict (docs/architecture/extraction-engine-integration-plan.md
-    Phase 4 security concern #1), so an out-of-range value never reaches the handler."""
+    directly drives a monetary verdict, so an out-of-range value never reaches the handler."""
     resp = client.post(
         "/api/v1/penalties/disputes",
         json={

@@ -26,7 +26,6 @@ def _seed_rule_order(repos, po_number: str) -> tuple[UUID, UUID]:
     )
     rule = repos.penalty_rules.add_rule(
         rule_code=f"RULE-{po_number}",
-        retailer_id=retailer["id"],
         violation_type="OTIF_LATE",
         penalty_category="OTIF_LATE",
         retailer_agreement_id=make_retailer_agreement(repos, retailer["id"]),

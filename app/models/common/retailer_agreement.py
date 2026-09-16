@@ -18,7 +18,7 @@ class RetailerAgreement(Base, TimestampMixin):
     __tablename__ = "retailer_agreement"
 
     id: Mapped[UUID] = mapped_column(UUID_PK, primary_key=True, default=generate_uuid7)
-    retailer_id: Mapped[UUID] = mapped_column(UUID_PK, ForeignKey("retailer.id"))
+    retailer_id: Mapped[UUID] = mapped_column(UUID_PK, ForeignKey("retailer.id"), index=True)
     contract_code: Mapped[str] = mapped_column(String(100), index=True)
     title: Mapped[str] = mapped_column(String(300))
     document_sha256: Mapped[str] = mapped_column(CHAR(64), index=True)

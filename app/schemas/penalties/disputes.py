@@ -11,8 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.models.enums import SummaryStatus
 
 # Upper bounds are a defense-in-depth backstop, not a business-tuned figure: claim_facts is
-# attacker-controlled input that directly drives a monetary verdict (docs/architecture/
-# extraction-engine-integration-plan.md Phase 4 security concern #1), so every field fails
+# attacker-controlled input that directly drives a monetary verdict, so every field fails
 # closed here rather than being hand-checked downstream. Every field is optional; which ones
 # a given dispute actually needs is decided per engine_family at analyze() time by
 # app.services.penalties.dispute.types.FAMILY_REQUIRED_KEYS, not by this schema.

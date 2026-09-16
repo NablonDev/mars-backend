@@ -86,7 +86,6 @@ def _seed_purchase_order(
         )
         rules.add_rule(
             rule_code=f"RULE-{po_number}",
-            retailer_id=retailer["id"],
             violation_type="OTIF_LATE",
             penalty_category="OTIF_LATE",
             retailer_agreement_id=retailer_agreement["id"],

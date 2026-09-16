@@ -103,6 +103,8 @@ genuinely incremental revision added since, in FK-dependency order:
 | `a5b39c6e2181` | `alembic/versions/a5b39c6e2181_initial_langgraph_schema.py` | `CREATE SCHEMA langgraph` only -- no tables, Postgres-only, no-op on SQLite |
 | `11ce88f609e0` | `alembic/versions/11ce88f609e0_penalty_dispute_schema.py` | `penalty_dispute` table; `DISPUTE` added to `penalty_summary.summary_type`'s CHECK constraint; `penalty_rule.rule_code` widened `varchar(20)` -> `varchar(50)` |
 | `1d92b65b8eb4` | `alembic/versions/1d92b65b8eb4_penalty_rule_extraction_schema_squash.py` | `retailer_agreement` table (public); `penalties.extracted_penalty_rule`, `.extracted_penalty_rule_attribute`, `.rule_publication` tables; `penalty_rule` gains `basis_type`, `applies_per`, `currency_code`; `process.workflow_thread_subject` drops its `email_event_id`/`purchase_order_line_id` FK columns and `ck_workflow_thread_subject_one_of`, replaced by `subject_type`/`subject_id` plus a plain composite index |
+| `ddf0ca3bea0e` | `alembic/versions/ddf0ca3bea0e_penalty_rule_extraction_engine_integration.py` | Schema-only expand: `penalty_rule` gains nullable `engine_family`, `penalty_category`, `metric_code`/`metric_denominator`, `retailer_agreement_id`, `extracted_rule_id`, `measurement_window_type`/`_length`/`_unit`, `rounding_convention`; `is_engine_priceable` (`NOT NULL DEFAULT true`); nullable `commitment_quantity`/`commitment_value`; nullable FKs to `retailer_agreement` and `extracted_penalty_rule`; and the `ck_penalty_rule_violation_type`/`ck_penalty_rule_engine_family` CHECKs. `penalty_projection` gains `skip_reason`; `penalty_rule_tier` gains nullable `tier_application`/`tier_basis` and widens `band_min`/`band_max`; `actual_penalty` gains `claim_facts`. No backfill, no `NOT NULL` enforcement beyond `is_engine_priceable`, no `purchase_order` index, `retailer_id` not yet dropped |
+| `d275022ac6a0` | `alembic/versions/d275022ac6a0_backfill_penalty_rule_extraction_engine_.py` | Contract half: backfills pre-existing `penalty_rule.penalty_category` to `'UNSPECIFIED_INTERNAL'`, backfills `retailer_agreement_id` via a placeholder `retailer_agreement` row per distinct `retailer_id` needing one, and backfills `penalty_rule_tier.tier_application`/`tier_basis` to `'CLIFF'`/`'SHORTFALL_PCT'` -- each verified NULL-free before its `NOT NULL` is enforced; creates `ix_purchase_order_retailer_order_date` via `CREATE INDEX CONCURRENTLY`; drops `penalty_rule.retailer_id` (its FK dropped first on Postgres); and creates `ix_retailer_agreement_retailer_id` to back the join that replaces it |
 
 The five revisions above `11ce88f609e0` are a pre-release squash -- edited in
 place rather than chained, since there was no production data to preserve
@@ -408,12 +410,16 @@ One row per penalty clause found, pending review. `status` moves
 `NEEDS_EXTERNAL_FIGURE`, `AWAITING_DATA`, `UNSUPPORTED_SHAPE`,
 `NOT_A_CHARGE`) is set by the extraction pipeline's readiness evaluator,
 and only a `READY`+`APPROVED` row is eligible for publication.
-`po_shortage_flag`/`po_delay_flag` mark whether the clause is in scope for
-this engine (purchase order shortage or lateness) at all. `pricing_readiness`
-and `status` are only ever set by application code (the readiness
-evaluator's closed return set, and `set_review_decision`'s own check),
-and `confidence` by the extraction agent's Pydantic schema, so none of
-the three carries a DB-level CHECK.
+`po_shortage_flag`/`po_delay_flag` are reporting-only labels (which quantity/timing
+axis a KPI query can find this rule under); they do not gate publication. Admission
+is instead gated on the rule's `penalty_category`'s governed `engine_family` (see
+`app.services.penalties.rule_extraction.vocabulary.CategoryDefaults.engine_family_for`):
+every category publishes except the `UNPRICEABLE` escape values
+(`UNSPECIFIED_EXTERNAL`, `UNSPECIFIED_INTERNAL`, `UNMAPPED`). `pricing_readiness`
+and `status` are only ever set by application code (the readiness evaluator's
+closed return set, and `set_review_decision`'s own check), and `confidence` by
+the extraction agent's Pydantic schema, so none of the three carries a DB-level
+CHECK.
 
 `UNIQUE (agent_run_id, clause_fingerprint)`
 (`uq_extracted_penalty_rule_run_fingerprint`) is what stops a
@@ -466,10 +472,143 @@ otherwise collide on `penalty_rule`'s unique constraint): it checks
 ### `penalties.penalty_rule` gains three columns
 `basis_type` (nullable), `applies_per` (nullable), and `currency_code`
 (`NOT NULL DEFAULT 'USD'`) -- the pricing engine needs these regardless of
-a rule's origin, hand-written or published. No `extracted_rule_id` column:
-provenance from an extracted rule to the `penalty_rule` row it was
-published into lives entirely on `penalties.rule_publication` (which carries
-both `extracted_rule_id` and `penalty_rule_id`), not duplicated here.
+a rule's origin, hand-written or published.
+
+### `penalties.penalty_rule` gains `engine_family`
+Nullable `varchar(30)`, which pricing engine (if any) selects this rule; see
+`app.services.penalties.rule_extraction.vocabulary.ENGINE_FAMILIES`. Set by
+the publisher at publication time from the rule's `penalty_category`; NULL
+for a rule published before this column existed or seeded directly. A CHECK
+constraint (`engine_family IS NULL OR IN (...)`) leaves the column nullable:
+a rule published before this column existed, or seeded directly, still
+carries no family.
+
+### `penalties.penalty_projection` gains `skip_reason`
+Nullable `varchar(30)`, set only for a rule `ProjectionEngine.project` could
+not price (its family is neither shortage- nor delay-shaped). The row still
+carries a real `rule_id` and zero `penalty_amount`/`expected_penalty_amount`,
+so a mis-tagged or not-yet-priceable rule stays visible in a retailer's
+projection history instead of silently vanishing; NULL means a genuine
+priced violation, even one that priced to zero.
+
+### `penalties.penalty_rule` and `penalty_rule_tier` widening
+Stops losing extraction fidelity at publish; see
+`docs/architecture/extraction-engine-integration-plan.md` section 8 for the
+full rationale. Split across an expand migration (`ddf0ca3bea0e`) and a
+follow-up contract migration (`d275022ac6a0`) that backfills and enforces
+`NOT NULL`, per this project's expand/contract migration guidance.
+
+`penalty_rule` gains: `penalty_category` (the extraction category,
+previously dropped entirely at publish), `metric_code` / `metric_denominator`
+(nullable, what was measured and what a ratio metric is a percentage of),
+`retailer_agreement_id` (FK to `retailer_agreement`), `extracted_rule_id`
+(nullable FK to `penalties.extracted_penalty_rule`, direct traceability to
+the source clause -- provenance also still lives on
+`penalties.rule_publication`, not duplicated logic, just no longer the only
+path to it), `measurement_window_type`/`_length`/`_unit` and
+`rounding_convention` (nullable, not yet read by any engine), and
+`is_engine_priceable` (`NOT NULL DEFAULT true`, a **stored snapshot** of
+whether today's engines select this rule's `engine_family`, not derived when
+read -- it must be reviewed and potentially rewritten by hand whenever
+engine capability changes, see
+`PenaltyRulePublisher._ENGINE_PRICEABLE_FAMILIES`). Two CHECK constraints
+land in the same expand migration: `violation_type` against its full
+governed set, and `engine_family` against `ENGINE_FAMILIES` (or NULL) -- both
+schema-only, so they belong with the rest of the expand, not the backfill.
+
+`penalty_category` and `retailer_agreement_id` are added nullable in the
+expand migration and enforced `NOT NULL` only in the follow-up, once every
+pre-existing row has been backfilled and verified NULL-free -- unlike a
+single-migration expand-then-constrain with no window where the constraint
+is loosened, here that window is the gap between deploying the two
+migrations, which is the point of splitting them: the application can run
+against the expand migration's schema before the backfill runs.
+`penalty_category`'s backfill sets every pre-existing NULL row to
+`'UNSPECIFIED_INTERNAL'` via a plain `UPDATE`, verified NULL-free before
+`NOT NULL` is applied; no server-side default is added, because that value
+is a pure migration-time sentinel here, not a value the application ever
+writes going forward -- `PenaltyRulePublisher._check_admission` rejects any
+staged rule whose category maps to `engine_family = UNPRICEABLE` (which
+includes `UNSPECIFIED_INTERNAL`) before it can become a `penalty_rule` row,
+so any row still reading it after the backfill predates both migrations and
+needs its real category set by hand. `retailer_agreement_id` can't use a
+sentinel default, since it must reference a real row -- while it is still
+nullable, the follow-up migration (Postgres only) inserts one placeholder
+`retailer_agreement` row per distinct `retailer_id` that has a pre-existing
+`penalty_rule` row with no `retailer_agreement_id` (`contract_code`
+`'MIGRATION-BACKFILL-<retailer_id>'`, `title` `'Backfilled placeholder
+agreement'`, a deterministic `document_sha256`), points those rows at it,
+verifies NULL-free, and only then applies `NOT NULL`. Every placeholder row
+still needs re-pointing at the correct real agreement by hand. A fresh
+database with no pre-existing `penalty_rule` rows never triggers either
+backfill.
+
+`basis_type` is stored verbatim from extraction: the publisher's
+`_SUPPORTED_BASIS_TYPES` is a validation gate only, no longer a
+translation table (a rule can carry `PO_VALUE` rather than always being
+folded onto `COST_OF_GOODS`); the engine decides what it can price from the
+stored value.
+
+`penalty_rule_tier` gains nullable `tier_application` and `tier_basis` in the
+expand migration, backfilled by the follow-up migration to `'CLIFF'` and
+`'SHORTFALL_PCT'` respectively (verified NULL-free first) before `NOT NULL`
+is enforced there, and widens `band_min`/`band_max` from `Numeric(6,4)` to
+`Numeric(12,4)` (two integer digits can't hold a day-count or
+occurrence-count band above 99) in the expand migration. `band_max` becomes
+nullable there too: `NULL` is the open top band, replacing a stored
+`Decimal("Infinity")` that was dialect-divergent between Postgres and the
+SQLite test DB.
+
+### `public.purchase_order` gains a composite index, and `penalties.penalty_rule` gains two commitment columns
+`docs/architecture/extraction-engine-integration-plan.md` section 9.3. The two
+commitment columns are added nullable in the expand migration (`ddf0ca3bea0e`);
+the index is created by the follow-up migration (`d275022ac6a0`), since it
+needs `CREATE INDEX CONCURRENTLY`.
+
+`ix_purchase_order_retailer_order_date` on `(retailer_id, order_date)` backs
+`PurchaseOrderRepository.get_ordered_totals_for_retailer_between`, a per-retailer,
+per-window sum queried repeatedly by `ProjectionService.run_commitment_projection`;
+`retailer_id`'s own FK is not automatically indexed by Postgres. `purchase_order`
+is large/high-traffic, so the follow-up migration creates this index with
+`CREATE INDEX CONCURRENTLY` inside `op.get_context().autocommit_block()`
+(Alembic's supported mechanism for non-transactional DDL) rather than a plain
+`CREATE INDEX`, which would hold a write lock for the build's duration.
+
+`penalty_rule` gains `commitment_quantity` (`numeric(14,3)`, nullable) and
+`commitment_value` (`numeric(14,2)`, nullable): the contract-period purchase target an
+`engine_family=VOLUME_COMMITMENT` rule measures a shortfall against, exactly one of the
+two set. Both stay NULL for every existing row: no `StagedFact.attribute_role` maps to
+either column yet, so this is a necessary but not yet extraction-populated addition,
+set by hand until a follow-up publisher change wires a mapping.
+
+### `penalties.penalty_rule` drops `retailer_id`
+
+The follow-up migration (`d275022ac6a0`), once `retailer_agreement_id` has been
+backfilled for every pre-existing row and made `NOT NULL` earlier in that same
+migration. `retailer_id` was redundant once `retailer_agreement_id` covered every
+row: `retailer_agreement.retailer_id` already reaches the same retailer, one
+join away. `PenaltyRuleRepository.list_rules_for_retailer`/`list_rules_effective_on`/
+`list_rules` now join `penalty_rule` to `retailer_agreement` on `retailer_agreement_id`
+and filter `retailer_agreement.retailer_id` instead of filtering `penalty_rule.retailer_id`
+directly; `retailer_agreement` gains `ix_retailer_agreement_retailer_id` to back that join.
+
+The column is dropped with a plain `batch_alter_table` drop -- its FK constraint,
+`penalty_rule_retailer_id_fkey`, is dropped first on Postgres -- identical on Postgres and
+SQLite. No table is rebuilt: dropping `retailer_id` does not require touching the FK
+constraints that reference `penalty_rule.id` from `penalty_dispute`, `penalty_projection`,
+`penalty_rule_tier`, or `rule_publication`, since those reference the primary key, not the
+dropped column. Every column `ddf0ca3bea0e` and `1d92b65b8eb4` added (`basis_type`
+onward) lands at the physical end of the table, since Postgres has no "add column at
+position N" and neither migration attempts to reorder columns for cosmetic reasons --
+`retailer_agreement_id` sits wherever `ddf0ca3bea0e`'s `add_column` sequencing puts it
+(after `metric_denominator`, before `extracted_rule_id`; see
+`docs/mars_penalties_erp_schema.sql` for the exact, final physical order). Every
+constraint and index keeps its original name. `d275022ac6a0`'s `downgrade()` restores
+`retailer_id` as a plain `add_column`, backfilled from `retailer_agreement.retailer_id`
+via the same join,
+then makes it `NOT NULL` and recreates its FK -- also no rebuild. It does not delete any
+placeholder `retailer_agreement` rows `upgrade()` created: reversing a schema change
+should not delete substantive data a user may have started relying on.
 
 ## Why no `dim_`/`fact_` prefix
 
@@ -552,7 +691,7 @@ compare against metadata at all.
 
 ## Schema-change checklist
 
-Per `.claude/CLAUDE.md`'s "Engineering Rules": a schema change touches,
+Per `CLAUDE.md`'s "Engineering Rules": a schema change touches,
 together, in one commit -- the relevant `app/models/*.py` file, a new
 Alembic migration (`alembic/versions/`), `docs/mars_penalties_erp_schema.sql`,
 this document (if the change is structural, not just a column tweak), and

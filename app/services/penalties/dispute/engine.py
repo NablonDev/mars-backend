@@ -13,8 +13,9 @@ The LLM never decides pay, no-pay, or how much; this module alone does.
 narrates a verdict already computed and persisted here.
 
 `price_violation` dispatches on the rule's `engine_family` (falling back to the legacy
-`violation_type` set membership for a rule published before Phase 1 or seeded directly, so
-existing SHORTAGE/DELAY rules keep pricing exactly as before). Each family maps to a
+`violation_type` set membership for a rule with no `engine_family` set, whether published
+before that column existed or seeded directly, so existing SHORTAGE/DELAY rules keep pricing
+exactly as before). Each family maps to a
 measure function in `_FAMILY_MEASURE_FNS`, built at the bottom of this module once every
 measure function is defined; `_require_family_keys` checks `DisputeFacts.
 FAMILY_REQUIRED_KEYS` before any measure function runs, so a missing fact always raises
@@ -100,8 +101,7 @@ def price_violation(rule: PenaltyRule, facts: DisputeFacts) -> tuple[float, dict
             f"Rule {rule.rule_id} has violation_type={rule.violation_type!r} "
             f"(engine_family={rule.engine_family!r}), not mapped to either "
             "SHORTAGE_VIOLATION_TYPES or DELAY_VIOLATION_TYPES nor to any dispute dispatch "
-            "family. Dispute has no general recompute path for this family yet (see "
-            "docs/architecture/extraction-engine-integration-plan.md Phase 4)."
+            "family. Dispute has no general recompute path for this family yet."
         )
     _require_family_keys(rule, facts, family)
     return _FAMILY_MEASURE_FNS[family](rule, facts)
@@ -184,7 +184,7 @@ def compute_is_late(facts: DisputeFacts) -> bool:
 
 def _resolve_family(rule: PenaltyRule) -> str | None:
     """One rule's dispute-dispatch family: `engine_family` when set, else the legacy
-    `violation_type` set membership for a rule published before Phase 1 or seeded directly.
+    `violation_type` set membership for a rule with no `engine_family` set.
     """
     if rule.engine_family is not None:
         return rule.engine_family
@@ -375,9 +375,9 @@ def _price_volume_commitment(rule: PenaltyRule, facts: DisputeFacts) -> tuple[fl
 
 # Family -> measure function, built after every measure function above is defined. Extend
 # this (plus FAMILY_REQUIRED_KEYS in dispute/types.py) to admit a new dispute-priceable
-# family; an entry missing here is not a bug, it is decision #4's documented backlog: the
-# family still publishes (Phase 1) and still projects/mitigates if shortage/delay-shaped
-# (Phase 3), it just cannot be disputed yet, and stays OPEN via UnsupportedDisputeCalcError.
+# family; an entry missing here is not a bug: the family can still publish and still
+# project/mitigate if shortage/delay-shaped, it just cannot be disputed yet, and stays OPEN
+# via UnsupportedDisputeCalcError.
 _FAMILY_MEASURE_FNS: dict[str, _MeasureFn] = {
     ENGINE_FAMILY_SHORTAGE: _price_shortage_family,
     ENGINE_FAMILY_DELAY: _price_delay_family,

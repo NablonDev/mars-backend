@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.core.exceptions import ValidationError
 from app.models import PenaltyRule as PenaltyRuleModel
 from app.models import PenaltyRuleTier as PenaltyRuleTierModel
+from app.models import RetailerAgreement
 from app.services.penalties.projection import CalcType
 from app.services.penalties.projection import PenaltyRule as PenaltyRuleValue
 from app.services.penalties.projection import PenaltyRuleTier as PenaltyRuleTierValue
@@ -28,7 +29,6 @@ def _rule_to_dict(r: PenaltyRuleModel) -> dict:
     return {
         "id": r.id,
         "rule_code": r.rule_code,
-        "retailer_id": r.retailer_id,
         "violation_type": r.violation_type,
         "calc_type": r.calc_type,
         "rate": float(r.rate),
@@ -71,7 +71,6 @@ class PenaltyRuleRepository:
     def add_rule(
         self,
         rule_code: str,
-        retailer_id: UUID,
         violation_type: str,
         calc_type: str,
         rate: float,
@@ -109,7 +108,6 @@ class PenaltyRuleRepository:
         """
         rule = PenaltyRuleModel(
             rule_code=rule_code,
-            retailer_id=retailer_id,
             violation_type=violation_type,
             calc_type=calc_type,
             rate=rate,
@@ -169,8 +167,10 @@ class PenaltyRuleRepository:
         `calc_type` is not one of the known calc types.
         """
         rows = self._session.scalars(
-            select(PenaltyRuleModel).where(
-                PenaltyRuleModel.retailer_id == retailer_id,
+            select(PenaltyRuleModel)
+            .join(RetailerAgreement, PenaltyRuleModel.retailer_agreement_id == RetailerAgreement.id)
+            .where(
+                RetailerAgreement.retailer_id == retailer_id,
                 PenaltyRuleModel.is_active.is_(True),
             )
         ).all()
@@ -205,8 +205,10 @@ class PenaltyRuleRepository:
         single rule id is settled on, `get_rule_value` converts it.
         """
         rows = self._session.scalars(
-            select(PenaltyRuleModel).where(
-                PenaltyRuleModel.retailer_id == retailer_id,
+            select(PenaltyRuleModel)
+            .join(RetailerAgreement, PenaltyRuleModel.retailer_agreement_id == RetailerAgreement.id)
+            .where(
+                RetailerAgreement.retailer_id == retailer_id,
                 PenaltyRuleModel.effective_start_date <= as_of_date,
                 (PenaltyRuleModel.effective_end_date.is_(None))
                 | (PenaltyRuleModel.effective_end_date >= as_of_date),
@@ -220,8 +222,7 @@ class PenaltyRuleRepository:
         The dispute engine's counterpart to `list_rules_for_retailer`'s per-row
         conversion, used once `list_rules_effective_on` and its tie-break have
         already settled on one rule id; sharing `_row_to_rule_value` is what
-        keeps projection and dispute from disagreeing about a rule's fields (D1
-        in `docs/architecture/extraction-engine-integration-plan.md`).
+        keeps projection and dispute from disagreeing about a rule's fields.
         """
         row = self._session.get(PenaltyRuleModel, rule_id)
         if row is None:
@@ -248,7 +249,9 @@ class PenaltyRuleRepository:
         """List penalty rules, optionally filtered to one retailer."""
         stmt = select(PenaltyRuleModel)
         if retailer_id:
-            stmt = stmt.where(PenaltyRuleModel.retailer_id == retailer_id)
+            stmt = stmt.join(
+                RetailerAgreement, PenaltyRuleModel.retailer_agreement_id == RetailerAgreement.id
+            ).where(RetailerAgreement.retailer_id == retailer_id)
 
         rows = self._session.scalars(stmt).all()
         return [_rule_to_dict(r) for r in rows]

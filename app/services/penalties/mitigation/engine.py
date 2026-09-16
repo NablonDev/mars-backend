@@ -239,7 +239,7 @@ def _effective_engine_family(rule: PenaltyRule) -> str | None:
     """`rule.engine_family` when set, else inferred from `violation_type` for a rule with none.
 
     `PenaltyRule.engine_family` is `None` for a rule seeded directly or published before
-    Phase 1 (see its docstring in `projection/types.py`), so filtering on the stored field
+    that column existed (see its docstring in `projection/types.py`), so filtering on the stored field
     alone silently drops those rules from every family-based option. Falling back to the
     same `violation_type` sets the engine itself dispatches on keeps that legacy/seeded data
     working exactly as it did before the engine_family filter existed.

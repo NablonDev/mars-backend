@@ -48,8 +48,7 @@ def _rule_to_seed_dict(rule: PenaltyRule, retailer_code: str) -> dict[str, Any]:
     """Convert a canonical `WMT_RULES`/`AMZ_RULES` rule into `add_rule` kwargs.
 
     Reusing the objects the pure-engine tests assert against keeps seed data and
-    validated test numbers in step. `retailer_id`/`retailer_agreement_id` are resolved
-    at `seed()` time.
+    validated test numbers in step. `retailer_agreement_id` is resolved at `seed()` time.
     """
     return {
         "rule_code": rule.rule_id,
@@ -317,7 +316,7 @@ def seed(
             )
             retailer_agreement_id = ensure_placeholder_retailer_agreement(retailer_agreements, retailer)
             fields = {k: v for k, v in rule_dict.items() if k != "retailer_code"}
-            rules.add_rule(retailer_id=retailer["id"], retailer_agreement_id=retailer_agreement_id, **fields)
+            rules.add_rule(retailer_agreement_id=retailer_agreement_id, **fields)
             counts["rules"] += 1
 
     offset = calendar_offset()

@@ -483,14 +483,11 @@ def _published_rule(**overrides) -> PublishedRule:
     return PublishedRule(**fields)
 
 
-def test_published_rule_insert_kwargs_shapes_decimals_to_floats_and_carries_retailer_id():
-    retailer_id = uuid4()
-
-    kwargs = published_rule_insert_kwargs(_published_rule(), retailer_id)
+def test_published_rule_insert_kwargs_shapes_decimals_to_floats():
+    kwargs = published_rule_insert_kwargs(_published_rule())
 
     assert kwargs == {
         "rule_code": "WMT-SHORT_SHIP-a1b2c3d4",
-        "retailer_id": retailer_id,
         "violation_type": "SHORT_SHIP",
         "calc_type": "PER_UNIT",
         "rate": 5.0,
@@ -540,7 +537,7 @@ def test_published_rule_insert_kwargs_shapes_tiers_and_a_none_cap():
         ],
     )
 
-    kwargs = published_rule_insert_kwargs(published, uuid4())
+    kwargs = published_rule_insert_kwargs(published)
 
     assert kwargs["cap_amount"] is None
     assert kwargs["tiers"] == [
@@ -566,7 +563,7 @@ def test_published_rule_insert_kwargs_carries_basis_currency_and_applies_per():
     # but were dropped before the insert, leaving basis_type NULL.
     published = _published_rule(basis_type="SHORTFALL_VALUE", currency_code="EUR", applies_per="DAY")
 
-    kwargs = published_rule_insert_kwargs(published, uuid4())
+    kwargs = published_rule_insert_kwargs(published)
 
     assert kwargs["basis_type"] == "SHORTFALL_VALUE"
     assert kwargs["currency_code"] == "EUR"

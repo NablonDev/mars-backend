@@ -54,8 +54,8 @@ class PenaltyRuleTier:
 
     `tier_application` (CLIFF/MARGINAL/NOT_APPLICABLE) selects how `shortage.price_tiered`
     combines bands; `tier_basis` names what the band measures (e.g. SHORTFALL_PCT,
-    DAYS_LATE). Both default to the Phase 2 migration's own backfill values, so a rule
-    built before either column existed prices exactly as it did before.
+    DAYS_LATE). Both default to the migration's own backfill values for these columns, so a
+    rule built before either column existed prices exactly as it did before.
     """
 
     band_min: float
@@ -134,7 +134,7 @@ class PenaltyRule:
     currency_code: str = "USD"
     grace_period_days: int = 0
     # Which pricing engine this rule belongs to (see ENGINE_FAMILY_* above); None for a
-    # rule published before Phase 1 or seeded directly.
+    # rule published before this field existed or seeded directly.
     engine_family: str | None = None
     # Required for applies_per in {WEEK, MONTH, QUARTER, YEAR}; see delay.py's
     # _accrual_periods. None for a DAY/OCCURRENCE/counting-granularity rule, which needs no

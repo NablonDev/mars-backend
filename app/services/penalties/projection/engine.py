@@ -23,7 +23,7 @@ from app.services.penalties.projection.types import (
 # Recorded on a `SkippedRuleProjection`/`penalty_projection.skip_reason` for a rule whose
 # violation_type this engine has no pricing model for. Not the same failure as
 # extraction-time UNMAPPED_VIOLATION_TYPE: this rule published successfully and carries a
-# real violation_type, projection/mitigation just do not select its family yet (Phase 3).
+# real violation_type, projection/mitigation just do not select its family yet.
 NOT_ENGINE_PRICEABLE = "NOT_ENGINE_PRICEABLE"
 
 
