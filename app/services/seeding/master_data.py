@@ -7,9 +7,12 @@ seeded: no worked-example scenario reads them.
 
 from __future__ import annotations
 
+import hashlib
 from typing import TypedDict
+from uuid import UUID
 
 from app.repositories.common.master_data import MasterDataRepository
+from app.repositories.common.retailer_agreement import RetailerAgreementRepository
 
 
 class _RetailerSeed(TypedDict):
@@ -80,8 +83,35 @@ _CARRIERS: list[_CarrierSeed] = [
 ]
 
 
-def seed(master_data: MasterDataRepository) -> dict[str, int]:
-    """Seed master data, skipping any row whose natural key already exists."""
+def ensure_placeholder_retailer_agreement(
+    retailer_agreements: RetailerAgreementRepository, retailer: dict
+) -> UUID:
+    """Idempotent per-retailer placeholder `retailer_agreement`, reused across seed runs.
+
+    Seed/demo rules have no real uploaded contract to carry `penalty_rule.retailer_agreement_id`
+    (NOT NULL); shared by projection, dispute, and this module's own retailer seeding.
+    """
+    existing = retailer_agreements.list_for_retailer(retailer["id"])
+    if existing:
+        return existing[0]["id"]
+    created = retailer_agreements.add_retailer_agreement(
+        retailer_id=retailer["id"],
+        contract_code=f"SEED-{retailer['retailer_code']}",
+        title=f"Seed placeholder agreement ({retailer['retailer_code']})",
+        document_sha256=hashlib.sha256(f"seed-placeholder:{retailer['retailer_code']}".encode()).hexdigest(),
+    )
+    return created["id"]
+
+
+def seed(
+    master_data: MasterDataRepository, retailer_agreements: RetailerAgreementRepository
+) -> dict[str, int]:
+    """Seed master data, skipping any row whose natural key already exists.
+
+    Also ensures a placeholder `retailer_agreement` per retailer:
+    `penalty_rule.retailer_agreement_id` is NOT NULL, and worked-example rules have no
+    genuine uploaded contract to point at.
+    """
     counts = {"retailers": 0, "materials": 0, "skus": 0, "plants": 0, "carriers": 0}
 
     existing_retailers = {r["retailer_code"] for r in master_data.list_retailers()}
@@ -98,6 +128,9 @@ def seed(master_data: MasterDataRepository) -> dict[str, int]:
                 r["extension_penalty_threshold"],
             )
             counts["retailers"] += 1
+        retailer = master_data.get_retailer_by_code(r["retailer_code"])
+        assert retailer is not None
+        ensure_placeholder_retailer_agreement(retailer_agreements, retailer)
 
     existing_skus = {s["sku_code"] for s in master_data.list_skus()}
     for material_code, sku_code, description in _MATERIALS_AND_SKUS:

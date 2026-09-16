@@ -10,7 +10,7 @@ by import path rather than by renaming one side. `MitigationOption` follows
 the same pattern (see `app/repositories/penalties/mitigation.py`).
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from enum import Enum
 from uuid import UUID
@@ -42,13 +42,27 @@ class CalcType(Enum):
     TIERED = "TIERED"
 
 
+# `PenaltyRuleTier.tier_application` values `price_tiered` branches on; see
+# `shortage.py::price_tiered`/`_price_tiered_marginal`.
+TIER_APPLICATION_CLIFF = "CLIFF"
+TIER_APPLICATION_MARGINAL = "MARGINAL"
+
+
 @dataclass
 class PenaltyRuleTier:
-    """Defines a tier rate for the range [band_min, band_max)."""
+    """Defines a tier rate for the range [band_min, band_max). `band_max=None` means unbounded.
+
+    `tier_application` (CLIFF/MARGINAL/NOT_APPLICABLE) selects how `shortage.price_tiered`
+    combines bands; `tier_basis` names what the band measures (e.g. SHORTFALL_PCT,
+    DAYS_LATE). Both default to the Phase 2 migration's own backfill values, so a rule
+    built before either column existed prices exactly as it did before.
+    """
 
     band_min: float
-    band_max: float
+    band_max: float | None
     rate: float
+    tier_application: str = "CLIFF"
+    tier_basis: str = "SHORTFALL_PCT"
 
 
 # Which violation types are priced off the shortage model vs. the delay
@@ -58,15 +72,44 @@ DELAY_VIOLATION_TYPES = {"OTIF_LATE", "ASN_LATE"}
 # ASN_LATE uses the delay model as an approximation because the engine
 # does not yet have a dedicated ASN-submission-timing input.
 
-# What a PERCENT_OF_PO rate multiplies against. `None` (and any basis_type the
-# engine doesn't recognize yet, e.g. the extraction vocabulary's PO_VALUE,
-# UNIT_COST, SHORTFALL_UNITS) falls back to the legacy full-order-value basis.
-BASIS_COST_OF_GOODS = "COST_OF_GOODS"
+# `engine_family` values the engine itself branches on: SHORTAGE/DELAY select
+# ProjectionEngine.project's per-PO path (still keyed off violation_type, not this
+# field); VOLUME_COMMITMENT selects the separate per-agreement path in commitment.py.
+# Mirrors `app.services.penalties.rule_extraction.vocabulary.ENGINE_FAMILIES`.
+ENGINE_FAMILY_SHORTAGE = "SHORTAGE"
+ENGINE_FAMILY_DELAY = "DELAY"
+ENGINE_FAMILY_VOLUME_COMMITMENT = "VOLUME_COMMITMENT"
+
+# What a PERCENT_OF_PO rate multiplies against. Only BASIS_SHORTFALL_VALUE and
+# BASIS_SHORTFALL_UNITS change the math (see shortage.py's _price_shortfall_value_basis/
+# _price_shortfall_units_basis). This constant, `None`, and any other basis_type all price
+# off the same thing: the PO's own order_qty * unit_price. The value stays "COST_OF_GOODS"
+# because that string is already persisted on published `penalty_rule` rows; the name is
+# the PO's own ordered value, not a real cost figure. BASIS_PO_VALUE is the same
+# order_qty * unit_price basis under its other governed spelling: both are branched
+# explicitly in shortage.py rather than left to fall through to the same `else`.
+BASIS_ORDER_VALUE = "COST_OF_GOODS"
+BASIS_PO_VALUE = "PO_VALUE"
 BASIS_SHORTFALL_VALUE = "SHORTFALL_VALUE"
+BASIS_SHORTFALL_UNITS = "SHORTFALL_UNITS"
 
 # `applies_per` value the engine understands as day-count accrual. Any other
-# value, including None, prices as a single flat application.
+# value, including None, prices as a single flat application unless it's one of the
+# fractional-period values below.
 APPLIES_PER_DAY = "DAY"
+# Fractional-period accrual: `price_delay_penalty` converts days_late into a period
+# count via `rule.rounding_convention` (see delay.py's `_accrual_periods`).
+APPLIES_PER_WEEK = "WEEK"
+APPLIES_PER_MONTH = "MONTH"
+APPLIES_PER_QUARTER = "QUARTER"
+APPLIES_PER_YEAR = "YEAR"
+# Counts once per late-delivery instance; for a single-PO projection that is this
+# very call, so it prices as a flat single application, same as the default case.
+APPLIES_PER_OCCURRENCE = "OCCURRENCE"
+# Non-duration `applies_per` values that define the counting granularity of
+# order_qty/rate (charge per case rather than per each unit) rather than a second
+# multiplier layered on top of PER_UNIT's rate; see delay.py::price_delay_penalty.
+APPLIES_PER_COUNTING_GRANULARITY = {"UNIT", "CASE", "PALLET", "SHIPMENT", "DELIVERY"}
 
 
 @dataclass
@@ -88,6 +131,28 @@ class PenaltyRule:
     tiers: list[PenaltyRuleTier] | None = None  # required when calc_type == TIERED
     basis_type: str | None = None  # what a PERCENT_OF_PO rate multiplies; see BASIS_* above
     applies_per: str | None = None  # APPLIES_PER_DAY accrues per day late; anything else is flat
+    currency_code: str = "USD"
+    grace_period_days: int = 0
+    # Which pricing engine this rule belongs to (see ENGINE_FAMILY_* above); None for a
+    # rule published before Phase 1 or seeded directly.
+    engine_family: str | None = None
+    # Required for applies_per in {WEEK, MONTH, QUARTER, YEAR}; see delay.py's
+    # _accrual_periods. None for a DAY/OCCURRENCE/counting-granularity rule, which needs no
+    # fractional-period rounding.
+    rounding_convention: str | None = None
+    # ROLLING/FIXED_CALENDAR/CONTRACT_YEAR/ANNIVERSARY; only read by commitment.py's
+    # window resolution, for an engine_family=VOLUME_COMMITMENT rule.
+    measurement_window_type: str | None = None
+    measurement_window_length: int | None = None
+    measurement_window_unit: str | None = None
+    # The contract-period purchase target this rule measures a shortfall against.
+    # Meaningful only for engine_family=VOLUME_COMMITMENT; exactly one of the two is set,
+    # matching whichever of quantity or value the rule's metric_code measures. Not an
+    # extraction-populated field yet (no StagedFact attribute_role maps to it): a
+    # commitment rule must have this set by hand or a follow-up publisher change before
+    # `commitment.price_volume_shortfall` can price it.
+    commitment_quantity: float | None = None
+    commitment_value: float | None = None
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.threshold_pct <= 1.0:
@@ -123,6 +188,39 @@ class OrderSnapshot:
 
 
 @dataclass
+class CommitmentSnapshot:
+    """Contract-period purchase-volume state for one retailer agreement, as of a date.
+
+    Parallel to `OrderSnapshot`, not an extension of it: this measures a whole
+    measurement window's purchases against a commitment, not one purchase order.
+    Exactly one of the quantity/value pair is populated on both `committed_*` and
+    `actual_to_date_*`, matching whichever the rule's metric measures.
+    """
+
+    retailer_agreement_id: str
+    window_start_date: date
+    window_end_date: date
+    as_of_date: date
+    committed_quantity: float | None = None
+    committed_value: float | None = None
+    actual_to_date_quantity: float | None = None
+    actual_to_date_value: float | None = None
+
+
+@dataclass
+class CommitmentProjection:
+    """One projected volume-commitment shortfall for one rule, priced and probability-weighted."""
+
+    rule_id: str
+    retailer_agreement_id: str
+    shortfall_probability: float
+    projected_shortfall_quantity: float | None
+    projected_shortfall_value: float | None
+    penalty_amount: float
+    expected_penalty_amount: float
+
+
+@dataclass
 class ViolationProjection:
     """One projected violation and its priced/probability-weighted penalty."""
 
@@ -138,6 +236,20 @@ class ViolationProjection:
 
 
 @dataclass
+class SkippedRuleProjection:
+    """One rule this run's engine cannot price, recorded rather than raised or dropped.
+
+    Persisted as a zero-amount `penalty_projection` row carrying `skip_reason`, so a
+    retailer's exposure never silently loses a mis-tagged or not-yet-priceable rule
+    without a trace.
+    """
+
+    violation_type: str
+    rule_id: str
+    skip_reason: str
+
+
+@dataclass
 class ProjectionResult:
     """Full projection output for one order: per-violation detail plus the stacked total."""
 
@@ -149,3 +261,4 @@ class ProjectionResult:
     violations: list[ViolationProjection]
     total_expected_penalty_amount: float
     stacking_mode: str
+    skipped: list[SkippedRuleProjection] = field(default_factory=list)

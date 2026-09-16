@@ -1,16 +1,32 @@
 """Delay probability and pricing calculations."""
 
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP, Decimal
 
+from app.services.penalties.projection.shortage import price_tiered
 from app.services.penalties.projection.types import (
     APPLIES_PER_DAY,
+    APPLIES_PER_MONTH,
+    APPLIES_PER_QUARTER,
+    APPLIES_PER_WEEK,
+    APPLIES_PER_YEAR,
     AppointmentStatus,
     CalcType,
     OrderSnapshot,
     PenaltyRule,
     ProductionStatus,
 )
+
+# Calendar-day length assumed for one fractional-period accrual unit. 30/360-style
+# convention (a 30-day month, a 3-month/90-day quarter, a 365-day year): documented
+# here rather than derived from a real calendar, since `days_late` has no calendar
+# dates of its own to anchor a real month/quarter length against.
+_PERIOD_DAYS = {
+    APPLIES_PER_WEEK: 7,
+    APPLIES_PER_MONTH: 30,
+    APPLIES_PER_QUARTER: 90,
+    APPLIES_PER_YEAR: 365,
+}
 
 # (bucket key computed from buffer_days) x (stage 1-4) -> base probability
 DELAY_PROBABILITY_TABLE = {
@@ -94,18 +110,31 @@ def compute_days_late(s: OrderSnapshot) -> int:
 
 
 def price_delay_penalty(rule: PenaltyRule, order_qty: int, unit_price: float, days_late: int = 0) -> float:
-    """Price a delay violation, accruing per day when `rule.applies_per == APPLIES_PER_DAY`.
+    """Price a delay violation, accruing per day/week/month/quarter/year, or flat otherwise.
 
-    The single-application amount is computed first and only then multiplied
-    by `days_late`, so `cap_amount` clamps the accrued total, never a single
-    day's amount: a 4%/day rate against a 20%-of-basis cap binds once the
-    running total crosses the cap, not on day one. `basis_type` doesn't
-    branch the PERCENT_OF_PO amount here: this engine has one `unit_price`
-    field, not separate cost and sale prices, so `COST_OF_GOODS` and the
-    unset legacy basis both price off `order_qty * unit_price`. Uses
-    `Decimal` for the rate/basis/day-count arithmetic so a repeating-binary
-    rate like 0.04 can't drift the accrued total by a cent.
+    TIERED bands `days_late` directly through `shortage.price_tiered` (the tier bands
+    already measure the full days-late count, so no further day-count multiplication
+    applies on top). Every other calc_type computes its single-application amount
+    first and only then applies accrual, so `cap_amount` clamps the accrued total,
+    never a single period's amount: a 4%/day rate against a 20%-of-basis cap binds
+    once the running total crosses the cap, not on day one. `basis_type` doesn't
+    branch the PERCENT_OF_PO amount here: this engine has one `unit_price` field, not
+    separate cost and sale prices, so `BASIS_ORDER_VALUE`/`BASIS_PO_VALUE` and the
+    unset legacy basis all price off `order_qty * unit_price`. `applies_per` in
+    `APPLIES_PER_COUNTING_GRANULARITY` (UNIT/CASE/PALLET/SHIPMENT/DELIVERY) or
+    `APPLIES_PER_OCCURRENCE` price as a single flat application, same as the default:
+    those values define what a unit means (order_qty's own counting granularity, or a
+    single late-delivery instance), not a second multiplier layered on top of the
+    per-unit/per-PO amount already computed above. Uses `Decimal` for the
+    rate/basis/day-count arithmetic so a repeating-binary rate like 0.04 can't drift
+    the accrued total by a cent.
     """
+    if rule.calc_type == CalcType.TIERED:
+        penalty = Decimal(str(price_tiered(rule, float(days_late), order_qty * unit_price)))
+        if rule.cap_amount is not None:
+            penalty = min(penalty, Decimal(str(rule.cap_amount)))
+        return float(penalty)
+
     if rule.calc_type == CalcType.PERCENT_OF_PO:
         penalty = Decimal(str(rule.rate)) * Decimal(order_qty) * Decimal(str(unit_price))
     elif rule.calc_type == CalcType.FLAT_FEE:
@@ -113,14 +142,14 @@ def price_delay_penalty(rule: PenaltyRule, order_qty: int, unit_price: float, da
     elif rule.calc_type == CalcType.PER_UNIT:
         penalty = Decimal(str(rule.rate)) * Decimal(order_qty)
     else:
-        # Includes CalcType.TIERED: tiered pricing is implemented for
-        # shortage rules (banded by gap_pct) but not yet for delay rules
-        # (which would need to be banded by days-late instead). This is a
-        # known, documented gap, not a silent failure mode.
         raise NotImplementedError(f"calc_type={rule.calc_type} not supported for delay rule {rule.rule_id}")
 
     if rule.applies_per == APPLIES_PER_DAY:
         penalty *= Decimal(days_late)
+    elif rule.applies_per in _PERIOD_DAYS:
+        penalty *= _accrual_periods(rule, days_late)
+    # else: APPLIES_PER_OCCURRENCE and APPLIES_PER_COUNTING_GRANULARITY values price as
+    # a single flat application; see the docstring above.
 
     if rule.cap_amount is not None:
         penalty = min(penalty, Decimal(str(rule.cap_amount)))
@@ -156,3 +185,31 @@ def _carrier_multiplier(reliability_score: float) -> float:
     if reliability_score >= 60:
         return 1.5
     return 2.0
+
+
+def _accrual_periods(rule: PenaltyRule, days_late: int) -> Decimal:
+    """Convert `days_late` into a period count for a WEEK/MONTH/QUARTER/YEAR `applies_per` rule.
+
+    `rounding_convention` decides how a partial period counts: ROUND_UP_TO_PERIOD charges a
+    full period for any partial one (ceiling), ROUND_DOWN_TO_PERIOD charges only completed
+    periods (floor), NEAREST_PERIOD rounds to the closest whole period, and PRORATE_EXACT
+    charges the exact fractional period with no rounding at all. Hand-computable example:
+    10 days late at applies_per=WEEK (a 7-day period) is 10/7 ~= 1.4286 periods ->
+    ROUND_UP_TO_PERIOD prices 2, ROUND_DOWN_TO_PERIOD and NEAREST_PERIOD both price 1, and
+    PRORATE_EXACT prices the exact 1.4286. Raises NotImplementedError for a rule with no
+    rounding_convention or an unrecognized one, rather than silently guessing.
+    """
+    assert rule.applies_per in _PERIOD_DAYS  # caller only reaches here for a fractional-period rule
+    periods = Decimal(days_late) / Decimal(_PERIOD_DAYS[rule.applies_per])
+    if rule.rounding_convention == "ROUND_UP_TO_PERIOD":
+        return periods.to_integral_value(rounding=ROUND_CEILING)
+    if rule.rounding_convention == "ROUND_DOWN_TO_PERIOD":
+        return periods.to_integral_value(rounding=ROUND_FLOOR)
+    if rule.rounding_convention == "NEAREST_PERIOD":
+        return periods.to_integral_value(rounding=ROUND_HALF_UP)
+    if rule.rounding_convention == "PRORATE_EXACT":
+        return periods
+    raise NotImplementedError(
+        f"rounding_convention={rule.rounding_convention!r} not supported for "
+        f"applies_per={rule.applies_per!r} on rule {rule.rule_id}"
+    )

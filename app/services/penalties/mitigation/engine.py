@@ -5,6 +5,8 @@ from dataclasses import replace
 from app.services.penalties.mitigation.types import MitigationInputs, MitigationOption, ShortageCause
 from app.services.penalties.projection import (
     DELAY_VIOLATION_TYPES,
+    ENGINE_FAMILY_DELAY,
+    ENGINE_FAMILY_SHORTAGE,
     SHORTAGE_VIOLATION_TYPES,
     OrderSnapshot,
     PenaltyRule,
@@ -46,7 +48,7 @@ class MitigationEngine:
         if speed_up is not None:
             options.append(speed_up)
 
-        split_shipment = self._split_shipment_option(snapshot, projection, inputs)
+        split_shipment = self._split_shipment_option(snapshot, rules, projection, inputs)
         if split_shipment is not None:
             options.append(split_shipment)
 
@@ -139,7 +141,11 @@ class MitigationEngine:
         )
 
     def _split_shipment_option(
-        self, snapshot: OrderSnapshot, projection: ProjectionResult, inputs: MitigationInputs
+        self,
+        snapshot: OrderSnapshot,
+        rules: list[PenaltyRule],
+        projection: ProjectionResult,
+        inputs: MitigationInputs,
     ) -> MitigationOption | None:
         """Evaluate splitting the shipment to avoid delay penalties.
 
@@ -155,7 +161,10 @@ class MitigationEngine:
         # violations don't apply to it. The engine already prices the shortage
         # penalty off the true confirmed_qty vs order_qty gap today, so that
         # half of `projection` needs no hypothetical re-run.
-        shortage_only = [v for v in projection.violations if v.violation_type in SHORTAGE_VIOLATION_TYPES]
+        family_by_rule_id = {r.rule_id: _effective_engine_family(r) for r in rules}
+        shortage_only = [
+            v for v in projection.violations if family_by_rule_id.get(v.rule_id) == ENGINE_FAMILY_SHORTAGE
+        ]
         if projection.stacking_mode == "MAX":
             projected_penalty_after = max((v.expected_penalty_amount for v in shortage_only), default=0.0)
         else:
@@ -194,7 +203,7 @@ class MitigationEngine:
         cost and transit data are confirmed, and confidence alone gates the risk
         level.
         """
-        if not any(rule.violation_type in DELAY_VIOLATION_TYPES for rule in rules):
+        if not any(_effective_engine_family(rule) == ENGINE_FAMILY_DELAY for rule in rules):
             return None  # no delay-type rule applies to this retailer
         if inputs.express_carrier_cost is None or inputs.express_carrier_transit_days is None:
             return None  # "not present" tier
@@ -224,3 +233,21 @@ class MitigationEngine:
             confidence=confidence,
             rationale=rationale,
         )
+
+
+def _effective_engine_family(rule: PenaltyRule) -> str | None:
+    """`rule.engine_family` when set, else inferred from `violation_type` for a rule with none.
+
+    `PenaltyRule.engine_family` is `None` for a rule seeded directly or published before
+    Phase 1 (see its docstring in `projection/types.py`), so filtering on the stored field
+    alone silently drops those rules from every family-based option. Falling back to the
+    same `violation_type` sets the engine itself dispatches on keeps that legacy/seeded data
+    working exactly as it did before the engine_family filter existed.
+    """
+    if rule.engine_family is not None:
+        return rule.engine_family
+    if rule.violation_type in SHORTAGE_VIOLATION_TYPES:
+        return ENGINE_FAMILY_SHORTAGE
+    if rule.violation_type in DELAY_VIOLATION_TYPES:
+        return ENGINE_FAMILY_DELAY
+    return None

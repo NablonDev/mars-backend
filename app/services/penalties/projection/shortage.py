@@ -3,10 +3,13 @@
 from decimal import Decimal
 
 from app.services.penalties.projection.types import (
+    BASIS_SHORTFALL_UNITS,
     BASIS_SHORTFALL_VALUE,
+    TIER_APPLICATION_MARGINAL,
     CalcType,
     OrderSnapshot,
     PenaltyRule,
+    PenaltyRuleTier,
     ProductionStatus,
 )
 
@@ -65,12 +68,15 @@ def price_shortage_penalty(
     `threshold_pct` is a grace band: only the shortfall beyond
     `threshold_pct * order_qty` is penalized, and a shortfall fully inside the
     band prices to 0.0 regardless of calc_type. `basis_type=BASIS_SHORTFALL_VALUE`
-    is the one exception: it's priced by `_price_shortfall_value_basis`
-    instead, with `threshold_pct` read as a fill-rate floor rather than a
-    grace band.
+    and `basis_type=BASIS_SHORTFALL_UNITS` are the two exceptions: they're priced
+    by `_price_shortfall_value_basis`/`_price_shortfall_units_basis` instead, each
+    reading `threshold_pct` its own way (a fill-rate floor for the former, the
+    same grace band as the general path for the latter).
     """
     if rule.basis_type == BASIS_SHORTFALL_VALUE:
         return _price_shortfall_value_basis(rule, order_qty, unit_price, shortfall_units)
+    if rule.basis_type == BASIS_SHORTFALL_UNITS:
+        return _price_shortfall_units_basis(rule, order_qty, shortfall_units)
 
     threshold_units = rule.threshold_pct * order_qty
     penalized_units = max(0.0, shortfall_units - threshold_units)
@@ -80,16 +86,19 @@ def price_shortage_penalty(
     if rule.calc_type == CalcType.PER_UNIT:
         penalty = penalized_units * rule.rate
     elif rule.calc_type == CalcType.PERCENT_OF_PO:
-        # Flat once breached; does not scale with shortfall size. basis_type
-        # BASIS_COST_OF_GOODS prices the same way: this engine has one
-        # unit_price field, not separate cost and sale prices.
+        # Flat once breached; does not scale with shortfall size. Every basis_type
+        # other than BASIS_SHORTFALL_VALUE/BASIS_SHORTFALL_UNITS prices the same
+        # way: this engine has one unit_price field, not separate cost and sale
+        # prices, so BASIS_PO_VALUE (ordered quantity times unit price),
+        # BASIS_ORDER_VALUE, and the unset legacy basis all price off
+        # order_qty * unit_price.
         penalty = rule.rate * order_qty * unit_price
     elif rule.calc_type == CalcType.FLAT_FEE:
         penalty = rule.rate
     elif rule.calc_type == CalcType.TIERED:
         # Tiered shortage penalties are based on shortfall percentage of PO value.
         gap_pct = shortfall_units / order_qty if order_qty else 0.0
-        penalty = _price_tiered(rule, gap_pct, order_qty * unit_price)
+        penalty = price_tiered(rule, gap_pct, order_qty * unit_price)
     else:
         raise NotImplementedError(f"Unsupported calc_type for rule {rule.rule_id}")
 
@@ -177,16 +186,66 @@ def _price_shortfall_value_basis(
     return float(penalty)
 
 
-def _price_tiered(rule: PenaltyRule, measure: float, po_value: float) -> float:
-    """Price a TIERED rule from the single band containing `measure`.
+def _price_shortfall_units_basis(rule: PenaltyRule, order_qty: int, shortfall_units: float) -> float:
+    """Price a `basis_type=BASIS_SHORTFALL_UNITS` rule as shortfall units times a flat per-unit rate.
 
-    Bands are half-open (`band_min <= measure < band_max`), so no boundary is
-    ambiguous. Returns 0.0 both for a rule with no tiers and for a `measure`
-    above every band: a gap left at the top means no penalty, not an error.
+    Unlike `_price_shortfall_value_basis`, this never multiplies by unit_price: `rate` is
+    already a flat dollar-per-unit figure. `threshold_pct` is a grace band here, matching
+    the general calc_type path, not the fill-rate-floor semantics `BASIS_SHORTFALL_VALUE`
+    uses: only the shortfall beyond `threshold_pct * order_qty` is charged.
+    """
+    threshold_units = rule.threshold_pct * order_qty
+    penalized_units = max(0.0, shortfall_units - threshold_units)
+    if penalized_units <= 0:
+        return 0.0
+
+    penalty = penalized_units * rule.rate
+    if rule.cap_amount is not None:
+        penalty = min(penalty, rule.cap_amount)
+    return penalty
+
+
+def price_tiered(rule: PenaltyRule, measure: float, basis_amount: float) -> float:
+    """Price a TIERED rule, dispatching on the rule's own `tier_application`.
+
+    CLIFF (the default) prices from the single band containing `measure`: bands are
+    half-open (`band_min <= measure < band_max`), so no boundary is ambiguous, and a
+    `measure` above every band prices to 0.0 (a gap left at the top means no penalty, not
+    an error), same as a rule with no tiers at all. MARGINAL instead sums every band's
+    rate applied to the slice of `measure` that falls inside it (see
+    `_price_tiered_marginal`); shared across `shortage.py` (`measure`=shortfall gap_pct)
+    and `delay.py` (`measure`=days_late), so both calc types band the same way. All tiers
+    on one rule share one `tier_application` (enforced at publish), so the first tier's
+    value decides the whole rule.
     """
     if not rule.tiers:
         return 0.0
+    if rule.tiers[0].tier_application == TIER_APPLICATION_MARGINAL:
+        return _price_tiered_marginal(rule.tiers, measure, basis_amount)
     for tier in rule.tiers:
-        if tier.band_min <= measure < tier.band_max:
-            return tier.rate * po_value
+        if tier.band_min <= measure and (tier.band_max is None or measure < tier.band_max):
+            return tier.rate * basis_amount
     return 0.0
+
+
+def _price_tiered_marginal(tiers: list[PenaltyRuleTier], measure: float, basis_amount: float) -> float:
+    """Sum each band's rate applied to the portion of `measure` that falls inside it.
+
+    For each band, the taxed slice is `min(measure, band_max_or_measure) - band_min`
+    (0.0 when `measure` hasn't reached the band at all); its dollar contribution is that
+    slice times the band's rate times `basis_amount`. Bands are validated
+    non-overlapping and contiguous at publish, so summing over them in any order gives
+    the same total: an open top band (`band_max=None`) is charged on the slice up to
+    `measure` itself, this ladder's normal case rather than the CLIFF path's documented
+    top-of-band silence. Hand-computable example: bands [0, 0.05) at 1%, [0.05, 0.10) at
+    2%, [0.10, None) at 3%, `measure=0.12`, `basis_amount=$100,000` ->
+    0.05*0.01 + 0.05*0.02 + 0.02*0.03 = 0.0021 of basis, i.e. $50 + $100 + $60 = $210.
+    """
+    total = 0.0
+    for tier in tiers:
+        if measure <= tier.band_min:
+            continue
+        upper = measure if tier.band_max is None else min(measure, tier.band_max)
+        slice_width = upper - tier.band_min
+        total += slice_width * tier.rate * basis_amount
+    return total
