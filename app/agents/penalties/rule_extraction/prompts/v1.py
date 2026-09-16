@@ -197,9 +197,11 @@ notice-address or governing-law clause, a bare covenant with no stated consequen
 anywhere near it, or a pure allocation of title or risk that imposes no cost and grants
 no remedy.
 
-PO shortage and PO delay flags decide whether this rule's thresholds, rates and caps
-get extracted at all. A wrong flag means the rule is persisted with no numbers. Set
-them from the trigger, not from the remedy.
+PO shortage and PO delay flags are reporting labels: which quantity/timing axis a KPI
+query can find this rule under. They do not decide whether the rule is priced or
+whether its thresholds, rates and caps get extracted; every clause you classify as a
+real rule gets its facts extracted regardless of these flags. Set them from the
+trigger, not from the remedy, so the reporting label stays accurate.
 
 `po_delay_flag` is true when the trigger is any timing non-conformance against a
 purchase order or delivery appointment: late delivery, missed delivery date or window;

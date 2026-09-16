@@ -58,7 +58,7 @@ def test_publisher_prices_a_single_branch_rule_from_branch_no_zero_exactly_as_th
             StagedFact(
                 branch_no=0,
                 attribute_role="RATE",
-                basis_type="UNIT_COST",
+                basis_type="PO_VALUE",
                 value=Decimal(50),
                 value_status="PRESENT",
             )

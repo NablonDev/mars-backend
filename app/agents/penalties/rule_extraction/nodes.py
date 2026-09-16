@@ -95,7 +95,7 @@ _MASTER_EXTRA_FIELDS = (
 # commonly PENDING_REVIEW, still undecided) is ignored rather than applied.
 _DECISION_STATUSES = ("APPROVED", "REJECTED")
 
-_MAX_FACT_EXTRACTION_ATTEMPTS = 3
+_MAX_FACT_EXTRACTION_ATTEMPTS = 4
 
 
 def _extraction_error(

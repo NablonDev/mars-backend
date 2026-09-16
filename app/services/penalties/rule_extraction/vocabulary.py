@@ -238,6 +238,27 @@ BASIS_TYPES: tuple[str, ...] = (
     "OTHER",
 )
 
+# Which pricing engine (if any) can price a category's rules. SHORTAGE/DELAY are selected
+# by projection and mitigation; every other value is dispute-only for now (OVERAGE_CHARGEBACK,
+# OVERAGE_NONPAYMENT, and STORAGE_DURATION_FEE each get their own family rather than folding
+# into SHORTAGE/DELAY, since none of the three is priced against the same measure those
+# engines already compute). UNPRICEABLE admits no engine at all: an escape value with no
+# quantifiable rate, kept published for visibility rather than rejected outright.
+ENGINE_FAMILIES: tuple[str, ...] = (
+    "SHORTAGE",
+    "DELAY",
+    "VOLUME_COMMITMENT",
+    "QUALITY",
+    "COVER_PURCHASE",
+    "FINANCIAL",
+    "NON_MONETARY",
+    "LIABILITY_CAP",
+    "OVERAGE_CHARGEBACK",
+    "OVERAGE_NONPAYMENT",
+    "STORAGE_DURATION_FEE",
+    "UNPRICEABLE",
+)
+
 TIER_APPLICATIONS: tuple[str, ...] = ("CLIFF", "MARGINAL", "NOT_APPLICABLE")
 CAP_SCOPES: tuple[str, ...] = ("RATE_CEILING", "AMOUNT_CEILING", "DURATION_CEILING", "QUANTITY_CEILING")
 
@@ -277,72 +298,140 @@ ROUNDING_CONVENTIONS: tuple[str, ...] = (
     "NEAREST_PERIOD",
 )
 
-# (code, description, default_po_shortage_flag, default_po_delay_flag). The two flags must
-# agree with the category's scope role in `extraction.po_scope.CATEGORY_SCOPE`: scope decides
-# whether a rule's numbers get extracted, the flags decide what a KPI query can find, and a
-# rule quantified as a delivery-failure rule must not be invisible to `where po_delay_flag =
-# true`.
-CATEGORY_LOOKUP_ROWS: list[tuple[str, str, bool, bool]] = [
-    ("SHORT_SHIP", "Per-PO quantity shortfall chargeback", True, False),
-    ("OTIF_LATE", "On-time-in-full delivery failure penalty", True, True),
-    ("QUALITY_DEFECT_CHARGEBACK", "Damage, defect, or unsalable-goods allowance/chargeback", False, False),
-    ("NON_CONFORMANCE_COST_RECOVERY", "Cost passthrough for handling non-conforming product", False, False),
-    ("DELIVERY_WINDOW_VIOLATION", "Delivery outside a permitted timing window (early or late)", False, True),
-    ("RECALL_COST_RECOVERY", "Reimbursement of recall-related costs", False, False),
-    ("PRICE_PARITY_CLAWBACK", "Most-favored-nation / price-parity refund obligation", False, False),
-    ("LATE_PAYMENT_INTEREST", "Interest charged on overdue payments", False, False),
-    ("OVERAGE_NONPAYMENT", "Non-monetary consequence for over-delivered quantity", False, False),
-    ("OVERAGE_CHARGEBACK", "A genuine monetary fee for over-delivered quantity", False, False),
-    ("MINIMUM_VOLUME_SHORTFALL", "Aggregate purchase-volume commitment shortfall", True, False),
+# (code, description, default_po_shortage_flag, default_po_delay_flag, engine_family). The
+# two flags are reporting-only labels (which quantity/timing axis a KPI query can find this
+# rule under); engine_family is the actual pricing-admission gate (see
+# `clause_matching.decide_po_scope` and `publisher.PenaltyRulePublisher._check_admission`).
+CATEGORY_LOOKUP_ROWS: list[tuple[str, str, bool, bool, str]] = [
+    ("SHORT_SHIP", "Per-PO quantity shortfall chargeback", True, False, "SHORTAGE"),
+    ("OTIF_LATE", "On-time-in-full delivery failure penalty", True, True, "DELAY"),
+    (
+        "QUALITY_DEFECT_CHARGEBACK",
+        "Damage, defect, or unsalable-goods allowance/chargeback",
+        False,
+        False,
+        "QUALITY",
+    ),
+    (
+        "NON_CONFORMANCE_COST_RECOVERY",
+        "Cost passthrough for handling non-conforming product",
+        False,
+        False,
+        "QUALITY",
+    ),
+    (
+        "DELIVERY_WINDOW_VIOLATION",
+        "Delivery outside a permitted timing window (early or late)",
+        False,
+        True,
+        "DELAY",
+    ),
+    ("RECALL_COST_RECOVERY", "Reimbursement of recall-related costs", False, False, "QUALITY"),
+    (
+        "PRICE_PARITY_CLAWBACK",
+        "Most-favored-nation / price-parity refund obligation",
+        False,
+        False,
+        "FINANCIAL",
+    ),
+    ("LATE_PAYMENT_INTEREST", "Interest charged on overdue payments", False, False, "FINANCIAL"),
+    (
+        "OVERAGE_NONPAYMENT",
+        "Non-monetary consequence for over-delivered quantity",
+        False,
+        False,
+        "OVERAGE_NONPAYMENT",
+    ),
+    (
+        "OVERAGE_CHARGEBACK",
+        "A genuine monetary fee for over-delivered quantity",
+        False,
+        False,
+        "OVERAGE_CHARGEBACK",
+    ),
+    (
+        "MINIMUM_VOLUME_SHORTFALL",
+        "Aggregate purchase-volume commitment shortfall",
+        True,
+        False,
+        "VOLUME_COMMITMENT",
+    ),
     (
         "DELIVERY_ACCEPTANCE_COST_SHIFT",
         "Cost shift triggered by a delivery-acceptance timing event",
         False,
         True,
+        "DELAY",
     ),
     (
         "UNSPECIFIED_EXTERNAL",
         "Rule referenced but stated in a separate document outside this contract",
         False,
         False,
+        "UNPRICEABLE",
     ),
     (
         "UNSPECIFIED_INTERNAL",
         "Rule referenced but not stated anywhere, including no external pointer",
         False,
         False,
+        "UNPRICEABLE",
     ),
     (
         "ALTERNATE_SOURCING_MARKUP",
         "Non-performing party still earns its markup on substitute goods/services",
         True,
         True,
+        "COVER_PURCHASE",
     ),
     (
         "DEFECT_RECTIFICATION_COST_SHIFT",
         "Bidirectional defect cost allocation keyed on causation",
         False,
         False,
+        "QUALITY",
     ),
-    ("AGGREGATE_LIABILITY_CAP", "Ceiling on total liability, pair with calc_type = LIMIT_ONLY", False, False),
-    ("EARLY_PAYMENT_DISCOUNT", "Discount for paying ahead of the standard due date", False, False),
-    ("AUDIT_FINDING_PENALTY", "Fee/refund triggered by an audit finding of non-compliance", False, False),
+    (
+        "AGGREGATE_LIABILITY_CAP",
+        "Ceiling on total liability, pair with calc_type = LIMIT_ONLY",
+        False,
+        False,
+        "LIABILITY_CAP",
+    ),
+    (
+        "EARLY_PAYMENT_DISCOUNT",
+        "Discount for paying ahead of the standard due date",
+        False,
+        False,
+        "FINANCIAL",
+    ),
+    (
+        "AUDIT_FINDING_PENALTY",
+        "Fee/refund triggered by an audit finding of non-compliance",
+        False,
+        False,
+        "FINANCIAL",
+    ),
     (
         "STORAGE_DURATION_FEE",
         "Fee for storage beyond a free period, typically tiered by day-count",
         False,
         True,
+        "STORAGE_DURATION_FEE",
     ),
-    ("UNMAPPED", "Escape value, pair with penalty_category_unmapped_desc", False, False),
+    ("UNMAPPED", "Escape value, pair with penalty_category_unmapped_desc", False, False, "UNPRICEABLE"),
 ]
 
 
 class CategoryDefaults:
-    """Governed `po_shortage_flag` / `po_delay_flag` defaults, keyed by `penalty_category`."""
+    """Governed `po_shortage_flag` / `po_delay_flag` / `engine_family` defaults, keyed by `penalty_category`."""
 
     _BY_CATEGORY: ClassVar[dict[str, dict[str, bool]]] = {
         code: {"po_shortage_flag": shortage, "po_delay_flag": delay}
-        for code, _desc, shortage, delay in CATEGORY_LOOKUP_ROWS
+        for code, _desc, shortage, delay, _family in CATEGORY_LOOKUP_ROWS
+    }
+    _FAMILY_BY_CATEGORY: ClassVar[dict[str, str]] = {
+        code: family for code, _desc, _shortage, _delay, family in CATEGORY_LOOKUP_ROWS
     }
 
     @classmethod
@@ -351,6 +440,11 @@ class CategoryDefaults:
         if category is None:
             return None
         return cls._BY_CATEGORY.get(category)
+
+    @classmethod
+    def engine_family_for(cls, category: str | None) -> str:
+        """The governed `engine_family` for one category; `UNPRICEABLE` for an ungoverned one."""
+        return cls._FAMILY_BY_CATEGORY.get(category or "", "UNPRICEABLE")
 
 
 def tier_bands_are_contiguous(upper_bound: Decimal | float, next_lower_bound: Decimal | float) -> bool:

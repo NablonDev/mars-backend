@@ -331,8 +331,11 @@ class ProjectionSummaryService(
         """One entry per distinct projection_date.
 
         Combines that day's engine outputs from `bounded_history` with that
-        day's inputs from `ProjectionService.build_snapshot`.
+        day's inputs from `ProjectionService.build_snapshot`. Skip-recorded rows
+        (`skip_reason` set) are excluded: they are not real violations and must
+        never be narrated as one to the summary LLM.
         """
+        bounded_history = [row for row in bounded_history if not row.get("skip_reason")]
         entries: list[DailyHistoryEntry] = []
 
         for day in sorted({row["projection_date"] for row in bounded_history}):

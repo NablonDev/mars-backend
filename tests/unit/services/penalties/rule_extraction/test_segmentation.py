@@ -4,11 +4,11 @@ Zero DB dependency: pure text splitting.
 """
 
 from app.services.penalties.rule_extraction import segmentation
-from app.services.penalties.rule_extraction.clause_matching import CATEGORY_SCOPE
 from app.services.penalties.rule_extraction.segmentation import (
     split_bundled_clause,
     split_into_screening_units,
 )
+from app.services.penalties.rule_extraction.vocabulary import PENALTY_CATEGORIES
 
 # Modeled on ground-truth clause GT-04 (`data/rule_extraction_ground_truth/contract_3.yaml`,
 # `contract_intelligence/Synthetic_Contracts/contract_3_full_text_gemini.md` section 3.4): one
@@ -149,7 +149,7 @@ def test_category_trigger_keywords_are_all_real_governed_category_codes():
     # `_CATEGORY_TRIGGER_KEYWORDS`'s category value is discarded and only used for
     # grouping/deduplication, so a typo'd category code would otherwise be silently
     # decorative instead of failing loudly.
-    assert set(segmentation._CATEGORY_TRIGGER_KEYWORDS) <= set(CATEGORY_SCOPE)
+    assert set(segmentation._CATEGORY_TRIGGER_KEYWORDS) <= set(PENALTY_CATEGORIES)
 
 
 def test_an_incidental_keyword_on_one_block_does_not_mask_a_different_later_block():

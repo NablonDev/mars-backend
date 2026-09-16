@@ -70,6 +70,7 @@ class PenaltyProjectionHistoryRow(BaseModel):
     expected_penalty_amount: float
     days_to_delivery: int
     projection_status: str
+    skip_reason: str | None = None
 
 
 class PenaltyExposureResponse(BaseModel):

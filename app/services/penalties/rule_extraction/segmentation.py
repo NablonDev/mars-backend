@@ -20,10 +20,9 @@ _MAX_UNIT_CHARS = 6_000
 _OVERLAP_BLOCKS = 1
 
 # Trigger phrases for the penalty categories a bundled clause most plausibly mixes,
-# restricted to the categories `clause_matching.CATEGORY_SCOPE` actually prices
-# (TRIGGER_SHORTAGE/TRIGGER_BOTH/TRIGGER_DELAY/TRIGGER_QUANTITY roles). Categories with no
-# safely distinguishing phrase (an escape value, a generic liability-cap clause) are
-# deliberately left out rather than guessed at.
+# covering every governed category (`vocabulary.PENALTY_CATEGORIES`) that has a safely
+# distinguishing phrase. Escape values (UNSPECIFIED_EXTERNAL/INTERNAL, UNMAPPED) and a
+# generic liability-cap clause are deliberately left out rather than guessed at.
 _CATEGORY_TRIGGER_KEYWORDS: dict[str, tuple[str, ...]] = {
     "SHORT_SHIP": ("short-shipment", "short shipment", "short-ship"),
     "MINIMUM_VOLUME_SHORTFALL": (
@@ -37,6 +36,15 @@ _CATEGORY_TRIGGER_KEYWORDS: dict[str, tuple[str, ...]] = {
     "ALTERNATE_SOURCING_MARKUP": ("cover purchase", "alternate sourcing"),
     "STORAGE_DURATION_FEE": ("storage fee", "warehousing fee", "demurrage"),
     "OVERAGE_CHARGEBACK": ("over-delivery", "over-shipment", "overage charge"),
+    "OVERAGE_NONPAYMENT": ("overage will not be paid", "no payment for excess"),
+    "QUALITY_DEFECT_CHARGEBACK": ("quality defect", "damaged goods", "unsalable"),
+    "NON_CONFORMANCE_COST_RECOVERY": ("non-conformance", "non-conforming product"),
+    "RECALL_COST_RECOVERY": ("product recall", "recall cost"),
+    "DEFECT_RECTIFICATION_COST_SHIFT": ("defect rectification", "rework cost"),
+    "PRICE_PARITY_CLAWBACK": ("price parity", "most favored nation"),
+    "LATE_PAYMENT_INTEREST": ("late payment interest", "interest on overdue"),
+    "EARLY_PAYMENT_DISCOUNT": ("early payment discount", "prompt payment discount"),
+    "AUDIT_FINDING_PENALTY": ("audit finding", "compliance audit"),
 }
 
 # The floor on how much of a clause its deduplicated split windows must collectively
