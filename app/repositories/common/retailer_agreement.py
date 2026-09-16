@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.models import RetailerAgreement
@@ -83,3 +83,8 @@ class RetailerAgreementRepository:
             select(RetailerAgreement).where(RetailerAgreement.retailer_id == retailer_id)
         ).all()
         return [_retailer_agreement_to_dict(r) for r in rows]
+
+    def truncate_all(self) -> None:
+        """Delete every retailer agreement; callers must first clear anything that FK-references it."""
+        self._session.execute(delete(RetailerAgreement))
+        self._session.flush()

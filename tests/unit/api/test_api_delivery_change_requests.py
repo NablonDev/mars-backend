@@ -3,9 +3,23 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
+
+from tests.conftest import make_retailer_agreement
+
+
+def _create_retailer_agreement(repos, retailer_id: str) -> str:
+    """Create a `retailer_agreement` via the repository layer.
+
+    Not the real `POST /penalties/retailer-agreements` endpoint: that route's dependency
+    unconditionally builds `Container`'s real Postgres-backed LangGraph checkpointer (see
+    `get_penalty_rule_extraction_service`), which this test environment can't reach.
+    `penalty_rule.retailer_agreement_id` is NOT NULL.
+    """
+    return str(make_retailer_agreement(repos, UUID(retailer_id)))
+
 
 # Dates relative to "today" rather than a hardcoded calendar date -- the lead-time
 # check (extension_min_lead_days) compares required_ship_date against the actual
@@ -23,7 +37,7 @@ _COUNTERED_DATE = (_TODAY + timedelta(days=26)).isoformat()
 
 
 @pytest.fixture
-def purchase_order(client) -> dict:
+def purchase_order(client, repos) -> dict:
     retailer = client.post(
         "/api/v1/retailers",
         json={
@@ -37,11 +51,14 @@ def purchase_order(client) -> dict:
     # up-to-date penalty exposure after a delivery-date negotiation resolves) --
     # without an active rule for the retailer, that re-projection legitimately
     # raises NO_ACTIVE_RULES.
+    retailer_agreement = _create_retailer_agreement(repos, retailer["id"])
     client.post(
         "/api/v1/penalties/rules",
         json={
             "rule_code": "RULE-DCR",
             "retailer_id": retailer["id"],
+            "retailer_agreement_id": retailer_agreement,
+            "penalty_category": "OTIF_LATE",
             "violation_type": "OTIF_LATE",
             "calc_type": "PER_UNIT",
             "rate": 1.0,

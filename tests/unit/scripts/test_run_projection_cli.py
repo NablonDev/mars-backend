@@ -23,6 +23,7 @@ import scripts.ops.run_projection_cli as cli
 from app.db.session import Database
 from app.repositories.common.master_data import MasterDataRepository
 from app.repositories.common.purchase_order import PurchaseOrderRepository
+from app.repositories.common.retailer_agreement import RetailerAgreementRepository
 from app.repositories.penalties.rule import PenaltyRuleRepository
 
 
@@ -41,8 +42,15 @@ def _seed_purchase_order(database: Database) -> str:
         master_data = MasterDataRepository(session)
         rules = PenaltyRuleRepository(session)
         purchase_orders = PurchaseOrderRepository(session)
+        retailer_agreements = RetailerAgreementRepository(session)
 
         retailer = master_data.add_retailer("RET-CLI", "Retailer CLI", None, "SUM")
+        retailer_agreement = retailer_agreements.add_retailer_agreement(
+            retailer_id=retailer["id"],
+            contract_code="TEST-CLI",
+            title="Test retailer agreement",
+            document_sha256="0" * 64,
+        )
         material = master_data.add_material("MAT-CLI", None)
         plant = master_data.add_plant("PLANT-CLI", None, None)
         purchase_order = purchase_orders.create_purchase_order(
@@ -64,6 +72,8 @@ def _seed_purchase_order(database: Database) -> str:
             rule_code="RULE-CLI-FLAT",
             retailer_id=retailer["id"],
             violation_type="OTIF_LATE",
+            penalty_category="OTIF_LATE",
+            retailer_agreement_id=retailer_agreement["id"],
             calc_type="FLAT_FEE",
             rate=50.0,
         )

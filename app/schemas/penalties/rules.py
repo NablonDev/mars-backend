@@ -8,12 +8,31 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
 
+# Mirrors `ck_penalty_rule_violation_type` (app/models/penalties/rule.py); keep both in sync
+# by hand, same as that CHECK constraint's own comment says.
+_VIOLATION_TYPES = (
+    "SHORT_SHIP",
+    "FILL_RATE",
+    "OTIF_LATE",
+    "ASN_LATE",
+    "DELIVERY_WINDOW_VIOLATION",
+    "DELIVERY_ACCEPTANCE_COST_SHIFT",
+    "QUALITY_DEFECT",
+    "COVER_PURCHASE",
+    "VOLUME_SHORTFALL",
+    "OVERAGE_CHARGEBACK",
+    "OVERAGE_NONPAYMENT",
+    "STORAGE_DURATION",
+    "LIABILITY_CAP",
+    "FINANCIAL_ADJUSTMENT",
+)
+
 
 class PenaltyRuleTierSchema(BaseModel):
-    """One rate band of a `calc_type=TIERED` penalty rule."""
+    """One rate band of a `calc_type=TIERED` penalty rule. `band_max=None` means unbounded."""
 
     band_min: float = Field(ge=0.0, le=1.0)
-    band_max: float = Field(ge=0.0, le=1.01)  # 1.01 lets a top band close "30%+" as (0.30, 1.01)
+    band_max: float | None = Field(default=None, ge=0.0, le=1.01)  # 1.01 closes "30%+" as (0.30, 1.01)
     rate: float
 
 
@@ -22,7 +41,9 @@ class PenaltyRuleRequest(BaseModel):
 
     rule_code: str
     retailer_id: UUID
-    violation_type: str
+    retailer_agreement_id: UUID
+    penalty_category: str
+    violation_type: Literal[*_VIOLATION_TYPES]  # type: ignore[valid-type]
     calc_type: Literal["PER_UNIT", "PERCENT_OF_PO", "FLAT_FEE", "TIERED"]
     rate: float = 0.0
     threshold_pct: float = Field(

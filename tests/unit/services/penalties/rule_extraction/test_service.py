@@ -590,7 +590,7 @@ def test_publish_writes_a_penalty_rule_and_a_published_publication_for_an_accept
                 "value": 50.0,
                 "value_unit": "USD",
                 "value_status": "PRESENT",
-                "basis_type": "UNIT_COST",
+                "basis_type": "PO_VALUE",
                 "currency_code": "USD",
                 "source_text": "$50 fee per short-shipped case.",
                 "confidence": 0.9,
@@ -671,7 +671,7 @@ def test_publish_result_carries_the_run_id_it_published_from(
                 "value": 50.0,
                 "value_unit": "USD",
                 "value_status": "PRESENT",
-                "basis_type": "UNIT_COST",
+                "basis_type": "PO_VALUE",
                 "currency_code": "USD",
                 "source_text": "$50 fee per short-shipped case.",
                 "confidence": 0.9,
@@ -730,7 +730,7 @@ def test_publish_carries_basis_type_applies_per_and_currency_into_penalty_rule(
     assert rule["basis_type"] == "SHORTFALL_VALUE"
     assert rule["applies_per"] == "DAY"
     assert rule["currency_code"] == "EUR"
-    assert "extracted_rule_id" not in rule
+    assert rule["extracted_rule_id"] == staged.id
 
 
 def test_publish_rejects_a_republish_of_an_already_published_rule_instead_of_raising(
@@ -761,7 +761,7 @@ def test_publish_rejects_a_republish_of_an_already_published_rule_instead_of_rai
                 "value": 50.0,
                 "value_unit": "USD",
                 "value_status": "PRESENT",
-                "basis_type": "UNIT_COST",
+                "basis_type": "PO_VALUE",
                 "currency_code": "USD",
                 "source_text": "$50 fee per short-shipped case.",
                 "confidence": 0.9,

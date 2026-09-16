@@ -39,7 +39,9 @@ import os
 TEST_INTERNAL_API_KEY = "test-internal-api-key-do-not-use-in-prod-000000000000000000000000"
 os.environ.setdefault("APP_INTERNAL_API_KEY", TEST_INTERNAL_API_KEY)
 
+import hashlib
 from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 from sqlalchemy.pool import StaticPool
@@ -130,6 +132,21 @@ def repos(db_session):
         cmir_job_item_context=CmirJobItemContextRepository(db_session),
         cmir_job_run_context=CmirJobRunContextRepository(db_session),
     )
+
+
+def make_retailer_agreement(repos, retailer_id: UUID) -> UUID:
+    """Create a throwaway `retailer_agreement` for a test-seeded retailer.
+
+    `penalty_rule.retailer_agreement_id` is NOT NULL; test fixtures have no real uploaded
+    contract, so each gets its own disposable placeholder row.
+    """
+    created = repos.retailer_agreements.add_retailer_agreement(
+        retailer_id=retailer_id,
+        contract_code=f"TEST-{retailer_id}",
+        title="Test retailer agreement",
+        document_sha256=hashlib.sha256(f"test-agreement:{retailer_id}".encode()).hexdigest(),
+    )
+    return created["id"]
 
 
 class _UnconfiguredFakeChatClient:

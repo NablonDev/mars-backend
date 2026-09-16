@@ -14,6 +14,19 @@ from uuid import UUID
 
 import pytest
 
+from tests.conftest import make_retailer_agreement
+
+
+def _create_retailer_agreement(repos, retailer_id: str) -> str:
+    """Create a `retailer_agreement` via the repository layer.
+
+    Not the real `POST /penalties/retailer-agreements` endpoint: that route's dependency
+    unconditionally builds `Container`'s real Postgres-backed LangGraph checkpointer (see
+    `get_penalty_rule_extraction_service`), which this test environment can't reach.
+    `penalty_rule.retailer_agreement_id` is NOT NULL.
+    """
+    return str(make_retailer_agreement(repos, UUID(retailer_id)))
+
 
 @pytest.fixture
 def wmt_purchase_order(seeded_client) -> dict:
@@ -62,18 +75,21 @@ def ready_projection_summary(database):
     return _make
 
 
-def _create_projected_and_mitigated_purchase_order(client, retailer_code: str, po_number: str) -> dict:
+def _create_projected_and_mitigated_purchase_order(client, repos, retailer_code: str, po_number: str) -> dict:
     """Shared setup for the combined-dashboard (`include=mitigations`/
     `mitigation_summary`) tests below: a fresh PO with one persisted
     projection and its ranked mitigation options already computed."""
     retailer = client.post(
         "/api/v1/retailers", json={"retailer_code": retailer_code, "retailer_name": "Combo Co"}
     ).json()["data"]
+    retailer_agreement_id = _create_retailer_agreement(repos, retailer["id"])
     client.post(
         "/api/v1/penalties/rules",
         json={
             "rule_code": f"RULE-{retailer_code}",
             "retailer_id": retailer["id"],
+            "retailer_agreement_id": retailer_agreement_id,
+            "penalty_category": "SHORT_SHIP",
             "violation_type": "SHORT_SHIP",
             "calc_type": "PER_UNIT",
             "rate": 1.0,
@@ -99,8 +115,8 @@ def _create_projected_and_mitigated_purchase_order(client, retailer_code: str, p
 
 
 @pytest.fixture
-def projected_and_mitigated_purchase_order(client) -> dict:
-    return _create_projected_and_mitigated_purchase_order(client, "RET-COMBO", "PO-COMBO-001")
+def projected_and_mitigated_purchase_order(client, repos) -> dict:
+    return _create_projected_and_mitigated_purchase_order(client, repos, "RET-COMBO", "PO-COMBO-001")
 
 
 def test_list_penalty_projections_by_purchase_order_id(seeded_client, wmt_purchase_order):
@@ -161,15 +177,18 @@ def test_penalty_projection_list_with_include_mitigations_embeds_options_per_row
         assert row["mitigations"][0]["purchase_order_id"] == projected_and_mitigated_purchase_order["id"]
 
 
-def test_penalty_projection_list_without_mitigations_computed_is_null_not_error(client):
+def test_penalty_projection_list_without_mitigations_computed_is_null_not_error(client, repos):
     retailer = client.post(
         "/api/v1/retailers", json={"retailer_code": "RET-NOMIT", "retailer_name": "No Mitigation Co"}
     ).json()["data"]
+    retailer_agreement = _create_retailer_agreement(repos, retailer["id"])
     client.post(
         "/api/v1/penalties/rules",
         json={
             "rule_code": "RULE-NOMIT",
             "retailer_id": retailer["id"],
+            "retailer_agreement_id": retailer_agreement,
+            "penalty_category": "SHORT_SHIP",
             "violation_type": "SHORT_SHIP",
             "calc_type": "PER_UNIT",
             "rate": 1.0,
@@ -293,7 +312,7 @@ def test_get_penalty_exposure(seeded_client, wmt_purchase_order):
         assert "penalty_amount" in violation
 
 
-def test_penalty_exposure_respects_max_stacking_mode(client):
+def test_penalty_exposure_respects_max_stacking_mode(client, repos):
     """Regression test for a real bug: `PenaltyProjectionRepository.
     get_latest` used to hardcode `sum()` over every violation's
     `expected_penalty_amount` regardless of the retailer's actual
@@ -309,12 +328,15 @@ def test_penalty_exposure_respects_max_stacking_mode(client):
         json={"retailer_code": "RET-MAX", "retailer_name": "Max Stacking Co", "stacking_mode": "MAX"},
     ).json()["data"]
     assert retailer["stacking_mode"] == "MAX"
+    retailer_agreement = _create_retailer_agreement(repos, retailer["id"])
 
     client.post(
         "/api/v1/penalties/rules",
         json={
             "rule_code": "RULE-MAX-LOW",
             "retailer_id": retailer["id"],
+            "retailer_agreement_id": retailer_agreement,
+            "penalty_category": "SHORT_SHIP",
             "violation_type": "SHORT_SHIP",
             "calc_type": "FLAT_FEE",
             "rate": 100.0,
@@ -325,6 +347,8 @@ def test_penalty_exposure_respects_max_stacking_mode(client):
         json={
             "rule_code": "RULE-MAX-HIGH",
             "retailer_id": retailer["id"],
+            "retailer_agreement_id": retailer_agreement,
+            "penalty_category": "SHORT_SHIP",
             "violation_type": "FILL_RATE",
             "calc_type": "FLAT_FEE",
             "rate": 900.0,
@@ -548,7 +572,7 @@ def test_run_penalty_projection_with_include_summary_query_param_is_ignored(
 
 
 def test_run_penalty_projection_with_include_summary_query_param_ignored_even_when_ready(
-    client, ready_projection_summary
+    client, repos, ready_projection_summary
 ):
     """Mirrors `test_run_penalty_projection_with_include_summary_query_param_is_ignored`,
     but with a READY summary already on hand -- `POST /penalties/projections`
@@ -557,11 +581,14 @@ def test_run_penalty_projection_with_include_summary_query_param_ignored_even_wh
     retailer = client.post(
         "/api/v1/retailers", json={"retailer_code": "RET-SUM-READY", "retailer_name": "Summary Ready Co"}
     ).json()["data"]
+    retailer_agreement = _create_retailer_agreement(repos, retailer["id"])
     client.post(
         "/api/v1/penalties/rules",
         json={
             "rule_code": "RULE-SUM-READY",
             "retailer_id": retailer["id"],
+            "retailer_agreement_id": retailer_agreement,
+            "penalty_category": "SHORT_SHIP",
             "violation_type": "SHORT_SHIP",
             "calc_type": "PER_UNIT",
             "rate": 1.0,
@@ -643,7 +670,7 @@ def test_run_penalty_projection_response_includes_each_violations_projection_id(
         assert get_resp.json()["data"]["violation_type"] == violation["violation_type"]
 
 
-def test_trigger_penalty_projection_summary_queues_a_job(client):
+def test_trigger_penalty_projection_summary_queues_a_job(client, repos):
     """Built fresh (not from `seeded_client`): every worked-example
     scenario's projection dates are forward-looking by design (order_date
     is anchored at real "today", so every tracked day is in the future
@@ -654,11 +681,14 @@ def test_trigger_penalty_projection_summary_queues_a_job(client):
     retailer = client.post(
         "/api/v1/retailers", json={"retailer_code": "RET-SUM", "retailer_name": "Summary Co"}
     ).json()["data"]
+    retailer_agreement = _create_retailer_agreement(repos, retailer["id"])
     client.post(
         "/api/v1/penalties/rules",
         json={
             "rule_code": "RULE-SUM",
             "retailer_id": retailer["id"],
+            "retailer_agreement_id": retailer_agreement,
+            "penalty_category": "SHORT_SHIP",
             "violation_type": "SHORT_SHIP",
             "calc_type": "PER_UNIT",
             "rate": 1.0,
@@ -710,16 +740,19 @@ def test_trigger_penalty_projection_summary_queues_a_job(client):
 
 
 def test_get_penalty_projection_summary_returns_ready_summary_when_one_exists(
-    client, ready_projection_summary
+    client, repos, ready_projection_summary
 ):
     retailer = client.post(
         "/api/v1/retailers", json={"retailer_code": "RET-SUM-GET", "retailer_name": "Summary Get Co"}
     ).json()["data"]
+    retailer_agreement = _create_retailer_agreement(repos, retailer["id"])
     client.post(
         "/api/v1/penalties/rules",
         json={
             "rule_code": "RULE-SUM-GET",
             "retailer_id": retailer["id"],
+            "retailer_agreement_id": retailer_agreement,
+            "penalty_category": "SHORT_SHIP",
             "violation_type": "SHORT_SHIP",
             "calc_type": "PER_UNIT",
             "rate": 1.0,
@@ -751,15 +784,18 @@ def test_get_penalty_projection_summary_returns_ready_summary_when_one_exists(
     assert body["summary"]["summary"] == "All clear via GET."
 
 
-def test_get_penalty_projection_summary_is_null_success_when_none_requested_yet(client):
+def test_get_penalty_projection_summary_is_null_success_when_none_requested_yet(client, repos):
     retailer = client.post(
         "/api/v1/retailers", json={"retailer_code": "RET-SUM-404", "retailer_name": "Summary 404 Co"}
     ).json()["data"]
+    retailer_agreement = _create_retailer_agreement(repos, retailer["id"])
     client.post(
         "/api/v1/penalties/rules",
         json={
             "rule_code": "RULE-SUM-404",
             "retailer_id": retailer["id"],
+            "retailer_agreement_id": retailer_agreement,
+            "penalty_category": "SHORT_SHIP",
             "violation_type": "SHORT_SHIP",
             "calc_type": "PER_UNIT",
             "rate": 1.0,

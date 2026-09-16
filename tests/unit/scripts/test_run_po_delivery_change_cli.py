@@ -15,6 +15,7 @@ against the Phase 2/3 `common`/`penalties` repositories and services (the
 
 from __future__ import annotations
 
+import hashlib
 from datetime import date, timedelta
 
 from sqlalchemy.pool import StaticPool
@@ -24,6 +25,7 @@ from app.db.session import Database
 from app.repositories.common.delivery_change_request import PoDeliveryChangeRequestRepository
 from app.repositories.common.master_data import MasterDataRepository
 from app.repositories.common.purchase_order import PurchaseOrderRepository
+from app.repositories.common.retailer_agreement import RetailerAgreementRepository
 from app.repositories.penalties.rule import PenaltyRuleRepository
 
 _ORDER_QTY = 1000
@@ -63,6 +65,7 @@ def _seed_purchase_order(
         master_data = MasterDataRepository(session)
         rules = PenaltyRuleRepository(session)
         purchase_orders = PurchaseOrderRepository(session)
+        retailer_agreements = RetailerAgreementRepository(session)
 
         retailer = master_data.add_retailer(
             retailer_code,
@@ -75,10 +78,18 @@ def _seed_purchase_order(
         )
         material = master_data.add_material(f"MAT-{retailer_code}", None)
         plant = master_data.add_plant(f"PLANT-{retailer_code}", None, None)
+        retailer_agreement = retailer_agreements.add_retailer_agreement(
+            retailer_id=retailer["id"],
+            contract_code=f"TEST-{retailer_code}",
+            title="Test retailer agreement",
+            document_sha256=hashlib.sha256(f"test:{retailer_code}".encode()).hexdigest(),
+        )
         rules.add_rule(
             rule_code=f"RULE-{po_number}",
             retailer_id=retailer["id"],
             violation_type="OTIF_LATE",
+            penalty_category="OTIF_LATE",
+            retailer_agreement_id=retailer_agreement["id"],
             calc_type="FLAT_FEE",
             rate=25.0,
         )

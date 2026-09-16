@@ -22,6 +22,7 @@ import pytest
 from app.core.exceptions import BusinessRuleError, ConflictError, NotFoundError, ValidationError
 from app.services.penalties.delivery_change import PoDeliveryChangeRequestService
 from app.services.penalties.projection.service import ProjectionService
+from tests.conftest import make_retailer_agreement
 
 _ORDER_QTY = 1000
 _UNIT_PRICE = 10.0
@@ -79,6 +80,8 @@ def _seed_order(
         rule_code=f"RULE-{retailer_code}",
         retailer_id=retailer["id"],
         violation_type="OTIF_LATE",
+        penalty_category="OTIF_LATE",
+        retailer_agreement_id=make_retailer_agreement(repos, retailer["id"]),
         calc_type="FLAT_FEE",
         rate=25.0,
     )

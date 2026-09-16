@@ -26,7 +26,13 @@ def published_rule_insert_kwargs(published: PublishedRule, retailer_id: UUID) ->
     """
     tiers = (
         [
-            {"band_min": float(t.band_min), "band_max": float(t.band_max), "rate": float(t.rate)}
+            {
+                "band_min": float(t.band_min),
+                "band_max": float(t.band_max) if t.band_max is not None else None,
+                "rate": float(t.rate),
+                "tier_application": t.tier_application,
+                "tier_basis": t.tier_basis,
+            }
             for t in published.tiers
         ]
         if published.tiers
@@ -46,6 +52,17 @@ def published_rule_insert_kwargs(published: PublishedRule, retailer_id: UUID) ->
         "basis_type": published.basis_type,
         "applies_per": published.applies_per,
         "currency_code": published.currency_code,
+        "engine_family": published.engine_family,
+        "penalty_category": published.penalty_category,
+        "retailer_agreement_id": UUID(published.retailer_agreement_id),
+        "extracted_rule_id": UUID(published.extracted_rule_id),
+        "metric_code": published.metric_code,
+        "metric_denominator": published.metric_denominator,
+        "measurement_window_type": published.measurement_window_type,
+        "measurement_window_length": published.measurement_window_length,
+        "measurement_window_unit": published.measurement_window_unit,
+        "rounding_convention": published.rounding_convention,
+        "is_engine_priceable": published.is_engine_priceable,
     }
 
 
@@ -95,6 +112,7 @@ def _to_staged_fact(a: ExtractedPenaltyRuleAttribute) -> StagedFact:
         applies_per=a.applies_per,
         tier_application=a.tier_application,
         cap_scope=a.cap_scope,
+        extra=dict(a.extra or {}),
     )
 
 
@@ -271,6 +289,7 @@ class ExtractedPenaltyRuleRepository:
                     pricing_readiness=rule.pricing_readiness,
                     status=rule.status,
                     facts=[_to_staged_fact(a) for a in attribute_rows],
+                    extra=dict(rule.extra or {}),
                 )
             )
         return staged_rules

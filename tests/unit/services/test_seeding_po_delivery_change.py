@@ -35,6 +35,7 @@ def _build_seeding_service(repos) -> PenaltySeedingService:
     )
     return PenaltySeedingService(
         master_data=repos.master_data,
+        retailer_agreements=repos.retailer_agreements,
         rules=repos.penalty_rules,
         purchase_orders=repos.purchase_orders,
         fulfillment=repos.fulfillment,

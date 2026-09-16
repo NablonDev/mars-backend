@@ -8,6 +8,7 @@ from app.repositories.common.delivery_change_request import PoDeliveryChangeRequ
 from app.repositories.common.fulfillment import FulfillmentRepository
 from app.repositories.common.master_data import MasterDataRepository
 from app.repositories.common.purchase_order import PurchaseOrderRepository
+from app.repositories.common.retailer_agreement import RetailerAgreementRepository
 from app.repositories.penalties.dispute import PenaltyDisputeRepository
 from app.repositories.penalties.job_context import (
     PenaltyJobItemContextRepository,
@@ -31,6 +32,7 @@ class PenaltySeedingService:
     """Idempotent seeding and day-by-day scenario replay for the penalties domain."""
 
     master_data: MasterDataRepository
+    retailer_agreements: RetailerAgreementRepository
     rules: PenaltyRuleRepository
     purchase_orders: PurchaseOrderRepository
     fulfillment: FulfillmentRepository
@@ -56,9 +58,15 @@ class PenaltySeedingService:
             self._truncate_seeded_tables()
 
         counts: dict[str, int] = {}
-        counts.update(master_data_seed.seed(self.master_data))
+        counts.update(master_data_seed.seed(self.master_data, self.retailer_agreements))
         counts.update(
-            projection_seed.seed(self.rules, self.purchase_orders, self.fulfillment, self.master_data)
+            projection_seed.seed(
+                self.rules,
+                self.purchase_orders,
+                self.fulfillment,
+                self.master_data,
+                self.retailer_agreements,
+            )
         )
         counts.update(mitigation_seed.seed(self.mitigation_inputs, self.purchase_orders))
         counts.update(self.seed_disputes())
@@ -76,6 +84,7 @@ class PenaltySeedingService:
             self.fulfillment,
             self.master_data,
             self.actual_penalties,
+            self.retailer_agreements,
         )
 
     def _truncate_seeded_tables(self) -> None:
@@ -93,6 +102,7 @@ class PenaltySeedingService:
         self.actual_penalties.truncate_all()
         self.job_queue.truncate_all()
         self.rules.truncate_all()
+        self.retailer_agreements.truncate_all()
         self.fulfillment.truncate_all()
         self.purchase_orders.truncate_all()
         self.master_data.truncate_all()

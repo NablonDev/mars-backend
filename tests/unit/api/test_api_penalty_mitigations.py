@@ -9,9 +9,22 @@ from uuid import UUID
 
 import pytest
 
+from tests.conftest import make_retailer_agreement
+
+
+def _create_retailer_agreement(repos, retailer_id: str) -> str:
+    """Create a `retailer_agreement` via the repository layer.
+
+    Not the real `POST /penalties/retailer-agreements` endpoint: that route's dependency
+    unconditionally builds `Container`'s real Postgres-backed LangGraph checkpointer (see
+    `get_penalty_rule_extraction_service`), which this test environment can't reach.
+    `penalty_rule.retailer_agreement_id` is NOT NULL.
+    """
+    return str(make_retailer_agreement(repos, UUID(retailer_id)))
+
 
 @pytest.fixture
-def projected_purchase_order(client) -> dict:
+def projected_purchase_order(client, repos) -> dict:
     """A fresh PO with one persisted OPEN penalty projection, anchored on
     real "today" (see test_api_penalty_projections.py's summary-trigger
     test for why the seeded scenario's forward-looking dates don't work
@@ -19,11 +32,14 @@ def projected_purchase_order(client) -> dict:
     retailer = client.post(
         "/api/v1/retailers", json={"retailer_code": "RET-MIT", "retailer_name": "Mitigation Co"}
     ).json()["data"]
+    retailer_agreement = _create_retailer_agreement(repos, retailer["id"])
     client.post(
         "/api/v1/penalties/rules",
         json={
             "rule_code": "RULE-MIT",
             "retailer_id": retailer["id"],
+            "retailer_agreement_id": retailer_agreement,
+            "penalty_category": "SHORT_SHIP",
             "violation_type": "SHORT_SHIP",
             "calc_type": "PER_UNIT",
             "rate": 1.0,

@@ -45,6 +45,7 @@ def _seed(repos):
         repos.fulfillment,
         repos.master_data,
         repos.actual_penalties,
+        repos.retailer_agreements,
     )
     assert counts["dispute_rules"] == 5
     assert counts["dispute_orders"] == len(SCENARIOS)

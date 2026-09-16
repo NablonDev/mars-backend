@@ -457,6 +457,9 @@ def test_rule_publication_outcome_has_no_db_level_check(
 EXTRACTED_RULE_ID = UUID("11111111-1111-1111-1111-111111111111")
 
 
+RETAILER_AGREEMENT_ID = UUID("22222222-2222-2222-2222-222222222222")
+
+
 def _published_rule(**overrides) -> PublishedRule:
     fields = {
         "rule_code": "WMT-SHORT_SHIP-a1b2c3d4",
@@ -472,6 +475,9 @@ def _published_rule(**overrides) -> PublishedRule:
         "applies_per": None,
         "effective_start_date": date(2026, 1, 1),
         "extracted_rule_id": str(EXTRACTED_RULE_ID),
+        "engine_family": "SHORTAGE",
+        "penalty_category": "SHORT_SHIP",
+        "retailer_agreement_id": str(RETAILER_AGREEMENT_ID),
         **overrides,
     }
     return PublishedRule(**fields)
@@ -496,6 +502,17 @@ def test_published_rule_insert_kwargs_shapes_decimals_to_floats_and_carries_reta
         "basis_type": "COST_OF_GOODS",
         "applies_per": None,
         "currency_code": "USD",
+        "engine_family": "SHORTAGE",
+        "penalty_category": "SHORT_SHIP",
+        "retailer_agreement_id": RETAILER_AGREEMENT_ID,
+        "extracted_rule_id": EXTRACTED_RULE_ID,
+        "metric_code": None,
+        "metric_denominator": None,
+        "measurement_window_type": None,
+        "measurement_window_length": None,
+        "measurement_window_unit": None,
+        "rounding_convention": None,
+        "is_engine_priceable": True,
     }
 
 
@@ -504,9 +521,21 @@ def test_published_rule_insert_kwargs_shapes_tiers_and_a_none_cap():
         calc_type="TIERED",
         cap_amount=None,
         tiers=[
-            PublishedTier(tier_code="T1", band_min=Decimal(0), band_max=Decimal("0.1"), rate=Decimal("0.01")),
             PublishedTier(
-                tier_code="T2", band_min=Decimal("0.1"), band_max=Decimal("Infinity"), rate=Decimal("0.02")
+                tier_code="T1",
+                band_min=Decimal(0),
+                band_max=Decimal("0.1"),
+                rate=Decimal("0.01"),
+                tier_application="CLIFF",
+                tier_basis="SHORTFALL_PCT",
+            ),
+            PublishedTier(
+                tier_code="T2",
+                band_min=Decimal("0.1"),
+                band_max=None,
+                rate=Decimal("0.02"),
+                tier_application="CLIFF",
+                tier_basis="SHORTFALL_PCT",
             ),
         ],
     )
@@ -515,8 +544,20 @@ def test_published_rule_insert_kwargs_shapes_tiers_and_a_none_cap():
 
     assert kwargs["cap_amount"] is None
     assert kwargs["tiers"] == [
-        {"band_min": 0.0, "band_max": 0.1, "rate": 0.01},
-        {"band_min": 0.1, "band_max": float("inf"), "rate": 0.02},
+        {
+            "band_min": 0.0,
+            "band_max": 0.1,
+            "rate": 0.01,
+            "tier_application": "CLIFF",
+            "tier_basis": "SHORTFALL_PCT",
+        },
+        {
+            "band_min": 0.1,
+            "band_max": None,
+            "rate": 0.02,
+            "tier_application": "CLIFF",
+            "tier_basis": "SHORTFALL_PCT",
+        },
     ]
 
 
@@ -530,4 +571,4 @@ def test_published_rule_insert_kwargs_carries_basis_currency_and_applies_per():
     assert kwargs["basis_type"] == "SHORTFALL_VALUE"
     assert kwargs["currency_code"] == "EUR"
     assert kwargs["applies_per"] == "DAY"
-    assert "extracted_rule_id" not in kwargs
+    assert kwargs["extracted_rule_id"] == EXTRACTED_RULE_ID
