@@ -26,11 +26,11 @@ from app.schemas.penalties.disputes import (
 from app.services.penalties.dispute.service import DisputeResolutionService
 from app.services.penalties.dispute.summary_service import DisputeSummaryService
 
-router = APIRouter(tags=["penalty-disputes"])
+router = APIRouter(prefix="/penalties", tags=["penalty-disputes"])
 
 
 @router.post(
-    "/penalties/disputes",
+    "/disputes",
     response_model=Envelope[DisputeResponse],
     status_code=status.HTTP_201_CREATED,
 )
@@ -40,13 +40,17 @@ def open_penalty_dispute(
 ) -> Envelope[DisputeResponse]:
     """Open a dispute against an incurred penalty."""
     created = service.open_dispute(
-        body.actual_penalty_id, body.reason_code, body.claimed_amount, notes=body.notes
+        body.actual_penalty_id,
+        body.reason_code,
+        body.claimed_amount,
+        notes=body.notes,
+        claim_facts=body.claim_facts.model_dump(exclude_none=True) if body.claim_facts is not None else None,
     )
     return success_envelope(DisputeResponse.model_validate(created), message="Penalty dispute opened.")
 
 
 @router.get(
-    "/penalties/disputes",
+    "/disputes",
     response_model=Envelope[list[DisputeResponse]],
 )
 def list_penalty_disputes(
@@ -65,7 +69,7 @@ def list_penalty_disputes(
 
 
 @router.get(
-    "/penalties/disputes/{dispute_id}",
+    "/disputes/{dispute_id}",
     response_model=Envelope[DisputeResponse],
 )
 def get_penalty_dispute(
@@ -77,7 +81,7 @@ def get_penalty_dispute(
 
 
 @router.post(
-    "/penalties/disputes/{dispute_id}/analyze",
+    "/disputes/{dispute_id}/analyze",
     response_model=Envelope[DisputeResponse],
 )
 def analyze_penalty_dispute(
@@ -90,7 +94,7 @@ def analyze_penalty_dispute(
 
 
 @router.post(
-    "/penalties/disputes/{dispute_id}/resolve",
+    "/disputes/{dispute_id}/resolve",
     response_model=Envelope[DisputeResponse],
 )
 def resolve_penalty_dispute(
@@ -109,7 +113,7 @@ def resolve_penalty_dispute(
 
 
 @router.post(
-    "/penalties/disputes/{dispute_id}/summary",
+    "/disputes/{dispute_id}/summary",
     response_model=Envelope[DisputeSummaryStatusResponse],
     responses={202: {"model": Envelope[DisputeSummaryStatusResponse]}},
 )
@@ -143,7 +147,7 @@ def trigger_penalty_dispute_summary(
 
 
 @router.get(
-    "/penalties/disputes/{dispute_id}/summary",
+    "/disputes/{dispute_id}/summary",
     response_model=Envelope[DisputeSummaryStatusResponse],
 )
 def get_penalty_dispute_summary(

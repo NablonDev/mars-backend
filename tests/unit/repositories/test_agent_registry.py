@@ -9,7 +9,12 @@ import pytest
 from sqlalchemy import func, select
 
 from app.models import Agent
-from app.repositories.process.agent_registry import AgentRegistryRepository
+from app.repositories.process.agent_registry import (
+    AgentRegistryRepository,
+    AgentRunRepository,
+    AgentTraceRepository,
+)
+from app.utils.clock import utc_now
 
 
 def test_ensure_registered_creates_an_agent_row(db_session):
@@ -122,3 +127,84 @@ def test_get_active_returns_only_the_active_row(db_session):
 def test_get_by_code_version_returns_none_when_missing(db_session):
     repo = AgentRegistryRepository(db_session)
     assert repo.get_by_code_version("does_not_exist", "v1") is None
+
+
+def test_agent_trace_log_rolls_back_and_reraises_on_a_write_failure(db_session):
+    """Regression test for the session-poisoning bug: a failed flush (a NUL byte in
+    a snapshot/error field raises this way in production) must not leave the shared
+    session in a failed transactional state for later, unrelated callers."""
+    agent_id = AgentRegistryRepository(db_session).ensure_registered(
+        agent_code="test_agent_trace",
+        prompt_version="v1",
+        system_prompt="prompt",
+        agent_name="Test Agent Trace",
+        domain="penalties",
+    )
+    run_id = AgentRunRepository(db_session).start(agent_id=agent_id, run_type="TEST")
+    repo = AgentTraceRepository(db_session)
+
+    def _failing_flush() -> None:
+        raise ValueError("A string literal cannot contain NUL (0x00) characters.")
+
+    db_session.flush = _failing_flush
+
+    with pytest.raises(ValueError):
+        repo.log(
+            run_id,
+            "some_node",
+            "failed",
+            utc_now(),
+            utc_now(),
+            10,
+            input_snapshot={"a": 1},
+            output_snapshot=None,
+            error="boom",
+        )
+
+    del db_session.flush  # restore the bound method now that the fake did its job
+
+    # The session must still be usable afterward: a later, unrelated write on the
+    # same session succeeds instead of failing with "PendingRollbackError".
+    other_run_id = AgentRunRepository(db_session).start(agent_id=agent_id, run_type="TEST")
+    assert other_run_id is not None
+
+
+def test_update_status_strips_nul_bytes_from_the_error_message(db_session):
+    agent_id = AgentRegistryRepository(db_session).ensure_registered(
+        agent_code="test_agent_run_status",
+        prompt_version="v1",
+        system_prompt="prompt",
+        agent_name="Test Agent Run Status",
+        domain="penalties",
+    )
+    repo = AgentRunRepository(db_session)
+    run_id = repo.start(agent_id=agent_id, run_type="TEST")
+
+    repo.update_status(run_id, "failed", error="boom\x00: NUL from a rejected insert", completed=True)
+
+    assert repo.get(run_id)["error"] == "boom: NUL from a rejected insert"
+
+
+def test_update_status_rolls_back_only_its_own_savepoint_on_a_write_failure(db_session):
+    agent_id = AgentRegistryRepository(db_session).ensure_registered(
+        agent_code="test_agent_run_status_failure",
+        prompt_version="v1",
+        system_prompt="prompt",
+        agent_name="Test Agent Run Status Failure",
+        domain="penalties",
+    )
+    repo = AgentRunRepository(db_session)
+    run_id = repo.start(agent_id=agent_id, run_type="TEST")
+
+    def _failing_flush() -> None:
+        raise ValueError("A string literal cannot contain NUL (0x00) characters.")
+
+    db_session.flush = _failing_flush
+
+    with pytest.raises(ValueError):
+        repo.update_status(run_id, "failed", error="boom")
+
+    del db_session.flush  # restore the bound method now that the fake did its job
+
+    other_run_id = repo.start(agent_id=agent_id, run_type="TEST")
+    assert other_run_id is not None

@@ -104,7 +104,7 @@ password (not the normal account password), IMAP enabled on the account,
 
 #### A thread is stuck at `FAILED` with `current_node: persist_email`
 The graph raised before `email_id`/the `workflow_threads` row could be created
-(`CmirRunService._process_email_thread`'s exception path). Check `agent_runs.error`
+(`CmirService._process_email_thread`'s exception path). Check `agent_runs.error`
 for the underlying exception message -- usually a Postgres connectivity issue or a
 constraint violation on `email_events`/`cmir_records`.
 
@@ -221,6 +221,16 @@ alembic upgrade head          # run from the repo root, not app/
 
 This creates every table in `docs/DATABASE.md`'s table list. Safe to
 re-run (Alembic tracks the applied revision in `alembic_version`).
+
+**A database with `penalty_rule` rows predating the `ddf0ca3bea0e` migration
+needs a manual backfill first.** That migration adds `penalty_category` and
+`retailer_agreement_id` as `NOT NULL`-bound columns but carries no data
+backfill of its own, so `alembic upgrade head` fails partway through on any
+database that already has `penalty_rule` rows from before this schema
+change. Before upgrading such a database, backfill `penalty_category` to a
+non-null value and `retailer_agreement_id` to a real `retailer_agreement` row
+(one per retailer) on every existing `penalty_rule` row (a fresh database with
+no pre-existing `penalty_rule` rows does not need it).
 
 **Switching database backends.** Changing `DATABASE_URL` and re-running
 `alembic upgrade head` builds the schema on either backend -- the DDL
@@ -1082,16 +1092,33 @@ the charge's `invoice_or_deduction_date`. Add or correct the rule (§8),
 then re-analyze.
 
 #### Analyze returns `INSUFFICIENT_DATA_FOR_DISPUTE` (409)
-The real, final fact this violation family needs was never recorded as of
-the charge date -- `delivered_qty` for a `SHORTAGE`-family dispute,
-`actual_delivery_date` for a `DELAY`-family one. This is never silently
-treated as "confirmed zero"/"confirmed on time" -- post the missing
-delivery/shipment fact (§8) then re-analyze.
+The real, final fact this `engine_family` needs was never recorded as of
+the charge date -- `delivered_qty` for `SHORTAGE`, `actual_delivery_date`
+for `DELAY`, a required `claim_facts` key (e.g. `defect_units`,
+`replacement_cost_paid`) for `QUALITY`/`COVER_PURCHASE`/`FINANCIAL`/
+`STORAGE_DURATION_FEE`, or the commitment/actual-purchase totals for
+`VOLUME_COMMITMENT`. This is never silently treated as "confirmed zero" --
+post the missing delivery/shipment fact (§8) or open a new dispute with the
+missing `claim_facts` key, then re-analyze.
 
 #### Analyze returns `DISPUTE_CALC_NOT_SUPPORTED` (409)
-The effective rule's `calc_type` can't be priced for this violation family
--- today, only a `TIERED` delay rule (tiered pricing is implemented for
-shortage rules, banded by shortfall %, not for delay rules).
+Either the rule's `engine_family` has no entry in
+`app.services.penalties.dispute.engine`'s dispatch table at all (a family that publishes
+and projects/mitigates but has no dispute recompute path wired yet -- this backlog is a
+known, not-yet-solved operational concern), or its `calc_type` isn't one the matched
+family's measure function branches on.
+
+#### Open returns `CLAIM_FACTS_ALREADY_SET` (409)
+The charge's `actual_penalty.claim_facts` was already written by an
+earlier dispute cycle against it -- write-once, never mutated (§8's
+`ActualPenaltyRepository.set_claim_facts`). If the facts need correcting,
+that requires a new charge (`actual_penalty` row), not a second write here.
+
+#### Analyze returns `COMMITMENT_DISPUTE_NOT_CONFIGURED` (409)
+A `VOLUME_COMMITMENT`-family dispute was analyzed against a
+`DisputeResolutionService` built without a `retailer_agreements`
+repository -- a wiring defect (`get_dispute_service` in
+`app/api/dependencies.py` should always inject one), not a data problem.
 
 #### Resolve returns `DISPUTE_NOT_ANALYZED` (422)
 The dispute isn't `ANALYZED` yet. Run `POST .../analyze` first.
@@ -1261,3 +1288,108 @@ ruff format app/ scripts/ tests/ alembic/
   OpenAI-side issue (bad deployment, model overloaded, etc.), not a
   client input error. `POST` again (or with `force_regenerate: true`), or
   check the deployment in the Azure portal.
+
+## 16. Penalty rule extraction
+
+Turns an uploaded retailer agreement into reviewed `penalty_rule` rows.
+Full design: `docs/architecture/penalty-rule-extraction.md`. Endpoint
+reference: `docs/API.md` "Retailer agreements and rule extraction".
+`scripts/seed/seed_agents.py` now also seeds the `penalty_rule_extractor`
+run-owner row and the three per-stage prompt rows the adapter reads at
+inference time (`penalty_rule_screening`, `penalty_rule_classification`,
+`penalty_rule_fact_extraction`), alongside the summary and CMIR/PO-validation
+agents it already seeded: no separate seeding step needed beyond §6.
+
+The lifecycle, end to end:
+
+```bash
+# 1. Upload the retailer agreement (idempotent: re-posting the same markdown_text
+#    returns the existing row, 200, instead of a duplicate):
+curl -X POST http://127.0.0.1:8000/api/v1/penalties/retailer-agreements \
+  -H "X-Internal-Api-Key: $APP_INTERNAL_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"retailer_id": "<retailer_id>", "contract_code": "CT-TGT-2026", "title": "Target Master Agreement 2026", "markdown_text": "..."}'
+
+# 2. Start extraction (returns agent_run_id and workflow_thread_id; runs
+#    the LangGraph pipeline through to a human-review interrupt):
+curl -X POST http://127.0.0.1:8000/api/v1/penalties/retailer-agreements/<retailer_agreement_id>/extract \
+  -H "X-Internal-Api-Key: $APP_INTERNAL_API_KEY"
+
+# 3. List what is pending review:
+curl "http://127.0.0.1:8000/api/v1/penalties/retailer-agreements/<retailer_agreement_id>/extracted-rules?status=PENDING_REVIEW" \
+  -H "X-Internal-Api-Key: $APP_INTERNAL_API_KEY"
+
+# 4. Approve or reject each candidate (<extracted_rule_id> from step 3):
+curl -X POST http://127.0.0.1:8000/api/v1/penalties/retailer-agreements/<retailer_agreement_id>/extracted-rules/<extracted_rule_id>/review \
+  -H "X-Internal-Api-Key: $APP_INTERNAL_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"status": "APPROVED"}'
+
+curl -X POST http://127.0.0.1:8000/api/v1/penalties/retailer-agreements/<retailer_agreement_id>/extracted-rules/<extracted_rule_id>/review \
+  -H "X-Internal-Api-Key: $APP_INTERNAL_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"status": "REJECTED", "review_notes": "Not a PO shortage/delay clause."}'
+
+# 5. Resume the run once every rule you care about is decided (workflow_thread_id
+#    from step 2's response; expected_updated_at from that thread's current stage,
+#    e.g. GET /api/v1/workflow-threads/<workflow_thread_id>). Carries no verdicts of
+#    its own -- apply_decisions re-reads step 4's decisions from the database:
+curl -X POST http://127.0.0.1:8000/api/v1/workflow-threads/<workflow_thread_id>/decisions \
+  -H "X-Internal-Api-Key: $APP_INTERNAL_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"decision_type": "RULE_REVIEW_RESUME", "actor": "reviewer@company.com", "expected_updated_at": "<updated_at>"}'
+
+# 6. Publish the approved rules into live penalty_rule rows:
+curl -X POST http://127.0.0.1:8000/api/v1/penalties/retailer-agreements/<retailer_agreement_id>/publish \
+  -H "X-Internal-Api-Key: $APP_INTERNAL_API_KEY"
+
+# 7. Read the publication audit (every outcome ever recorded, plus a
+#    rejection-reason histogram):
+curl http://127.0.0.1:8000/api/v1/penalties/retailer-agreements/<retailer_agreement_id>/publications \
+  -H "X-Internal-Api-Key: $APP_INTERNAL_API_KEY"
+```
+
+Approving a rule is necessary but not sufficient for publication: `POST
+.../publish` only admits a rule that is both `APPROVED` and
+`pricing_readiness = READY`. An approved rule stuck at
+`NEEDS_EXTERNAL_FIGURE`/`AWAITING_DATA`/`UNSUPPORTED_SHAPE`/`NOT_A_CHARGE`
+is skipped and recorded as `NOT_READY` in the publication audit, not
+published, and not an error.
+
+Step 5 (resume) closes out the run's own bookkeeping (the `workflow_thread`
+and `agent_run` rows) but is not a publication prerequisite: `POST .../publish`
+reads `extracted_penalty_rule.status` directly and never checks whether the
+run's `workflow_thread` has completed, so an operator who skips step 5 can
+still publish -- the run just stays parked at `waiting_rule_review` instead of
+closing.
+
+### Rejection reason codes
+
+Every rule the publisher does not admit gets one row in `rule_publication`
+with a `reason_code`. The common ones and what to do about them:
+
+| `reason_code` | Meaning | Operator action |
+|---|---|---|
+| `NOT_APPROVED` | The rule is still `PENDING_REVIEW`, or was `REJECTED` | Review it (step 4) before the next publication run, if it should be priced |
+| `NOT_READY` | `pricing_readiness` isn't `READY` | Read the rule's own `pricing_readiness` value; `NEEDS_EXTERNAL_FIGURE`/`AWAITING_DATA` usually means a fact the contract doesn't state has to be entered by hand instead |
+| `NOT_PO_SCOPED` | The rule's `penalty_category` has `engine_family=UNPRICEABLE` (an escape value: `UNSPECIFIED_EXTERNAL`, `UNSPECIFIED_INTERNAL`, `UNMAPPED`), not a real category the classifier misfired on | Expected; there is genuinely no quantifiable rate to price. `po_shortage_flag`/`po_delay_flag` are reporting-only labels now and no longer gate admission |
+| `UNSUPPORTED_CALC_TYPE` | `calc_type` is `FORMULA_OTHER`, `UNSPECIFIED`, `NON_MONETARY`, or `LIMIT_ONLY` | The engine has no pricing function for this shape; write the rule by hand if it must be priced, or leave it out |
+| `UNMAPPED_VIOLATION_TYPE` | Neither the rule's metric nor its `penalty_category` names a `violation_type` (every one of the 20 governed, non-escape categories now has one; this fires only for a metric/category combination that genuinely isn't governed) | Extraction-side data error; re-check the source clause and the category/metric the classifier assigned |
+| `NO_RATE_VALUE` | A monetary rule has no `RATE` fact carrying a number anywhere | Re-check the source clause; if the rate really is stated, this is an extraction miss worth reporting |
+| `AMBIGUOUS_RATE_BRANCH` | A non-tiered rule has no `RATE` fact at the expected branch, but other branches do carry one (e.g. per-category rates that can't flatten to one rule-level number) | Expected; the clause needs the category/segment split represented some other way, or entered by hand |
+| `MARGINAL_TIERS` | A `TIERED` rule's bands mix `CLIFF` and `MARGINAL` `tier_application` across branches (`MARGINAL` alone now publishes and prices fine; `price_tiered` prices a whole rule under one value) | Extraction-side data error; re-check the source clause, since a single clause shouldn't mix tiering styles |
+| `NON_HALF_OPEN_TIERS` / `TIER_BAND_GAP` | The tier bands aren't clean half-open intervals, or gap/overlap | Read `review_notes` and the flagged attribute rows; usually needs a person to re-derive the bands from the clause and enter them by hand |
+| `NON_AMOUNT_CAP` | The cap is a rate, duration, or quantity ceiling, not an amount ceiling | Expected; the engine only applies amount caps today |
+| `UNSUPPORTED_BASIS` / `UNSUPPORTED_ACCRUAL` | `basis_type` isn't `PO_VALUE`/`COST_OF_GOODS`/`SHORTFALL_VALUE`/`SHORTFALL_UNITS` (`UNIT_COST`, `WHOLESALE_PRICE`, `RETAIL_PRICE`, and `PRICE_DIFFERENTIAL` all reject, since there's no cost or sale-price figure in the data model to price them against), or a `WEEK`/`MONTH`/`QUARTER`/`YEAR` `applies_per` has no governed `rounding_convention` to accrue by | Write the rule by hand if it must be priced, or supply the missing `rounding_convention` and re-extract |
+| `THRESHOLD_OUT_OF_RANGE` | A threshold falls outside `[0, 1]` after unit conversion | Almost always an extraction error (percent vs. fraction); re-extract or correct by hand |
+| `EXTERNAL_FIGURE` | The value lives outside the contract (an index, a separately negotiated rate) | Expected; enter the rule by hand once the external figure is known |
+| `PERCENT_OF_INVOICE` | No invoice value in the projection snapshot | Needs an engine change, not an operator fix; the fact the rule needs isn't tracked yet |
+| `MIXED_CURRENCY` | The contract prices in more than one currency | The engine prices one currency per rule; split the contract's rules by currency and enter the non-primary ones by hand |
+| `ALREADY_PUBLISHED` | A `penalty_rule` with this rule's deterministic `rule_code` already exists | Expected on a repeat publish of the same run; no action needed |
+
+`reason_code` is `null` on a `PUBLISHED` outcome. The
+`rejection_reason_histogram` on `GET .../publications` counts each code
+across every publication run recorded for the retailer agreement, so a large
+`NOT_READY` or `UNSUPPORTED_CALC_TYPE` count is a signal to look at the
+extraction pipeline's prompts or the engine's coverage, not at any one
+rule.

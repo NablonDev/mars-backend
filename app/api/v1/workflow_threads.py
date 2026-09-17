@@ -7,7 +7,12 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
 
-from app.api.dependencies import get_po_service, get_service, parse_include
+from app.api.dependencies import (
+    get_penalty_rule_extraction_service,
+    get_po_service,
+    get_service,
+    parse_include,
+)
 from app.core.envelope import Envelope, success_envelope
 from app.core.exceptions import NotFoundError
 from app.schemas.cmir.threads import (
@@ -15,6 +20,7 @@ from app.schemas.cmir.threads import (
     CmirThreadSnapshotResponse,
     ManualCmirEntryDecisionRequest,
     QtyMismatchDecisionRequest,
+    RuleReviewResumeRequest,
     WorkflowThreadDecisionRequest,
     WorkflowThreadDetailResponse,
     WorkflowThreadDraftResponse,
@@ -23,7 +29,8 @@ from app.schemas.cmir.threads import (
     WorkflowThreadResponse,
 )
 from app.schemas.po_validation.threads import PoValidationThreadSnapshotResponse
-from app.services.cmir.run_service import CmirRunService
+from app.services.cmir.service import CmirService
+from app.services.penalties.rule_extraction.service import PenaltyRuleExtractionService
 from app.services.po_validation.service import PoValidationService
 
 router = APIRouter(tags=["workflow-threads"])
@@ -38,7 +45,7 @@ def list_workflow_threads(
     stage: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     cursor: str | None = None,
-    run_service: CmirRunService = Depends(get_service),
+    run_service: CmirService = Depends(get_service),
 ) -> Envelope[WorkflowThreadListResponse]:
     """List workflow threads, optionally filtered by domain, status, or stage."""
     result = run_service.list_runs(view="threads", status=status, stage=stage, limit=limit, cursor=cursor)
@@ -61,7 +68,7 @@ def list_workflow_threads(
 )
 def get_workflow_thread(
     thread_id: UUID,
-    run_service: CmirRunService = Depends(get_service),
+    run_service: CmirService = Depends(get_service),
     po_run_service: PoValidationService = Depends(get_po_service),
     include: set[str] = Depends(_INCLUDE_SNAPSHOT),
 ) -> Envelope[WorkflowThreadDetailResponse]:
@@ -95,7 +102,7 @@ def get_workflow_thread(
 def submit_workflow_thread_missing_fields(
     thread_id: UUID,
     body: WorkflowThreadFieldsRequest,
-    run_service: CmirRunService = Depends(get_service),
+    run_service: CmirService = Depends(get_service),
 ) -> Envelope[WorkflowThreadResponse]:
     """Submit missing field values to advance a workflow thread requiring completion."""
     result = run_service.submit_missing_fields(
@@ -114,7 +121,7 @@ def submit_workflow_thread_missing_fields(
 def update_workflow_thread_draft(
     thread_id: UUID,
     body: WorkflowThreadFieldsRequest,
-    run_service: CmirRunService = Depends(get_service),
+    run_service: CmirService = Depends(get_service),
 ) -> Envelope[WorkflowThreadDraftResponse]:
     """Save field values to the in-flight review draft without submitting it.
 
@@ -137,12 +144,14 @@ def update_workflow_thread_draft(
 def submit_workflow_thread_decision(
     thread_id: UUID,
     body: WorkflowThreadDecisionRequest,
-    run_service: CmirRunService = Depends(get_service),
+    run_service: CmirService = Depends(get_service),
     po_run_service: PoValidationService = Depends(get_po_service),
+    rule_extraction_service: PenaltyRuleExtractionService = Depends(get_penalty_rule_extraction_service),
 ) -> Envelope[WorkflowThreadResponse]:
     """Record a decision on a workflow thread, discriminated by `decision_type`.
 
-    Covers CMIR approval decisions and both `po_validation` decision types.
+    Covers CMIR approval decisions, both `po_validation` decision types, and resuming a
+    penalty rule-extraction review.
     """
     if isinstance(body, CmirApprovalDecisionRequest):
         result = run_service.submit_decision(
@@ -160,13 +169,17 @@ def submit_workflow_thread_decision(
             substitute_material_code=body.substitute_material_code,
             expected_updated_at=body.expected_updated_at,
         )
-    else:
-        assert isinstance(body, ManualCmirEntryDecisionRequest)
+    elif isinstance(body, ManualCmirEntryDecisionRequest):
         result = po_run_service.submit_manual_cmir_entry(
             thread_id,
             actor=body.actor,
             sap_material_number=body.sap_material_number,
             description=body.description,
             expected_updated_at=body.expected_updated_at,
+        )
+    else:
+        assert isinstance(body, RuleReviewResumeRequest)
+        result = rule_extraction_service.resume_review(
+            thread_id, actor=body.actor, expected_updated_at=body.expected_updated_at
         )
     return success_envelope(WorkflowThreadResponse.model_validate(result))

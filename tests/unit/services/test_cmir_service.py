@@ -1,4 +1,4 @@
-"""Tests for CmirRunService against the real SQLite-backed `process`/`cmir`
+"""Tests for CmirService against the real SQLite-backed `process`/`cmir`
 repositories (see tests/conftest.py's `repos` fixture), with a
 hand-written fake LangGraph graph standing in for the actual compiled
 graph -- the graph itself (`app/agents/cmir/{graph,nodes}.py`) is Phase
@@ -29,7 +29,7 @@ from uuid import UUID
 import pytest
 
 from app.core.exceptions import ConflictError, ExternalServiceError, ValidationError
-from app.services.cmir.run_service import CmirRunService
+from app.services.cmir.service import CmirService
 
 
 class _FakeInterrupt:
@@ -62,8 +62,8 @@ class FakeGraph:
         self.updated_states.append((copy.deepcopy(config), copy.deepcopy(value)))
 
 
-def _build_service(repos, graph: FakeGraph) -> CmirRunService:
-    return CmirRunService(
+def _build_service(repos, graph: FakeGraph) -> CmirService:
+    return CmirService(
         email_reader=None,
         graph=graph,
         agent_registry=repos.agent_registry,
@@ -96,7 +96,7 @@ def _start_thread_awaiting(
     email_id: UUID,
     *,
     resume_results: list[Any] | None = None,
-) -> tuple[CmirRunService, FakeGraph, UUID]:
+) -> tuple[CmirService, FakeGraph, UUID]:
     """Runs one email through the service to create a real workflow_thread
     row parked at the given interrupt reason, returning
     (service, graph, thread_id). `resume_results` are queued as the

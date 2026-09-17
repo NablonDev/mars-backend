@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends
 from app.api.dependencies import get_service
 from app.core.envelope import Envelope, success_envelope
 from app.schemas.cmir.email_events import ProcessQueuedEmailRequest
-from app.services.cmir.run_service import CmirRunService
+from app.services.cmir.service import CmirService
 
 router = APIRouter(tags=["internal"])
 
@@ -22,7 +22,7 @@ router = APIRouter(tags=["internal"])
 @router.post("/internal/process-email", response_model=Envelope[dict[str, Any]])
 def process_queued_email(
     body: ProcessQueuedEmailRequest,
-    run_service: CmirRunService = Depends(get_service),
+    run_service: CmirService = Depends(get_service),
 ) -> Envelope[dict[str, Any]]:
     """Process one queued CMIR email on behalf of the Service Bus consumer.
 

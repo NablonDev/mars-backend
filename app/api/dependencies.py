@@ -20,6 +20,7 @@ from app.repositories.common.delivery_change_request import PoDeliveryChangeRequ
 from app.repositories.common.fulfillment import FulfillmentRepository
 from app.repositories.common.master_data import MasterDataRepository
 from app.repositories.common.purchase_order import PurchaseOrderRepository
+from app.repositories.common.retailer_agreement import RetailerAgreementRepository
 from app.repositories.penalties.dispute import PenaltyDisputeRepository
 from app.repositories.penalties.job_context import (
     PenaltyJobItemContextRepository,
@@ -28,10 +29,15 @@ from app.repositories.penalties.job_context import (
 from app.repositories.penalties.mitigation import MitigationInputRepository, MitigationOptionRepository
 from app.repositories.penalties.projection import ActualPenaltyRepository, PenaltyProjectionRepository
 from app.repositories.penalties.rule import PenaltyRuleRepository
+from app.repositories.penalties.rule_extraction import (
+    ExtractedPenaltyRuleRepository,
+    RulePublicationRepository,
+)
 from app.repositories.penalties.summary import PenaltySummaryRepository
-from app.repositories.process.agent_registry import AgentRegistryRepository
+from app.repositories.process.agent_registry import AgentRegistryRepository, AgentRunRepository
 from app.repositories.process.job_queue import JobQueueRepository
-from app.services.cmir.run_service import CmirRunService
+from app.repositories.process.workflow import HumanActionRepository, WorkflowThreadRepository
+from app.services.cmir.service import CmirService
 from app.services.penalties.delivery_change import PoDeliveryChangeRequestService
 from app.services.penalties.dispute.service import DisputeResolutionService
 from app.services.penalties.dispute.summary_service import DisputeSummaryService
@@ -39,6 +45,7 @@ from app.services.penalties.mitigation.service import MitigationService
 from app.services.penalties.mitigation.summary_service import MitigationSummaryService
 from app.services.penalties.projection.service import ProjectionService
 from app.services.penalties.projection.summary_service import ProjectionSummaryService
+from app.services.penalties.rule_extraction.service import PenaltyRuleExtractionService
 from app.services.po_validation.service import PoValidationService
 from app.services.seeding.service import PenaltySeedingService
 
@@ -146,6 +153,11 @@ def get_agent_registry_repository(session: Session = Depends(get_session)) -> Ag
     return AgentRegistryRepository(session)
 
 
+def get_agent_run_repository(session: Session = Depends(get_session)) -> AgentRunRepository:
+    """Provide an agent-run repository bound to the request session."""
+    return AgentRunRepository(session)
+
+
 # ---------------------------------------------------------------------------
 # penalties: repositories
 # ---------------------------------------------------------------------------
@@ -207,6 +219,33 @@ def get_penalty_job_run_context_repository(
 ) -> PenaltyJobRunContextRepository:
     """Provide a penalty job run context repository for top-level job state."""
     return PenaltyJobRunContextRepository(session)
+
+
+def get_retailer_agreement_repository(session: Session = Depends(get_session)) -> RetailerAgreementRepository:
+    """Provide a retailer agreement repository for reading and writing retailer agreement documents."""
+    return RetailerAgreementRepository(session)
+
+
+def get_extracted_penalty_rule_repository(
+    session: Session = Depends(get_session),
+) -> ExtractedPenaltyRuleRepository:
+    """Provide an extracted penalty rule repository for the review-and-publication staging area."""
+    return ExtractedPenaltyRuleRepository(session)
+
+
+def get_rule_publication_repository(session: Session = Depends(get_session)) -> RulePublicationRepository:
+    """Provide a rule publication repository for the append-only publication audit trail."""
+    return RulePublicationRepository(session)
+
+
+def get_workflow_thread_repository(session: Session = Depends(get_session)) -> WorkflowThreadRepository:
+    """Provide a workflow thread repository bound to the request session."""
+    return WorkflowThreadRepository(session)
+
+
+def get_human_action_repository(session: Session = Depends(get_session)) -> HumanActionRepository:
+    """Provide a human action repository bound to the request session."""
+    return HumanActionRepository(session)
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +358,7 @@ def get_dispute_service(
     actual_penalties: ActualPenaltyRepository = Depends(get_actual_penalty_repository),
     rules: PenaltyRuleRepository = Depends(get_penalty_rule_repository),
     projection_service: ProjectionService = Depends(get_projection_service),
+    retailer_agreements: RetailerAgreementRepository = Depends(get_retailer_agreement_repository),
 ) -> DisputeResolutionService:
     """Provide a dispute service for opening and managing penalty disputes."""
     return DisputeResolutionService(
@@ -327,6 +367,7 @@ def get_dispute_service(
         actual_penalties=actual_penalties,
         rules=rules,
         projection_service=projection_service,
+        retailer_agreements=retailer_agreements,
     )
 
 
@@ -411,8 +452,42 @@ def get_mitigation_summary_service(
     )
 
 
+def get_penalty_rule_extraction_service(
+    session: Session = Depends(get_session),
+    retailer_agreements: RetailerAgreementRepository = Depends(get_retailer_agreement_repository),
+    extracted_rules: ExtractedPenaltyRuleRepository = Depends(get_extracted_penalty_rule_repository),
+    publications: RulePublicationRepository = Depends(get_rule_publication_repository),
+    rules: PenaltyRuleRepository = Depends(get_penalty_rule_repository),
+    agent_registry: AgentRegistryRepository = Depends(get_agent_registry_repository),
+    agent_runs: AgentRunRepository = Depends(get_agent_run_repository),
+    master_data: MasterDataRepository = Depends(get_master_data_repository),
+    workflow_threads: WorkflowThreadRepository = Depends(get_workflow_thread_repository),
+    human_actions: HumanActionRepository = Depends(get_human_action_repository),
+) -> PenaltyRuleExtractionService:
+    """Provide a penalty rule extraction service built from per-request repositories.
+
+    Only the compiled extraction graph comes from the process-wide `Container`: it is
+    expensive to compile and shares the CMIR/PO-validation checkpointer. Everything else
+    is an ordinary per-request repository, like every other penalties provider here.
+    """
+    return PenaltyRuleExtractionService(
+        retailer_agreements=retailer_agreements,
+        extracted_rules=extracted_rules,
+        publications=publications,
+        rules=rules,
+        agent_registry=agent_registry,
+        agent_runs=agent_runs,
+        master_data=master_data,
+        workflow_threads=workflow_threads,
+        human_actions=human_actions,
+        session=session,
+        graph=Container.build().rule_extraction_graph,
+    )
+
+
 def get_penalty_seeding_service(
     master_data: MasterDataRepository = Depends(get_master_data_repository),
+    retailer_agreements: RetailerAgreementRepository = Depends(get_retailer_agreement_repository),
     rules: PenaltyRuleRepository = Depends(get_penalty_rule_repository),
     purchase_orders: PurchaseOrderRepository = Depends(get_purchase_order_repository),
     fulfillment: FulfillmentRepository = Depends(get_fulfillment_repository),
@@ -435,6 +510,7 @@ def get_penalty_seeding_service(
     """Provide a penalty seeding service for populating test data and simulations."""
     return PenaltySeedingService(
         master_data=master_data,
+        retailer_agreements=retailer_agreements,
         rules=rules,
         purchase_orders=purchase_orders,
         fulfillment=fulfillment,
@@ -477,11 +553,11 @@ def _build_cmir_job_context_repositories(
     )
 
 
-def build_service() -> CmirRunService:
+def build_service() -> CmirService:
     """Build the production CMIR service from the project composition root."""
     container = Container.build()
     job_queue, job_run_context, job_item_context = _build_cmir_job_context_repositories(container)
-    return CmirRunService(
+    return CmirService(
         email_reader=container.email_reader,
         graph=container.graph,
         agent_registry=container.agent_registry,
@@ -515,7 +591,7 @@ def build_po_validation_service() -> PoValidationService:
     )
 
 
-def get_service(request: Request) -> CmirRunService:
+def get_service(request: Request) -> CmirService:
     """Return the app-instance-lifetime CMIR service singleton."""
     if request.app.state.service is None:
         request.app.state.service = build_service()

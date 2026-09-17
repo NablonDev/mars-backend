@@ -11,8 +11,10 @@ from datetime import datetime
 from app.repositories.common.fulfillment import FulfillmentRepository
 from app.repositories.common.master_data import MasterDataRepository
 from app.repositories.common.purchase_order import PurchaseOrderRepository
+from app.repositories.common.retailer_agreement import RetailerAgreementRepository
 from app.repositories.penalties.projection import ActualPenaltyRepository
 from app.repositories.penalties.rule import PenaltyRuleRepository
+from app.services.seeding.master_data import ensure_placeholder_retailer_agreement
 from app.services.seeding.scenario_data_dispute import (
     MATERIAL_CODE,
     PLANT_CODE,
@@ -21,6 +23,16 @@ from app.services.seeding.scenario_data_dispute import (
     SCENARIOS,
 )
 
+# penalty_rule.penalty_category is NOT NULL; these dispute fixtures were hand-authored
+# before extraction existed and carry no genuine extracted category, so each is mapped
+# onto the governed category matching its violation_type.
+_PENALTY_CATEGORY_BY_VIOLATION_TYPE = {
+    "SHORT_SHIP": "SHORT_SHIP",
+    "FILL_RATE": "SHORT_SHIP",
+    "OTIF_LATE": "OTIF_LATE",
+    "ASN_LATE": "OTIF_LATE",
+}
+
 
 def seed(
     rules: PenaltyRuleRepository,
@@ -28,6 +40,7 @@ def seed(
     fulfillment: FulfillmentRepository,
     master_data: MasterDataRepository,
     actual_penalties: ActualPenaltyRepository,
+    retailer_agreements: RetailerAgreementRepository,
 ) -> dict[str, int]:
     """Seed the dispute fixtures, skipping any rule or purchase order that already exists."""
     counts = {"dispute_rules": 0, "dispute_orders": 0, "dispute_actual_penalties": 0}
@@ -46,10 +59,12 @@ def seed(
             continue
         retailer = master_data.get_retailer_by_code(rule_fixture.retailer_code)
         assert retailer is not None
+        retailer_agreement_id = ensure_placeholder_retailer_agreement(retailer_agreements, retailer)
         rules.add_rule(
             rule_code=rule_fixture.rule_code,
-            retailer_id=retailer["id"],
             violation_type=rule_fixture.violation_type,
+            penalty_category=_PENALTY_CATEGORY_BY_VIOLATION_TYPE[rule_fixture.violation_type],
+            retailer_agreement_id=retailer_agreement_id,
             calc_type=rule_fixture.calc_type,
             rate=rule_fixture.rate,
             threshold_pct=rule_fixture.threshold_pct,

@@ -8,7 +8,22 @@ coverage for its own job types."""
 
 from __future__ import annotations
 
+from uuid import UUID
+
 import pytest
+
+from tests.conftest import make_retailer_agreement
+
+
+def _create_retailer_agreement(repos, retailer_id: str) -> str:
+    """Create a `retailer_agreement` via the repository layer.
+
+    Not the real `POST /penalties/retailer-agreements` endpoint: that route's dependency
+    unconditionally builds `Container`'s real Postgres-backed LangGraph checkpointer (see
+    `get_penalty_rule_extraction_service`), which this test environment can't reach.
+    `penalty_rule.retailer_agreement_id` is NOT NULL.
+    """
+    return str(make_retailer_agreement(repos, UUID(retailer_id)))
 
 
 @pytest.fixture
@@ -104,17 +119,20 @@ def test_list_job_run_items_supports_status_filter_and_pagination(client, open_p
 
 
 @pytest.fixture
-def projected_open_purchase_order(client, retailer):
+def projected_open_purchase_order(client, repos, retailer):
     """An OPEN purchase order with a persisted penalty projection --
     eligible for PENALTY_MITIGATION_BATCH, mirroring
     tests/unit/api/test_api_penalty_mitigations.py's `projected_purchase_order`
     fixture (kept local here rather than shared, since that file's fixture
     also creates its own retailer)."""
+    retailer_agreement = _create_retailer_agreement(repos, retailer["id"])
     client.post(
         "/api/v1/penalties/rules",
         json={
             "rule_code": "RULE-BATCH-MIT",
             "retailer_id": retailer["id"],
+            "retailer_agreement_id": retailer_agreement,
+            "penalty_category": "SHORT_SHIP",
             "violation_type": "SHORT_SHIP",
             "calc_type": "PER_UNIT",
             "rate": 1.0,

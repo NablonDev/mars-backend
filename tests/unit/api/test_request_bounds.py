@@ -7,6 +7,10 @@ request-model regression shows up here as a non-2xx.
 
 from __future__ import annotations
 
+from uuid import UUID
+
+from tests.conftest import make_retailer_agreement
+
 
 def test_a_full_cut_confirmation_is_still_accepted(seeded_client):
     """confirmed_quantity=0 is a real 100% shortage, not bad input -- it
@@ -26,16 +30,19 @@ def test_a_full_cut_confirmation_is_still_accepted(seeded_client):
     assert resp.status_code == 201, resp.text
 
 
-def test_an_ordered_tier_band_is_still_accepted(client):
+def test_an_ordered_tier_band_is_still_accepted(client, repos):
     retailer = client.post("/api/v1/retailers", json={"retailer_code": "RET-A", "retailer_name": "A"}).json()[
         "data"
     ]
+    retailer_agreement_id = make_retailer_agreement(repos, UUID(retailer["id"]))
 
     resp = client.post(
         "/api/v1/penalties/rules",
         json={
             "rule_code": "RULE-TIERS-OK",
             "retailer_id": retailer["id"],
+            "retailer_agreement_id": str(retailer_agreement_id),
+            "penalty_category": "SHORT_SHIP",
             "violation_type": "SHORT_SHIP",
             "calc_type": "TIERED",
             "rate": 1.0,

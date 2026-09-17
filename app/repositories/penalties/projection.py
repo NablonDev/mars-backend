@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date
 from uuid import UUID
 
@@ -10,6 +11,18 @@ from sqlalchemy.orm import Session
 
 from app.models import ActualPenalty, PenaltyProjection, PurchaseOrder, Retailer
 from app.services.penalties.projection import ProjectionResult
+
+
+@dataclass(frozen=True)
+class _ProjectionRow:
+    """One `penalty_projection` row's worth of fields, real or skipped, before insert/update."""
+
+    rule_id: str
+    violation_type: str
+    probability: float
+    penalty_amount: float
+    expected_penalty_amount: float
+    skip_reason: str | None
 
 
 def _projection_to_dict(row: PenaltyProjection) -> dict:
@@ -25,6 +38,7 @@ def _projection_to_dict(row: PenaltyProjection) -> dict:
         "expected_penalty_amount": float(row.expected_penalty_amount),
         "days_to_delivery": row.days_to_delivery,
         "projection_status": row.projection_status,
+        "skip_reason": row.skip_reason,
     }
 
 
@@ -38,6 +52,7 @@ def _actual_penalty_to_dict(row: ActualPenalty) -> dict:
         "actual_penalty_amount": float(row.actual_penalty_amount),
         "invoice_or_deduction_date": row.invoice_or_deduction_date,
         "dispute_status": row.dispute_status,
+        "claim_facts": row.claim_facts,
     }
 
 
@@ -52,39 +67,24 @@ class PenaltyProjectionRepository:
         self._session = session
 
     def save_result(self, purchase_order_id: UUID, result: ProjectionResult) -> dict[str, UUID]:
-        """Persist violations as penalty_projection rows, keyed by rule_id."""
-        rows_by_rule_id: list[tuple[str, PenaltyProjection]] = []
-        for v in result.violations:
-            rule_id = v.rule_id if isinstance(v.rule_id, UUID) else UUID(v.rule_id)
-            existing = self._session.scalars(
-                select(PenaltyProjection).where(
-                    PenaltyProjection.purchase_order_id == purchase_order_id,
-                    PenaltyProjection.rule_id == rule_id,
-                    PenaltyProjection.projection_date == result.projection_date,
-                )
-            ).first()
+        """Persist violations and skipped rules as penalty_projection rows, keyed by rule_id.
 
-            if existing is not None:
-                existing.violation_type = v.violation_type
-                existing.failure_probability = v.probability
-                existing.penalty_amount = v.penalty_amount
-                existing.expected_penalty_amount = v.expected_penalty_amount
-                existing.days_to_delivery = result.days_to_delivery
-                existing.projection_status = "OPEN"
-                row = existing
-            else:
-                row = PenaltyProjection(
-                    purchase_order_id=purchase_order_id,
-                    rule_id=rule_id,
-                    projection_date=result.projection_date,
-                    violation_type=v.violation_type,
-                    failure_probability=v.probability,
-                    penalty_amount=v.penalty_amount,
-                    expected_penalty_amount=v.expected_penalty_amount,
-                    days_to_delivery=result.days_to_delivery,
-                    projection_status="OPEN",
-                )
-                self._session.add(row)
+        A skipped rule (`result.skipped`) writes a zero-amount row carrying `skip_reason`,
+        so a rule this run's engine could not price still shows up rather than vanishing.
+        """
+        entries = [
+            _ProjectionRow(
+                v.rule_id, v.violation_type, v.probability, v.penalty_amount, v.expected_penalty_amount, None
+            )
+            for v in result.violations
+        ] + [
+            _ProjectionRow(s.rule_id, s.violation_type, 0.0, 0.0, 0.0, s.skip_reason) for s in result.skipped
+        ]
+
+        rows_by_rule_id: list[tuple[str, PenaltyProjection]] = []
+        for entry in entries:
+            rule_id = entry.rule_id if isinstance(entry.rule_id, UUID) else UUID(entry.rule_id)
+            row = self._upsert(purchase_order_id, rule_id, result, entry)
             rows_by_rule_id.append((str(rule_id), row))
         self._session.flush()
         return {rule_id_str: row.id for rule_id_str, row in rows_by_rule_id}
@@ -143,20 +143,6 @@ class PenaltyProjectionRepository:
         """Return the full, unfiltered projection history for one PO."""
         return self.list_projections(purchase_order_id=purchase_order_id)
 
-    def _get_stacking_mode(self, purchase_order_id: UUID) -> str:
-        """Resolve a purchase order's retailer `stacking_mode`, falling back to SUM.
-
-        Joined here rather than composed from `PurchaseOrderRepository` and
-        `MasterDataRepository` because no repository in this codebase depends on
-        another.
-        """
-        stacking_mode = self._session.scalars(
-            select(Retailer.stacking_mode)
-            .join(PurchaseOrder, PurchaseOrder.retailer_id == Retailer.id)
-            .where(PurchaseOrder.id == purchase_order_id)
-        ).first()
-        return stacking_mode or "SUM"
-
     def get_latest(self, purchase_order_id: UUID) -> dict | None:
         """Fetch latest projection for a PO with stacking totals applied, or None if none exist."""
         history = self.list_history(purchase_order_id)
@@ -183,6 +169,57 @@ class PenaltyProjectionRepository:
         """Delete every projection; must run before the purchase-order and rule truncates."""
         self._session.execute(delete(PenaltyProjection))
         self._session.flush()
+
+    def _upsert(
+            self, purchase_order_id: UUID, rule_id: UUID, result: ProjectionResult, entry: _ProjectionRow
+        ) -> PenaltyProjection:
+        """Insert or replace one `penalty_projection` row for one (PO, rule, projection_date)."""
+        existing = self._session.scalars(
+            select(PenaltyProjection).where(
+                PenaltyProjection.purchase_order_id == purchase_order_id,
+                PenaltyProjection.rule_id == rule_id,
+                PenaltyProjection.projection_date == result.projection_date,
+            )
+        ).first()
+
+        if existing is not None:
+            existing.violation_type = entry.violation_type
+            existing.failure_probability = entry.probability
+            existing.penalty_amount = entry.penalty_amount
+            existing.expected_penalty_amount = entry.expected_penalty_amount
+            existing.days_to_delivery = result.days_to_delivery
+            existing.projection_status = "OPEN"
+            existing.skip_reason = entry.skip_reason
+            return existing
+
+        row = PenaltyProjection(
+            purchase_order_id=purchase_order_id,
+            rule_id=rule_id,
+            projection_date=result.projection_date,
+            violation_type=entry.violation_type,
+            failure_probability=entry.probability,
+            penalty_amount=entry.penalty_amount,
+            expected_penalty_amount=entry.expected_penalty_amount,
+            days_to_delivery=result.days_to_delivery,
+            projection_status="OPEN",
+            skip_reason=entry.skip_reason,
+        )
+        self._session.add(row)
+        return row
+    
+    def _get_stacking_mode(self, purchase_order_id: UUID) -> str:
+        """Resolve a purchase order's retailer `stacking_mode`, falling back to SUM.
+
+        Joined here rather than composed from `PurchaseOrderRepository` and
+        `MasterDataRepository` because no repository in this codebase depends on
+        another.
+        """
+        stacking_mode = self._session.scalars(
+            select(Retailer.stacking_mode)
+            .join(PurchaseOrder, PurchaseOrder.retailer_id == Retailer.id)
+            .where(PurchaseOrder.id == purchase_order_id)
+        ).first()
+        return stacking_mode or "SUM"
 
 
 class ActualPenaltyRepository:
@@ -225,6 +262,21 @@ class ActualPenaltyRepository:
         """Fetch one `actual_penalty` row by its surrogate id, or None."""
         row = self._session.get(ActualPenalty, actual_penalty_id)
         return _actual_penalty_to_dict(row) if row is not None else None
+
+    def set_claim_facts(self, actual_penalty_id: UUID, claim_facts: dict) -> dict:
+        """Write `claim_facts` once; raises `ValueError` if already set or the id is unknown.
+
+        Write-once by design: a corrected charge needs a new `actual_penalty` row and a
+        new dispute cycle, never a second write to this column on the same row.
+        """
+        row = self._session.get(ActualPenalty, actual_penalty_id)
+        if row is None:
+            raise ValueError(f"No actual_penalty found with id={actual_penalty_id!r}")
+        if row.claim_facts is not None:
+            raise ValueError(f"claim_facts already set for actual_penalty_id={actual_penalty_id!r}")
+        row.claim_facts = claim_facts
+        self._session.flush()
+        return _actual_penalty_to_dict(row)
 
     def list_actual_penalties(self, purchase_order_id: UUID | None = None) -> list[dict]:
         """List actual penalties for one PO, or across all POs when the filter is omitted."""

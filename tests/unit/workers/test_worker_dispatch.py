@@ -39,6 +39,7 @@ from app.models.enums import SummaryType
 from app.queue.types import ClaimedJob
 from app.repositories.common.master_data import MasterDataRepository
 from app.repositories.common.purchase_order import PurchaseOrderRepository
+from app.repositories.common.retailer_agreement import RetailerAgreementRepository
 from app.repositories.penalties.job_context import PenaltyJobItemContextRepository
 from app.repositories.penalties.mitigation import MitigationOptionRepository
 from app.repositories.penalties.projection import PenaltyProjectionRepository
@@ -97,10 +98,17 @@ def _seed_purchase_order(database: Database, po_number: str, *, with_rules: bool
             plant_id=plant["id"],
         )
         if with_rules:
+            retailer_agreement = RetailerAgreementRepository(session).add_retailer_agreement(
+                retailer_id=retailer["id"],
+                contract_code=f"TEST-{po_number}",
+                title="Test retailer agreement",
+                document_sha256="0" * 64,
+            )
             rules.add_rule(
                 rule_code=f"RULE-{po_number}-FLAT",
-                retailer_id=retailer["id"],
                 violation_type="OTIF_LATE",
+                penalty_category="OTIF_LATE",
+                retailer_agreement_id=retailer_agreement["id"],
                 calc_type="FLAT_FEE",
                 rate=50.0,
             )

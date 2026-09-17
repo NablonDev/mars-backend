@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from app.core.exceptions import BusinessRuleError, ConflictError, NotFoundError, ValidationError
 from app.repositories.common.delivery_change_request import PoDeliveryChangeRequestRepository
@@ -18,18 +18,9 @@ from app.repositories.common.master_data import MasterDataRepository
 from app.repositories.common.purchase_order import PurchaseOrderRepository
 from app.services.penalties.projection.service import ProjectionService
 from app.utils.clock import utc_now_naive
+from app.utils.ids import new_id
 
 _TERMINAL_DECISIONS = {"ACCEPTED", "COUNTERED", "REJECTED"}
-
-
-def _utcnow() -> datetime:
-    """Naive UTC, matching this table's naive DateTime columns."""
-    return utc_now_naive()
-
-
-def _new_request_id() -> str:
-    """Generate an external-system correlation key so every request gets one regardless of entry point."""
-    return f"ext_{uuid4().hex[:12]}"
 
 
 @dataclass
@@ -68,7 +59,7 @@ class PoDeliveryChangeRequestService:
 
         policy = self.master_data.get_extension_policy(purchase_order["retailer_id"])
 
-        now = now or _utcnow()
+        now = now or utc_now_naive()
         current_required_ship_date = (
             purchase_order["current_required_ship_date"] or purchase_order["required_ship_date"]
         )
@@ -94,7 +85,9 @@ class PoDeliveryChangeRequestService:
             baseline_delivery_date=baseline_delivery_date,
             proposed_delivery_date=proposed_delivery_date,
             expires_at=now + timedelta(hours=policy["response_sla_hours"]),
-            request_id=_new_request_id(),
+            # "ext" prefix: an external-system correlation key, generated here so every
+            # request gets one regardless of entry point.
+            request_id=new_id("ext"),
             notes=notes,
         )
         self.purchase_orders.update_negotiation_status(purchase_order_id, "PENDING")
@@ -152,7 +145,7 @@ class PoDeliveryChangeRequestService:
                 message="countered_delivery_date is only valid when decision=COUNTERED",
             )
 
-        now = now or _utcnow()
+        now = now or utc_now_naive()
         updated = self.delivery_change_requests.record_response(
             delivery_change_request_id=delivery_change_request_id,
             status=decision,
@@ -194,7 +187,7 @@ class PoDeliveryChangeRequestService:
         unchanged delivery date (current_delivery_date was never touched while PENDING).
         Returns list of newly expired rows. Idempotent: subsequent calls find no newly
         expired rows and return empty list."""
-        resolved_as_of = as_of or _utcnow()
+        resolved_as_of = as_of or utc_now_naive()
         expired = self.delivery_change_requests.find_expired(resolved_as_of)
 
         results = []

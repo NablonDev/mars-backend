@@ -34,7 +34,16 @@ from app.schemas.common.master_data import (
 router = APIRouter(tags=["master-data"])
 
 
-@router.post("/retailers", response_model=Envelope[RetailerResponse], status_code=status.HTTP_201_CREATED)
+# ---------------------------------------------------------------------------
+# Retailers and retailer-owned locations
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/retailers",
+    response_model=Envelope[RetailerResponse],
+    status_code=status.HTTP_201_CREATED,
+)
 def create_retailer(
     body: RetailerRequest,
     master_data: MasterDataRepository = Depends(get_master_data_repository),
@@ -68,7 +77,10 @@ def create_retailer_location(
     return success_envelope(RetailerLocationResponse.model_validate(created), message="Location created.")
 
 
-@router.get("/retailers/{retailer_id}/locations", response_model=Envelope[list[RetailerLocationResponse]])
+@router.get(
+    "/retailers/{retailer_id}/locations",
+    response_model=Envelope[list[RetailerLocationResponse]],
+)
 def list_retailer_locations(
     retailer_id: UUID,
     master_data: MasterDataRepository = Depends(get_master_data_repository),
@@ -80,7 +92,16 @@ def list_retailer_locations(
     return success_envelope(rows)
 
 
-@router.post("/skus", response_model=Envelope[SkuResponse], status_code=status.HTTP_201_CREATED)
+# ---------------------------------------------------------------------------
+# SKUs, materials, material-masters, plants, and carriers
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/skus",
+    response_model=Envelope[SkuResponse],
+    status_code=status.HTTP_201_CREATED,
+)
 def create_sku(
     body: SkuRequest,
     master_data: MasterDataRepository = Depends(get_master_data_repository),
@@ -99,7 +120,11 @@ def list_skus(
     return success_envelope(rows)
 
 
-@router.post("/materials", response_model=Envelope[MaterialResponse], status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/materials",
+    response_model=Envelope[MaterialResponse],
+    status_code=status.HTTP_201_CREATED,
+)
 def create_material(
     body: MaterialRequest,
     master_data: MasterDataRepository = Depends(get_master_data_repository),
@@ -143,7 +168,11 @@ def list_material_masters(
     return success_envelope(rows)
 
 
-@router.post("/plants", response_model=Envelope[PlantResponse], status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/plants",
+    response_model=Envelope[PlantResponse],
+    status_code=status.HTTP_201_CREATED,
+)
 def create_plant(
     body: PlantRequest,
     master_data: MasterDataRepository = Depends(get_master_data_repository),
@@ -162,7 +191,11 @@ def list_plants(
     return success_envelope(rows)
 
 
-@router.post("/carriers", response_model=Envelope[CarrierResponse], status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/carriers",
+    response_model=Envelope[CarrierResponse],
+    status_code=status.HTTP_201_CREATED,
+)
 def create_carrier(
     body: CarrierRequest,
     master_data: MasterDataRepository = Depends(get_master_data_repository),

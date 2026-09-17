@@ -1,6 +1,10 @@
 """Orchestrates shortage and delay calculations into an order projection."""
 
-from app.services.penalties.projection.delay import compute_delay_probability, price_delay_penalty
+from app.services.penalties.projection.delay import (
+    compute_days_late,
+    compute_delay_probability,
+    price_delay_penalty,
+)
 from app.services.penalties.projection.shortage import (
     compute_shortage_probability,
     price_shortage_penalty,
@@ -12,8 +16,15 @@ from app.services.penalties.projection.types import (
     OrderSnapshot,
     PenaltyRule,
     ProjectionResult,
+    SkippedRuleProjection,
     ViolationProjection,
 )
+
+# Recorded on a `SkippedRuleProjection`/`penalty_projection.skip_reason` for a rule whose
+# violation_type this engine has no pricing model for. Not the same failure as
+# extraction-time UNMAPPED_VIOLATION_TYPE: this rule published successfully and carries a
+# real violation_type, projection/mitigation just do not select its family yet.
+NOT_ENGINE_PRICEABLE = "NOT_ENGINE_PRICEABLE"
 
 
 class ProjectionEngine:
@@ -31,14 +42,19 @@ class ProjectionEngine:
 
         Each rule's expected penalty is its probability times its priced amount;
         `stacking_mode` combines those additively (SUM) or keeps the most severe
-        (MAX). Raises ValueError on an unmapped violation_type or an unknown
-        stacking mode.
+        (MAX). A rule whose violation_type is neither shortage- nor delay-shaped is
+        skipped rather than raised on: it is recorded on `ProjectionResult.skipped`
+        instead of contributing to `violations` or the stacked total, so a
+        mis-tagged or not-yet-priceable rule never disappears from a retailer's
+        exposure without a trace. Raises ValueError only on an unknown stacking mode.
         """
         shortage_prob = compute_shortage_probability(snapshot)
         delay_prob = compute_delay_probability(snapshot)
         shortfall_units = shortfall_units_for_pricing(snapshot)
+        days_late = compute_days_late(snapshot)
 
         violations: list[ViolationProjection] = []
+        skipped: list[SkippedRuleProjection] = []
 
         for rule in rules:
             if rule.violation_type in SHORTAGE_VIOLATION_TYPES:
@@ -48,12 +64,16 @@ class ProjectionEngine:
                 )
             elif rule.violation_type in DELAY_VIOLATION_TYPES:
                 probability = delay_prob
-                penalty_amount = price_delay_penalty(rule, snapshot.order_qty, snapshot.unit_price)
+                penalty_amount = price_delay_penalty(rule, snapshot.order_qty, snapshot.unit_price, days_late)
             else:
-                raise ValueError(
-                    f"Rule {rule.rule_id} has violation_type '{rule.violation_type}' "
-                    "not mapped to either SHORTAGE_VIOLATION_TYPES or DELAY_VIOLATION_TYPES"
+                skipped.append(
+                    SkippedRuleProjection(
+                        violation_type=rule.violation_type,
+                        rule_id=rule.rule_id,
+                        skip_reason=NOT_ENGINE_PRICEABLE,
+                    )
                 )
+                continue
 
             expected = probability * penalty_amount
             violations.append(
@@ -84,4 +104,5 @@ class ProjectionEngine:
             violations=violations,
             total_expected_penalty_amount=round(total, 2),
             stacking_mode=stacking_mode,
+            skipped=skipped,
         )

@@ -10,7 +10,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models import Agent, AgentRun, AgentTrace
-from app.utils.pagination import parse_cursor
+from app.utils.pagination import next_cursor_from_page, parse_cursor
+from app.utils.sanitize import strip_nul_bytes
 
 
 def _agent_to_dict(row: Agent) -> dict:
@@ -151,19 +152,26 @@ class AgentRunRepository:
         error: str | None = None,
         completed: bool = False,
     ) -> None:
-        """Update an agent run's status, optionally recording an error and/or stamping `completed_at`."""
+        """Update an agent run's status, optionally recording an error and/or stamping `completed_at`.
+
+        Wrapped in its own savepoint: this session backs CMIR, PO-validation, and
+        rule-extraction runs simultaneously (`app/core/container.py`), so a write failure
+        here (for example a NUL byte in `error`) must roll back only this update, not
+        every other run's uncommitted work on the same shared session.
+        """
         row = self._session.get(AgentRun, run_id)
         if row is None:
             return
 
         row.status = status
         if error is not None:
-            row.error = error
+            row.error = strip_nul_bytes(error)
         if completed:
             from sqlalchemy import func
 
             row.completed_at = func.now()
-        self._session.flush()
+        with self._session.begin_nested():
+            self._session.flush()
 
     def get(self, run_id: UUID) -> dict | None:
         """Return the agent run `run_id`, or None if it doesn't exist."""
@@ -202,7 +210,7 @@ class AgentRunRepository:
 
         rows = self._session.scalars(stmt).all()
         items = [_agent_run_to_dict(r) for r in rows]
-        next_cursor = items[-1]["updated_at"].isoformat() if len(items) == limit and items else None
+        next_cursor = next_cursor_from_page(items, limit)
         return items, next_cursor
 
 
@@ -224,7 +232,15 @@ class AgentTraceRepository:
         output_snapshot: dict[str, Any] | None,
         error: str | None,
     ) -> dict:
-        """Record one LangGraph node execution for an agent run."""
+        """Record one LangGraph node execution for an agent run.
+
+        The insert runs inside its own savepoint, not the bare session: this session
+        backs CMIR, PO-validation, and rule-extraction runs simultaneously (see
+        `app/core/container.py`), so a write failure here (a NUL byte in a snapshot or
+        error field raises ValueError client-side or an invalid-byte-sequence error
+        server-side) must roll back only this trace insert, not a different concurrent
+        run's uncommitted work on the same shared session.
+        """
         row = AgentTrace(
             agent_run_id=agent_run_id,
             node_name=node_name,
@@ -236,8 +252,9 @@ class AgentTraceRepository:
             output_snapshot=output_snapshot,
             error=error,
         )
-        self._session.add(row)
-        self._session.flush()
+        with self._session.begin_nested():
+            self._session.add(row)
+            self._session.flush()
         return _agent_trace_to_dict(row)
 
     def list_for_run(self, agent_run_id: UUID) -> list[dict]:

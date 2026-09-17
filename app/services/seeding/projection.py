@@ -10,10 +10,12 @@ from app.core.exceptions import NotFoundError
 from app.repositories.common.fulfillment import FulfillmentRepository
 from app.repositories.common.master_data import MasterDataRepository
 from app.repositories.common.purchase_order import PurchaseOrderRepository
+from app.repositories.common.retailer_agreement import RetailerAgreementRepository
 from app.repositories.penalties.rule import PenaltyRuleRepository
 from app.services.penalties.delivery_change import PoDeliveryChangeRequestService
 from app.services.penalties.projection import DELAY_VIOLATION_TYPES, SHORTAGE_VIOLATION_TYPES, PenaltyRule
 from app.services.penalties.projection.service import ProjectionService
+from app.services.seeding.master_data import ensure_placeholder_retailer_agreement
 from app.services.seeding.scenario_data_projection import (
     AMZ_RULES,
     WMT_RULES,
@@ -31,18 +33,28 @@ _SOURCE_DOC_REFERENCE = {
     "RULE-AMZ-FILL": "Amazon Vendor Central Chargeback Policy (mock)",
     "RULE-AMZ-OTIF": "Amazon Vendor Central Chargeback Policy (mock)",
 }
+# penalty_rule.penalty_category is NOT NULL; these worked-example rules were hand-authored
+# before extraction existed and carry no genuine extracted category, so each is mapped onto
+# the governed category matching its violation_type.
+_PENALTY_CATEGORY_BY_VIOLATION_TYPE = {
+    "SHORT_SHIP": "SHORT_SHIP",
+    "FILL_RATE": "SHORT_SHIP",
+    "OTIF_LATE": "OTIF_LATE",
+    "ASN_LATE": "OTIF_LATE",
+}
 
 
 def _rule_to_seed_dict(rule: PenaltyRule, retailer_code: str) -> dict[str, Any]:
     """Convert a canonical `WMT_RULES`/`AMZ_RULES` rule into `add_rule` kwargs.
 
     Reusing the objects the pure-engine tests assert against keeps seed data and
-    validated test numbers in step. `retailer_id` is resolved at `seed()` time.
+    validated test numbers in step. `retailer_agreement_id` is resolved at `seed()` time.
     """
     return {
         "rule_code": rule.rule_id,
         "retailer_code": retailer_code,
         "violation_type": rule.violation_type,
+        "penalty_category": _PENALTY_CATEGORY_BY_VIOLATION_TYPE[rule.violation_type],
         "calc_type": rule.calc_type.value,
         "rate": rule.rate,
         "threshold_pct": rule.threshold_pct,
@@ -289,6 +301,7 @@ def seed(
     purchase_orders: PurchaseOrderRepository,
     fulfillment: FulfillmentRepository,
     master_data: MasterDataRepository,
+    retailer_agreements: RetailerAgreementRepository,
 ) -> dict[str, int]:
     """Seed rules and worked-example orders, skipping any that already exist."""
     counts = {"rules": 0, "orders": 0}
@@ -301,8 +314,9 @@ def seed(
             assert retailer is not None, (
                 f"Unknown retailer_code={retailer_code!r}. Call seed_master_data() first."
             )
+            retailer_agreement_id = ensure_placeholder_retailer_agreement(retailer_agreements, retailer)
             fields = {k: v for k, v in rule_dict.items() if k != "retailer_code"}
-            rules.add_rule(retailer_id=retailer["id"], **fields)
+            rules.add_rule(retailer_agreement_id=retailer_agreement_id, **fields)
             counts["rules"] += 1
 
     offset = calendar_offset()

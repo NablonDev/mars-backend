@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, status
 
 from app.api.dependencies import get_service
 from app.core.envelope import Envelope, success_envelope
 from app.core.exceptions import ValidationError
 from app.schemas.cmir.email_events import IngestEmailEventsRequest, IngestEmailEventsResponse
-from app.services.cmir.run_service import CmirRunService
+from app.services.cmir.service import CmirService
 
 router = APIRouter(tags=["cmir"])
 
@@ -16,11 +16,11 @@ router = APIRouter(tags=["cmir"])
 @router.post(
     "/cmir/email-events",
     response_model=Envelope[IngestEmailEventsResponse],
-    status_code=202,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 def start_email_ingest(
     body: IngestEmailEventsRequest,
-    run_service: CmirRunService = Depends(get_service),
+    run_service: CmirService = Depends(get_service),
 ) -> Envelope[IngestEmailEventsResponse]:
     """Start email ingestion from Gmail.
 

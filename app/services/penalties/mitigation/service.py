@@ -1,5 +1,7 @@
 """Orchestrates one mitigation-ranking run.
 
+Entry points: run_for_purchase_order (POST /api/v1/penalties/mitigations).
+
 Reloads the purchase order's already-persisted projection for the day, loads
 cause and cost inputs, runs the pure engine, persists the ranked options, and
 returns the result.
@@ -49,6 +51,9 @@ def _build_projection_result(
     LLM-context shape, but needs a Pydantic context row rather than the
     dataclass, so the two are kept independent.
     """
+    # Skip-recorded rows (`skip_reason` set) are not real violations; excluding them here
+    # keeps a not-yet-engine-priceable rule from being re-run through mitigation as if it
+    # were a priced baseline.
     violations = [
         ViolationProjection(
             violation_type=row["violation_type"],
@@ -58,6 +63,7 @@ def _build_projection_result(
             expected_penalty_amount=row["expected_penalty_amount"],
         )
         for row in day_rows
+        if not row.get("skip_reason")
     ]
 
     if stacking_mode == "MAX":

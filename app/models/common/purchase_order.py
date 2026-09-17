@@ -3,7 +3,7 @@
 from datetime import date
 from uuid import UUID
 
-from sqlalchemy import Date, ForeignKey, Numeric, String, UniqueConstraint
+from sqlalchemy import Date, ForeignKey, Index, Numeric, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import JSONB_OR_JSON, UUID_PK, Base, TimestampMixin, generate_uuid7
@@ -18,6 +18,9 @@ class PurchaseOrder(Base, TimestampMixin):
     """
 
     __tablename__ = "purchase_order"
+    __table_args__ = (
+        Index("ix_purchase_order_retailer_order_date", "retailer_id", "order_date"),
+    )
 
     id: Mapped[UUID] = mapped_column(UUID_PK, primary_key=True, default=generate_uuid7)
     purchase_order_number: Mapped[str] = mapped_column(String(50), unique=True, index=True)

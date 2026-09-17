@@ -3,11 +3,10 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import DateTime, ForeignKey, String, Text
+from sqlalchemy import DateTime, ForeignKey, Index, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import (
-    CMIR_SCHEMA,
     JSONB_OR_JSON,
     PROCESS_SCHEMA,
     UUID_PK,
@@ -40,17 +39,21 @@ class WorkflowThread(Base, TimestampMixin):
 
 
 class WorkflowThreadSubject(Base, TimestampMixin):
-    """1:1 subtype/extension of WorkflowThread with two nullable typed FKs."""
+    """1:1 subtype/extension of WorkflowThread, polymorphic on `subject_type`/`subject_id`.
+
+    `subject_id` carries no DB-level foreign key: the referenced table depends on
+    `subject_type` (see `WorkflowThreadSubjectType`), so referential correctness here
+    is the application's responsibility, not Postgres's.
+    """
 
     __tablename__ = "workflow_thread_subject"
-    __table_args__ = ({"schema": PROCESS_SCHEMA},)
+    __table_args__ = (
+        Index("ix_workflow_thread_subject_subject_type_subject_id", "subject_type", "subject_id"),
+        {"schema": PROCESS_SCHEMA},
+    )
 
     workflow_thread_id: Mapped[UUID] = mapped_column(
         UUID_PK, ForeignKey(f"{PROCESS_SCHEMA}.workflow_thread.id"), primary_key=True
     )
-    email_event_id: Mapped[UUID | None] = mapped_column(
-        UUID_PK, ForeignKey(f"{CMIR_SCHEMA}.email_event.id"), nullable=True
-    )
-    purchase_order_line_id: Mapped[UUID | None] = mapped_column(
-        UUID_PK, ForeignKey("purchase_order_line.id"), nullable=True
-    )
+    subject_type: Mapped[str] = mapped_column(String(30))
+    subject_id: Mapped[UUID] = mapped_column(UUID_PK)

@@ -35,6 +35,7 @@ def dispute_fixture(database) -> dict:
     from app.repositories.common.fulfillment import FulfillmentRepository
     from app.repositories.common.master_data import MasterDataRepository
     from app.repositories.common.purchase_order import PurchaseOrderRepository
+    from app.repositories.common.retailer_agreement import RetailerAgreementRepository
     from app.repositories.penalties.projection import ActualPenaltyRepository
     from app.repositories.penalties.rule import PenaltyRuleRepository
 
@@ -44,14 +45,22 @@ def dispute_fixture(database) -> dict:
         fulfillment = FulfillmentRepository(session)
         rules = PenaltyRuleRepository(session)
         actual_penalties = ActualPenaltyRepository(session)
+        retailer_agreements = RetailerAgreementRepository(session)
 
         retailer = master_data.add_retailer("RET-API-DSP", "API Dispute Retailer", None, "SUM")
         material = master_data.add_material("MAT-API-DSP", None)
         plant = master_data.add_plant("PLANT-API-DSP", None, None)
+        retailer_agreement = retailer_agreements.add_retailer_agreement(
+            retailer_id=retailer["id"],
+            contract_code="TEST-API-DSP",
+            title="Test retailer agreement",
+            document_sha256="0" * 64,
+        )
         rules.add_rule(
             rule_code="RULE-API-DSP",
-            retailer_id=retailer["id"],
             violation_type="SHORT_SHIP",
+            penalty_category="SHORT_SHIP",
+            retailer_agreement_id=retailer_agreement["id"],
             calc_type="PER_UNIT",
             rate=5.0,
             effective_start_date=date(2026, 1, 1),
@@ -117,6 +126,50 @@ def test_open_list_get_dispute(client, dispute_fixture):
     fetched = client.get(f"/api/v1/penalties/disputes/{dispute_id}")
     assert fetched.status_code == 200
     assert fetched.json()["data"]["id"] == dispute_id
+
+
+def test_open_dispute_accepts_valid_claim_facts(client, dispute_fixture):
+    resp = client.post(
+        "/api/v1/penalties/disputes",
+        json={
+            "actual_penalty_id": dispute_fixture["actual_penalty_id"],
+            "reason_code": "AMOUNT_INCORRECT",
+            "claimed_amount": 80.0,
+            "claim_facts": {"defect_units": 12},
+        },
+    )
+    assert resp.status_code == 201, resp.text
+
+
+def test_open_dispute_rejects_out_of_bounds_claim_facts(client, dispute_fixture):
+    """Fail closed at the Pydantic layer: claim_facts is attacker-controlled input that
+    directly drives a monetary verdict, so an out-of-range value never reaches the handler."""
+    resp = client.post(
+        "/api/v1/penalties/disputes",
+        json={
+            "actual_penalty_id": dispute_fixture["actual_penalty_id"],
+            "reason_code": "AMOUNT_INCORRECT",
+            "claimed_amount": 80.0,
+            "claim_facts": {"defect_rate_pct": 1.5},  # a rate, must be within [0, 1]
+        },
+    )
+    assert resp.status_code == 422
+
+
+def test_open_dispute_rejects_mars_derived_field_in_claim_facts(client, dispute_fixture):
+    """`ClaimFacts.model_config = ConfigDict(extra="forbid")` structurally enforces the
+    claim-supplied/Mars-derived boundary: a Mars-derived field name can never enter
+    claim_facts through this schema, even under a plausible-looking value."""
+    resp = client.post(
+        "/api/v1/penalties/disputes",
+        json={
+            "actual_penalty_id": dispute_fixture["actual_penalty_id"],
+            "reason_code": "AMOUNT_INCORRECT",
+            "claimed_amount": 80.0,
+            "claim_facts": {"actual_purchase_quantity": 999999.0},
+        },
+    )
+    assert resp.status_code == 422
 
 
 def test_open_dispute_unknown_actual_penalty_returns_404(client):

@@ -172,6 +172,11 @@ class MasterDataRepository:
         self._session.flush()
         return _retailer_to_dict(row)
 
+    def get_retailer(self, retailer_id: UUID) -> dict | None:
+        """Fetch a retailer by its surrogate id, or None if not found."""
+        row = self._get_retailer_row(retailer_id)
+        return _retailer_to_dict(row) if row is not None else None
+
     def get_retailer_by_code(self, retailer_code: str) -> dict | None:
         """Fetch a retailer by its natural key `retailer_code`, or None if not found."""
         row = self._session.scalars(select(Retailer).where(Retailer.retailer_code == retailer_code)).first()

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import (
@@ -63,7 +63,11 @@ def _execution_note(job_queue_backend: str) -> str:
     )
 
 
-@router.post("/job-runs", response_model=Envelope[JobRunResponse], status_code=202)
+@router.post(
+    "/job-runs",
+    response_model=Envelope[JobRunResponse],
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def trigger_job_run(
     body: JobRunRequest,
     session: Session = Depends(get_session),
@@ -429,7 +433,10 @@ def get_job_run_status(
     )
 
 
-@router.get("/job-runs/{job_run_id}/items", response_model=Envelope[JobItemListResponse])
+@router.get(
+    "/job-runs/{job_run_id}/items",
+    response_model=Envelope[JobItemListResponse],
+)
 def list_job_run_items(
     job_run_id: UUID,
     status: JobItemStatus | None = Query(default=None),

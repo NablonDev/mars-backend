@@ -8,10 +8,10 @@ from pydantic import BaseModel, Field
 
 
 class TierBand(BaseModel):
-    """One rate tier of a tiered penalty rule, keyed by band boundaries."""
+    """One rate tier of a tiered penalty rule, keyed by band boundaries. `band_max=None` means unbounded."""
 
     band_min: float
-    band_max: float
+    band_max: float | None
     rate: float
 
 

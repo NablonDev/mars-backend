@@ -6,7 +6,7 @@ from uuid import UUID
 from sqlalchemy import Date, ForeignKey, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import PENALTIES_SCHEMA, UUID_PK, Base, TimestampMixin, generate_uuid7
+from app.db.base import JSONB_OR_JSON, PENALTIES_SCHEMA, UUID_PK, Base, TimestampMixin, generate_uuid7
 
 
 class ActualPenalty(Base, TimestampMixin):
@@ -25,3 +25,4 @@ class ActualPenalty(Base, TimestampMixin):
     actual_penalty_amount: Mapped[float] = mapped_column(Numeric(12, 2))
     invoice_or_deduction_date: Mapped[date] = mapped_column(Date)
     dispute_status: Mapped[str] = mapped_column(String(50), default="NONE")  # NONE/DISPUTED/WAIVED/UPHELD
+    claim_facts: Mapped[dict | None] = mapped_column(JSONB_OR_JSON, nullable=True)

@@ -39,3 +39,8 @@ Thumbs.db
 
 # Local
 .claude/
+.agents/
+.agent/
+AGENTS.md
+CLAUDE.md
+PROGRESS.md

@@ -14,6 +14,7 @@ from app.core.exceptions import ValidationError
 from app.models import DemandException, OrderConfirmation, ProductionSchedule, Retailer, Shipment
 from app.models.penalties.rule import PenaltyRuleTier
 from app.services.penalties.projection import CalcType
+from tests.conftest import make_retailer_agreement
 
 
 def test_tiered_rule_loads_its_bands(repos, db_session):
@@ -23,8 +24,9 @@ def test_tiered_rule_loads_its_bands(repos, db_session):
 
     rule = repos.penalty_rules.add_rule(
         rule_code="RULE-TIERED",
-        retailer_id=retailer.id,
         violation_type="FILL_RATE",
+        penalty_category="SHORT_SHIP",
+        retailer_agreement_id=make_retailer_agreement(repos, retailer.id),
         calc_type="TIERED",
         rate=0.0,
         threshold_pct=0.0,
@@ -52,8 +54,9 @@ def test_unrecognized_calc_type_raises_invalid_penalty_rule_data_error(repos, db
 
     repos.penalty_rules.add_rule(
         rule_code="RULE-BAD",
-        retailer_id=retailer.id,
         violation_type="SHORT_SHIP",
+        penalty_category="SHORT_SHIP",
+        retailer_agreement_id=make_retailer_agreement(repos, retailer.id),
         calc_type="NOT_A_REAL_CALC_TYPE",
         rate=1.0,
     )
@@ -66,8 +69,9 @@ def test_add_rule_via_repository_persists_tiers(repos):
     retailer = repos.master_data.add_retailer("RET-Z", "Retailer Z", None, "SUM")
     repos.penalty_rules.add_rule(
         rule_code="RULE-Z",
-        retailer_id=retailer["id"],
         violation_type="FILL_RATE",
+        penalty_category="SHORT_SHIP",
+        retailer_agreement_id=make_retailer_agreement(repos, retailer["id"]),
         calc_type="TIERED",
         rate=0.0,
         threshold_pct=0.0,
@@ -90,8 +94,9 @@ def test_tier_code_is_generated_from_position(repos, db_session):
     retailer = repos.master_data.add_retailer("RET-TIER", "Retailer Tier", None, "SUM")
     repos.penalty_rules.add_rule(
         rule_code="RULE-TIER-DUP",
-        retailer_id=retailer["id"],
         violation_type="FILL_RATE",
+        penalty_category="SHORT_SHIP",
+        retailer_agreement_id=make_retailer_agreement(repos, retailer["id"]),
         calc_type="TIERED",
         rate=0.0,
         tiers=[{"band_min": 0.0, "band_max": 0.10, "rate": 0.02}],

@@ -11,7 +11,7 @@ Writes against the `Agent` ORM model directly, using its own `Session`
 built from `Settings().database.url`.
 
 Idempotent: upserts keyed on `(agent_code, prompt_version)`, so running
-this twice leaves exactly 4 rows, not 8.
+this twice leaves exactly 8 rows, not 16.
 
 Security note (carried to the security-reviewer, see the approved Phase 1
 plan): `process.agent.system_prompt` is a new persistent store of LLM
@@ -29,6 +29,14 @@ from sqlalchemy.orm import Session
 
 from app.agents.penalties.mitigation.prompts.v1 import SYSTEM_PROMPT as MITIGATION_V1_PROMPT
 from app.agents.penalties.projection.prompts.v1 import SYSTEM_PROMPT as PROJECTION_V1_PROMPT
+from app.agents.penalties.rule_extraction.prompts.v1 import (
+    PENALTY_CLASSIFICATION_SYSTEM_PROMPT,
+    PENALTY_FACT_EXTRACTION_SYSTEM_PROMPT,
+    SECTION_SCREENING_SYSTEM_PROMPT,
+)
+from app.agents.penalties.rule_extraction.prompts.v1 import (
+    PROMPT_VERSION as RULE_EXTRACTION_PROMPT_VERSION,
+)
 from app.core.config import Settings
 from app.db.session import Database
 from app.models.process.agent import Agent
@@ -94,6 +102,44 @@ AGENT_SEEDS: list[_AgentSeed] = [
         domain="penalties",
         agent_name="Penalty Mitigation Summary",
         system_prompt=MITIGATION_V1_PROMPT,
+        is_active=True,
+    ),
+    _AgentSeed(
+        # Seeded for the same reason as po_validation below: the extraction graph opens a
+        # process.agent_run before its first model call, so the FK needs a row already
+        # there. PenaltyRuleExtractionService._ensure_registered would create it on
+        # demand, but only after a first run has been attempted.
+        agent_code="penalty_rule_extractor",
+        prompt_version=RULE_EXTRACTION_PROMPT_VERSION,
+        domain="penalties",
+        agent_name="Penalty Rule Extraction",
+        system_prompt=PENALTY_CLASSIFICATION_SYSTEM_PROMPT,
+        is_active=True,
+    ),
+    _AgentSeed(
+        # app.agents.penalties.rule_extraction.adapter._active_prompt reads this one by agent_code at
+        # inference time; nothing else registers it.
+        agent_code="penalty_rule_screening",
+        prompt_version=RULE_EXTRACTION_PROMPT_VERSION,
+        domain="penalties",
+        agent_name="Penalty Rule Screening",
+        system_prompt=SECTION_SCREENING_SYSTEM_PROMPT,
+        is_active=True,
+    ),
+    _AgentSeed(
+        agent_code="penalty_rule_classification",
+        prompt_version=RULE_EXTRACTION_PROMPT_VERSION,
+        domain="penalties",
+        agent_name="Penalty Rule Classification",
+        system_prompt=PENALTY_CLASSIFICATION_SYSTEM_PROMPT,
+        is_active=True,
+    ),
+    _AgentSeed(
+        agent_code="penalty_rule_fact_extraction",
+        prompt_version=RULE_EXTRACTION_PROMPT_VERSION,
+        domain="penalties",
+        agent_name="Penalty Rule Fact Extraction",
+        system_prompt=PENALTY_FACT_EXTRACTION_SYSTEM_PROMPT,
         is_active=True,
     ),
     _AgentSeed(

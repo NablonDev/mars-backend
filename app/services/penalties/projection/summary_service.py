@@ -281,24 +281,49 @@ class ProjectionSummaryService(
             actual_outcomes=actual_outcomes,
         )
 
-    def _resolve_sku_description(self, primary_line: dict | None, purchase_order_id: UUID) -> str:
-        """Best-effort human-readable label for the order's primary line.
+    def _compute_content_fingerprint(self, context: PenaltyProjectionSummaryContext) -> str:
+        return _compute_content_fingerprint(context)
 
-        Falls back through SKU description, SKU code, retailer material code,
-        material id, then the purchase-order id, so the narrative always has
-        something to reference even when master data is incomplete.
+    def _build_tools(self, purchase_order: dict, as_of_date: date) -> list[BaseTool]:
+        """Build this call's bounded tool set: carrier reliability, actual penalties, tier bands.
+
+        `order_status` is passed through directly rather than wrapped in a tool
+        so the prompt can gate whether the actual-penalties tool is worth
+        calling at all; it returns rows only once the order is DELIVERED.
         """
-        if primary_line is None:
-            return str(purchase_order_id)
-        if primary_line["sku_id"] is not None:
-            sku = next((s for s in self.master_data.list_skus() if s["id"] == primary_line["sku_id"]), None)
-            if sku is not None:
-                return sku["description"] or sku["sku_code"]
-        if primary_line["retailer_material_code"]:
-            return primary_line["retailer_material_code"]
-        if primary_line["material_id"] is not None:
-            return str(primary_line["material_id"])
-        return str(purchase_order_id)
+        purchase_order_id = purchase_order["id"]
+        retailer_id = purchase_order["retailer_id"]
+        return build_penalty_projection_summary_tools(
+            carrier_reliability=self._get_carrier_reliability,
+            actual_penalties=lambda: self.actual_penalties.list_for_purchase_order(purchase_order_id),
+            tier_bands=lambda rule_id: self._get_tier_bands(retailer_id, rule_id),
+            order_status=purchase_order["order_status"],
+        )
+
+    def _output_with_reuse_cls(self) -> type[PenaltyProjectionSummaryOutputWithReuse]:
+        return PenaltyProjectionSummaryOutputWithReuse
+
+    def _generate(
+        self,
+        context: PenaltyProjectionSummaryContext,
+        *,
+        order_id: str,
+        as_of_date: date,
+        tools: list[BaseTool],
+        heartbeat: Callable[[], None] | None,
+    ) -> PenaltySummaryOutputBase:
+        """Delegate to `PenaltyProjectionAgent.generate_projection_summary` for the tool-calling loop."""
+        return self._agent.generate_projection_summary(
+            context,
+            order_id=order_id,
+            as_of_date=as_of_date,
+            tools=tools,
+            heartbeat=heartbeat,
+        )
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
 
     def _build_daily_history(
         self, purchase_order_id: UUID, bounded_history: list[dict]
@@ -306,8 +331,11 @@ class ProjectionSummaryService(
         """One entry per distinct projection_date.
 
         Combines that day's engine outputs from `bounded_history` with that
-        day's inputs from `ProjectionService.build_snapshot`.
+        day's inputs from `ProjectionService.build_snapshot`. Skip-recorded rows
+        (`skip_reason` set) are excluded: they are not real violations and must
+        never be narrated as one to the summary LLM.
         """
+        bounded_history = [row for row in bounded_history if not row.get("skip_reason")]
         entries: list[DailyHistoryEntry] = []
 
         for day in sorted({row["projection_date"] for row in bounded_history}):
@@ -358,45 +386,24 @@ class ProjectionSummaryService(
             )
         return entries
 
-    def _compute_content_fingerprint(self, context: PenaltyProjectionSummaryContext) -> str:
-        return _compute_content_fingerprint(context)
+    def _resolve_sku_description(self, primary_line: dict | None, purchase_order_id: UUID) -> str:
+        """Best-effort human-readable label for the order's primary line.
 
-    def _build_tools(self, purchase_order: dict, as_of_date: date) -> list[BaseTool]:
-        """Build this call's bounded tool set: carrier reliability, actual penalties, tier bands.
-
-        `order_status` is passed through directly rather than wrapped in a tool
-        so the prompt can gate whether the actual-penalties tool is worth
-        calling at all; it returns rows only once the order is DELIVERED.
+        Falls back through SKU description, SKU code, retailer material code,
+        material id, then the purchase-order id, so the narrative always has
+        something to reference even when master data is incomplete.
         """
-        purchase_order_id = purchase_order["id"]
-        retailer_id = purchase_order["retailer_id"]
-        return build_penalty_projection_summary_tools(
-            carrier_reliability=self._get_carrier_reliability,
-            actual_penalties=lambda: self.actual_penalties.list_for_purchase_order(purchase_order_id),
-            tier_bands=lambda rule_id: self._get_tier_bands(retailer_id, rule_id),
-            order_status=purchase_order["order_status"],
-        )
-
-    def _output_with_reuse_cls(self) -> type[PenaltyProjectionSummaryOutputWithReuse]:
-        return PenaltyProjectionSummaryOutputWithReuse
-
-    def _generate(
-        self,
-        context: PenaltyProjectionSummaryContext,
-        *,
-        order_id: str,
-        as_of_date: date,
-        tools: list[BaseTool],
-        heartbeat: Callable[[], None] | None,
-    ) -> PenaltySummaryOutputBase:
-        """Delegate to `PenaltyProjectionAgent.generate_projection_summary` for the tool-calling loop."""
-        return self._agent.generate_projection_summary(
-            context,
-            order_id=order_id,
-            as_of_date=as_of_date,
-            tools=tools,
-            heartbeat=heartbeat,
-        )
+        if primary_line is None:
+            return str(purchase_order_id)
+        if primary_line["sku_id"] is not None:
+            sku = next((s for s in self.master_data.list_skus() if s["id"] == primary_line["sku_id"]), None)
+            if sku is not None:
+                return sku["description"] or sku["sku_code"]
+        if primary_line["retailer_material_code"]:
+            return primary_line["retailer_material_code"]
+        if primary_line["material_id"] is not None:
+            return str(primary_line["material_id"])
+        return str(purchase_order_id)
 
     # ------------------------------------------------------------------
     # Tool implementations

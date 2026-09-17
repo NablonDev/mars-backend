@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.core.exceptions import ConflictError, NotFoundError
 from app.models import PurchaseOrder, PurchaseOrderLine
-from app.utils.pagination import parse_cursor
+from app.utils.pagination import next_cursor_from_page, parse_cursor
 
 
 def describe_no_open_orders(counts: dict[str, int]) -> str | None:
@@ -276,8 +276,38 @@ class PurchaseOrderRepository:
 
         rows = self._session.scalars(stmt).all()
         items = [_purchase_order_line_to_dict(r) for r in rows]
-        next_cursor = items[-1]["updated_at"].isoformat() if len(items) == limit and items else None
+        next_cursor = next_cursor_from_page(items, limit)
         return items, next_cursor
+
+    def get_ordered_totals_for_retailer_between(
+        self, retailer_id: UUID, start_date: date, end_date: date
+    ) -> tuple[float | None, float | None]:
+        """Return total ordered quantity and value for a retailer within a date range.
+
+        The totals include purchase-order lines whose purchase order date falls
+        between ``start_date`` and ``end_date``, inclusive. Ordered value is
+        calculated as ``ordered_quantity * unit_price`` at line level before
+        summing.
+
+        Returns ``(None, None)`` when no qualifying purchase-order lines exist.
+        """
+        total_qty, total_value = self._session.execute(
+            select(
+                func.sum(PurchaseOrderLine.ordered_quantity),
+                func.sum(PurchaseOrderLine.ordered_quantity * PurchaseOrderLine.unit_price),
+            )
+            .select_from(PurchaseOrderLine)
+            .join(PurchaseOrder, PurchaseOrder.id == PurchaseOrderLine.purchase_order_id)
+            .where(
+                PurchaseOrder.retailer_id == retailer_id,
+                PurchaseOrder.order_date >= start_date,
+                PurchaseOrder.order_date <= end_date,
+            )
+        ).one()
+        return (
+            float(total_qty) if total_qty is not None else None,
+            float(total_value) if total_value is not None else None,
+        )
 
     def list_open_orders_for_material_plant(
         self,

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, Query, Response, status
 
 from app.api.dependencies import (
     get_mitigation_option_repository,
@@ -32,7 +32,7 @@ from app.schemas.penalties.mitigations import (
 from app.services.penalties.mitigation.service import MitigationService
 from app.services.penalties.mitigation.summary_service import MitigationSummaryService
 
-router = APIRouter(tags=["penalty-mitigations"])
+router = APIRouter(prefix="/penalties", tags=["penalty-mitigations"])
 
 # Used by the GET routes below (list, get-one). `POST /penalties/mitigations`
 # accepts no `include=`: a compute call always returns the bare
@@ -105,7 +105,7 @@ def _attach_summary(
         detail.summary = PenaltyMitigationSummaryResponse.model_validate(job.output)
 
 
-@router.get("/penalties/mitigations", response_model=Envelope[MitigationOptionsResponse])
+@router.get("/mitigations", response_model=Envelope[MitigationOptionsResponse])
 def list_penalty_mitigations(
     projection_id: UUID | None = Query(default=None),
     purchase_order_id: UUID | None = Query(default=None),
@@ -140,7 +140,11 @@ def list_penalty_mitigations(
     )
 
 
-@router.post("/penalties/mitigations", response_model=Envelope[MitigationOptionsResponse], status_code=201)
+@router.post(
+    "/mitigations",
+    response_model=Envelope[MitigationOptionsResponse],
+    status_code=status.HTTP_201_CREATED,
+)
 def run_penalty_mitigations(
     body: PenaltyMitigationRunRequest,
     projections: PenaltyProjectionRepository = Depends(get_penalty_projection_repository),
@@ -175,7 +179,7 @@ def run_penalty_mitigations(
 
 
 @router.post(
-    "/penalties/mitigations/summary",
+    "/mitigations/summary",
     response_model=Envelope[PenaltyMitigationSummaryStatusResponse],
     responses={202: {"model": Envelope[PenaltyMitigationSummaryStatusResponse]}},
 )
@@ -212,7 +216,7 @@ def trigger_penalty_mitigation_summary(
 
 
 @router.get(
-    "/penalties/mitigations/summary",
+    "/mitigations/summary",
     response_model=Envelope[PenaltyMitigationSummaryStatusResponse],
 )
 def get_penalty_mitigation_summary(
@@ -253,7 +257,7 @@ def get_penalty_mitigation_summary(
 # literal `summary` segment too, which would turn that route into a 422
 # UUID-parse failure.
 @router.get(
-    "/penalties/mitigations/{mitigation_id}",
+    "/mitigations/{mitigation_id}",
     response_model=Envelope[MitigationOptionDetailResponse],
 )
 def get_penalty_mitigation(

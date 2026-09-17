@@ -6,10 +6,17 @@ from app.models.penalties.job_context import PenaltyJobItemContext, PenaltyJobRu
 from app.models.penalties.mitigation import MitigationInput, MitigationOption
 from app.models.penalties.projection import PenaltyProjection
 from app.models.penalties.rule import PenaltyRule, PenaltyRuleTier
+from app.models.penalties.rule_extraction import (
+    ExtractedPenaltyRule,
+    ExtractedPenaltyRuleAttribute,
+    RulePublication,
+)
 from app.models.penalties.summary import PenaltySummary
 
 __all__ = [
     "ActualPenalty",
+    "ExtractedPenaltyRule",
+    "ExtractedPenaltyRuleAttribute",
     "MitigationInput",
     "MitigationOption",
     "PenaltyDispute",
@@ -19,4 +26,5 @@ __all__ = [
     "PenaltyRule",
     "PenaltyRuleTier",
     "PenaltySummary",
+    "RulePublication",
 ]
