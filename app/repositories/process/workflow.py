@@ -10,12 +10,30 @@ from sqlalchemy import and_, func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
-from app.models import HumanAction, ProcessingError, WorkflowThread, WorkflowThreadSubject
+from app.models import (
+    HumanAction,
+    ProcessingError,
+    WorkflowThread,
+    WorkflowThreadSubject,
+    WorkflowThreadSubjectType,
+)
 from app.utils.pagination import next_cursor_from_page, parse_cursor
 
 
 def _thread_to_dict(thread: WorkflowThread, subject: WorkflowThreadSubject | None) -> dict:
     """Project a `WorkflowThread` row and its 1:1 subject row onto one caller-facing dict."""
+    subj_type = subject.subject_type if subject is not None else None
+    subj_id = subject.subject_id if subject is not None else None
+    is_email = (
+        subj_type == WorkflowThreadSubjectType.EMAIL_EVENT.value
+        or subj_type == WorkflowThreadSubjectType.EMAIL_EVENT
+        or (isinstance(subj_type, str) and subj_type.upper() == "EMAIL_EVENT")
+    )
+    is_po_line = (
+        subj_type == WorkflowThreadSubjectType.PURCHASE_ORDER_LINE.value
+        or subj_type == WorkflowThreadSubjectType.PURCHASE_ORDER_LINE
+        or (isinstance(subj_type, str) and subj_type.upper() == "PURCHASE_ORDER_LINE")
+    )
     return {
         "id": thread.id,
         "job_item_id": thread.job_item_id,
@@ -25,8 +43,10 @@ def _thread_to_dict(thread: WorkflowThread, subject: WorkflowThreadSubject | Non
         "completed_at": thread.completed_at,
         "error": thread.error,
         "metadata_json": thread.metadata_json,
-        "subject_type": subject.subject_type if subject is not None else None,
-        "subject_id": subject.subject_id if subject is not None else None,
+        "subject_type": subj_type,
+        "subject_id": subj_id,
+        "email_event_id": subj_id if is_email else None,
+        "purchase_order_line_id": subj_id if is_po_line else None,
         "updated_at": thread.updated_at,
     }
 

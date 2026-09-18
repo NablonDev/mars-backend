@@ -18,6 +18,7 @@ own scoped session via `self._database.session()`, mirroring
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections.abc import Callable
 from dataclasses import asdict
 from typing import Any, Literal
@@ -97,6 +98,8 @@ _DECISION_STATUSES = ("APPROVED", "REJECTED")
 
 _MAX_FACT_EXTRACTION_ATTEMPTS = 4
 
+logger = logging.getLogger(__name__)
+
 
 def _extraction_error(
     error_code: str, message: str, node_name: str, detail: dict[str, Any]
@@ -163,6 +166,11 @@ class RuleExtractionNodes:
     def split_document(self, state: RuleExtractionState) -> dict[str, Any]:
         """Split the contract markdown into small, section-aligned screening units. Pure."""
         units = split_into_screening_units(state["retailer_agreement_text"])
+        logger.info(
+            "Split contract (%d chars) into %d screening units",
+            len(state.get("retailer_agreement_text", "")),
+            len(units),
+        )
         return {"screening_units": [asdict(u) for u in units]}
 
     def route_after_split_document(self, state: RuleExtractionState) -> list[Send]:
@@ -177,9 +185,21 @@ class RuleExtractionNodes:
         flushes it later.
         """
         unit = arg["unit"]
+        logger.info(
+            "Screening unit %s: '%s' (%d chars)",
+            unit.get("index"),
+            unit.get("section_path"),
+            len(unit.get("text", "")),
+        )
         try:
             result = self._screen(ScreeningUnitContext(label=unit["section_path"], unit_text=unit["text"]))
         except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Screening unit %s ('%s') failed: %s",
+                unit.get("index"),
+                unit.get("section_path"),
+                exc,
+            )
             return {
                 "extraction_errors": [
                     _extraction_error(
@@ -199,6 +219,12 @@ class RuleExtractionNodes:
             }
             for clause in result.clauses
         ]
+        if candidates:
+            logger.info(
+                "Screening unit %s found %d candidate clause(s)",
+                unit.get("index"),
+                len(candidates),
+            )
         return {"screened_candidates": candidates}
 
     # ---- excerpt resolution (fan-in 1) ---- #
@@ -206,9 +232,11 @@ class RuleExtractionNodes:
     def resolve_candidates(self, state: RuleExtractionState) -> dict[str, Any]:
         """Confirm every screened excerpt against the source text and collapse overlapping finds. Pure."""
         source_text = state["retailer_agreement_text"]
+        candidates_in = state.get("screened_candidates", [])
+        logger.info("Resolving %d screened candidate clause(s)...", len(candidates_in))
         pairs = [
             (candidate, match_excerpt(source_text, candidate["excerpt"], ScreeningUnit(**candidate["unit"])))
-            for candidate in state.get("screened_candidates", [])
+            for candidate in candidates_in
         ]
         deduplicated = deduplicate_overlaps([matched for _candidate, matched in pairs])
         kept_ids = {id(matched) for matched in deduplicated}
@@ -222,6 +250,7 @@ class RuleExtractionNodes:
             for candidate, matched in pairs
             if id(matched) in kept_ids
         ]
+        logger.info("Deduplicated to %d unique candidate clause(s) for classification", len(clauses))
         return {"candidate_clauses": clauses}
 
     def route_after_resolve_candidates(
@@ -247,6 +276,11 @@ class RuleExtractionNodes:
         clause_text = clause["clause_text"]
         section_title = clause.get("section_title")
         sub_excerpts = split_bundled_clause(clause_text) or [clause_text]
+        logger.info(
+            "Processing candidate clause '%s' (%d sub-excerpt(s))",
+            section_title or clause_text[:40].replace("\n", " "),
+            len(sub_excerpts),
+        )
 
         drafts: list[dict[str, Any]] = []
         errors: list[dict[str, Any]] = []
@@ -272,6 +306,11 @@ class RuleExtractionNodes:
         The only node that writes staged rule rows: `human_review` and `apply_decisions`
         stay separate nodes precisely so a resume never re-runs this insert.
         """
+        logger.info(
+            "Staging %d extracted penalty rule(s) to database (agent_run_id=%s)",
+            len(state.get("drafts", [])),
+            state.get("run_id"),
+        )
         with self._database.session() as session:
             extracted_rules = ExtractedPenaltyRuleRepository(session)
             processing_errors = ProcessingErrorRepository(session)
@@ -405,12 +444,25 @@ class RuleExtractionNodes:
             }
 
         master = classification.model_dump()
+        logger.info(
+            "Classified clause '%s': is_penalty_rule=%s, category=%s, calc_type=%s",
+            section_title or clause_text[:30].replace("\n", " "),
+            master.get("is_penalty_rule"),
+            master.get("penalty_category"),
+            master.get("calc_type"),
+        )
         normalized: list[dict[str, Any]] = []
         issues: list[str] = []
         if master.get("is_penalty_rule"):
             try:
                 normalized, issues, _attempts = self._extract_facts_until_consistent(
                     clause_text, master["penalty_category"], master["calc_type"]
+                )
+                logger.info(
+                    "Extracted %d attribute fact(s) for category '%s' (attempts=%d)",
+                    len(normalized),
+                    master.get("penalty_category"),
+                    _attempts,
                 )
             except Exception as exc:  # noqa: BLE001
                 return {

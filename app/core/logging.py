@@ -95,57 +95,79 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, default=str)
 
 
+class TextFormatter(logging.Formatter):
+    """Format log records as clean, human-readable text with request IDs and secret redaction."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        req_id = getattr(record, "request_id", UNKNOWN_REQUEST_ID)
+        ts = datetime.fromtimestamp(record.created, tz=UTC).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        base = f"{ts} [{record.levelname:<7}] [{record.name}] [req:{req_id}] {_redact(record.getMessage())}"
+        for field in _EXTRA_FIELDS:
+            value = getattr(record, field, None)
+            if value is not None:
+                base += f" {field}={value}"
+        if record.exc_info:
+            base += f"\n{_redact(self.formatException(record.exc_info))}"
+        elif record.exc_text:
+            base += f"\n{_redact(record.exc_text)}"
+        return base
+
+
 _configured = False
 
 
-def configure_logging(level: str = "INFO", *, force: bool = False) -> None:
-    """Set up structured JSON logging for the app and Uvicorn."""
-
+def configure_logging(
+    level: str = "INFO",
+    log_format: str = "json",
+    *,
+    force: bool = False
+) -> None:
+    """Configure standard JSON or clean text logging on root, application, and uvicorn loggers."""
     global _configured
 
     if _configured and not force:
         return
 
-    logging.config.dictConfig(
-        {
-            "version": 1,
-            "disable_existing_loggers": False,
-            "filters": {
-                "request_id": {"()": RequestIdFilter},
-            },
-            "formatters": {
-                "json": {"()": JsonFormatter},
-            },
-            "handlers": {
-                "stdout": {
-                    "class": "logging.StreamHandler",
-                    "stream": "ext://sys.stdout",
-                    "formatter": "json",
-                    "filters": ["request_id"],
-                }
-            },
-            "root": {
+    formatter_cls = TextFormatter if log_format.strip() == "text" else JsonFormatter
+
+    logging_config = {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "filters": {
+            "request_id": {"()": RequestIdFilter},
+        },
+        "formatters": {
+            "active": {"()": formatter_cls},
+        },
+        "handlers": {
+            "stdout": {
+                "class": "logging.StreamHandler",
+                "stream": "ext://sys.stdout",
+                "formatter": "active",
+                "filters": ["request_id"],
+            }
+        },
+        "root": {
+            "handlers": ["stdout"],
+            "level": level,
+        },
+        "loggers": {
+            "uvicorn": {
                 "handlers": ["stdout"],
                 "level": level,
+                "propagate": False,
             },
-            "loggers": {
-                "uvicorn": {
-                    "handlers": ["stdout"],
-                    "level": level,
-                    "propagate": False,
-                },
-                "uvicorn.error": {
-                    "handlers": ["stdout"],
-                    "level": level,
-                    "propagate": False,
-                },
-                "uvicorn.access": {
-                    "handlers": ["stdout"],
-                    "level": "WARNING",
-                    "propagate": False,
-                },
+            "uvicorn.error": {
+                "handlers": ["stdout"],
+                "level": level,
+                "propagate": False,
             },
-        }
-    )
-
+            "uvicorn.access": {
+                "handlers": ["stdout"],
+                "level": "WARNING",
+                "propagate": False,
+            },
+        },
+    }
+    logging.config.dictConfig(logging_config)
     _configured = True

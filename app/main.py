@@ -30,7 +30,7 @@ def create_app(
     lifespan builds the real LangGraph-backed services on startup instead.
     """
     resolved = settings or get_settings()
-    configure_logging(resolved.app.log_level)
+    configure_logging(resolved.app.log_level, resolved.app.log_format)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None]:

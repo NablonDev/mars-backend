@@ -6,6 +6,9 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _INTERNAL_API_KEY_MIN_LENGTH = 64
+_VALID_ENVIRONMENTS = ("production", "staging", "development")
+_VALID_LOG_FORMATS = ("json", "text")
+_VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
 
 class AppSettings(BaseSettings):
@@ -29,11 +32,45 @@ class AppSettings(BaseSettings):
     )
     docs_enabled: bool = Field(default=True, validation_alias="APP_DOCS_ENABLED")
     log_level: str = Field(default="INFO", validation_alias="APP_LOG_LEVEL")
-
+    log_format: str = Field(default="json", validation_alias="APP_LOG_FORMAT")
     # Security: shared-secret gate on every route except /health. No default --
     # a missing APP_INTERNAL_API_KEY must fail app startup, never silently
     # accept unauthenticated requests.
     internal_api_key: str = Field(validation_alias="APP_INTERNAL_API_KEY")
+
+    @field_validator("environment", mode="before")
+    @classmethod
+    def _validate_environment(cls, value: str) -> str:
+        """Reject invalid environments; must be exactly 'production', 'staging', or 'development'."""
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("APP_ENVIRONMENT must not be blank")
+        if value not in _VALID_ENVIRONMENTS:
+            raise ValueError(
+                f"Invalid APP_ENVIRONMENT: {value!r}. Must be one of: {', '.join(_VALID_ENVIRONMENTS)}"
+            )
+        return value
+
+    @field_validator("log_format", mode="before")
+    @classmethod
+    def _validate_log_format(cls, value: str) -> str:
+        """Ensure log_format is strictly 'json' or 'text'."""
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("LOG_FORMAT must not be blank")
+        if value not in _VALID_LOG_FORMATS:
+            raise ValueError(f"Invalid LOG_FORMAT: {value!r}. Must be 'json' or 'text'")
+        return value
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def _validate_log_level(cls, value: str) -> str:
+        """Ensure log_level is a valid standard level."""
+        if not isinstance(value, str) or not value.strip():
+            return "INFO"
+        if value not in _VALID_LOG_LEVELS:
+            raise ValueError(
+                f"Invalid APP_LOG_LEVEL: {value!r}. Must be one of: {', '.join(_VALID_LOG_LEVELS)}"
+            )
+        return value
 
     @field_validator("internal_api_key")
     @classmethod

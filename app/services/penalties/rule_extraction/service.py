@@ -191,6 +191,12 @@ class PenaltyRuleExtractionService:
         run_id = self._agent_runs.start(agent_id=agent_id, run_type=_RUN_TYPE)
         self._session.commit()
         checkpoint_thread_id = self._new_checkpoint_thread_id()
+        logger.info(
+            "Starting penalty rule extraction for retailer_agreement_id=%s (agent_run_id=%s, checkpoint_thread=%s)",
+            retailer_agreement_id,
+            run_id,
+            checkpoint_thread_id,
+        )
 
         try:
             state = self._graph.invoke(
@@ -203,6 +209,7 @@ class PenaltyRuleExtractionService:
                 config=self._thread_config(checkpoint_thread_id),
             )
         except Exception as exc:
+            logger.error("Penalty rule extraction failed for run_id=%s: %s", run_id, exc)
             self._agent_runs.update_status(run_id, "failed", error=str(exc), completed=True)
             # Committed explicitly: `get_session`'s rollback on the propagating exception
             # would otherwise discard this status update along with it.
@@ -216,6 +223,12 @@ class PenaltyRuleExtractionService:
             state=state,
         )
         staged = self._extracted_rules.list_for_retailer_agreement(retailer_agreement_id, agent_run_id=run_id)
+        logger.info(
+            "Penalty rule extraction finished for retailer_agreement_id=%s: staged %d rules, thread_id=%s",
+            retailer_agreement_id,
+            len(staged),
+            result.get("id"),
+        )
         return ExtractionStartResult(
             job_run_id=None,
             agent_run_id=run_id,

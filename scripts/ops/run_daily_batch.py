@@ -122,7 +122,7 @@ def main() -> int:
     if args.concurrency is not None:
         settings.job_queue.worker_concurrency = args.concurrency
 
-    configure_logging(settings.app.log_level)
+    configure_logging(settings.app.log_level, settings.app.log_format)
 
     database = Database(
         settings.database.url,
