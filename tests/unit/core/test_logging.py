@@ -10,7 +10,10 @@ import logging
 from app.core.logging import (
     UNKNOWN_REQUEST_ID,
     JsonFormatter,
+    PrettyFormatter,
     RequestIdFilter,
+    TextFormatter,
+    configure_logging,
     get_request_id,
     reset_request_id,
     set_request_id,
@@ -158,3 +161,141 @@ def test_records_without_a_request_id_fall_back_to_a_placeholder():
     payload = _formatted(_record("startup, outside any request"))
 
     assert payload["request_id"] == UNKNOWN_REQUEST_ID
+
+
+def test_pretty_formatter_removes_req_id_and_raw_extra_labels():
+    record = _record(
+        "GET /api/v1/rules 200 3.38ms",
+        request_id="req-secret-123",
+        method="GET",
+        path="/api/v1/rules",
+        status=200,
+        duration_ms=3.38,
+    )
+    formatted = PrettyFormatter(no_color=True).format(record)
+
+    assert "req-secret-123" not in formatted
+    assert "[req:" not in formatted
+    assert "method=" not in formatted
+    assert "path=" not in formatted
+    assert "status=" not in formatted
+    assert "duration_ms=" not in formatted
+
+
+def test_pretty_formatter_access_log_structure_and_coloring():
+    record = _record(
+        "GET /api/v1/rules 200 3.38ms",
+        method="GET",
+        path="/api/v1/rules",
+        status=200,
+        duration_ms=3.38,
+    )
+    colored = PrettyFormatter(no_color=False).format(record)
+    plain = PrettyFormatter(no_color=True).format(record)
+
+    # Plain output verification: timestamp, level, location, method/path, status, duration
+    assert 'INFO:      [test_logging.py:1] "GET /api/v1/rules" 200 OK - 3.38ms' in plain
+
+    # Colored output verification: ANSI escape sequences
+    assert "\033[1;32mINFO:\033[0m" in colored  # bold green level
+    assert "\033[36m[test_logging.py:1]\033[0m" in colored  # cyan file
+    assert "\033[1;32mGET\033[0m" in colored  # bold green GET
+    assert "\033[1;32m200 OK\033[0m" in colored  # bold green 200 OK
+
+
+def test_pretty_formatter_no_bold_removes_bold_codes():
+    record = _record(
+        "GET /api/v1/rules 200 3.38ms",
+        method="GET",
+        path="/api/v1/rules",
+        status=200,
+        duration_ms=3.38,
+    )
+    no_bold = PrettyFormatter(no_color=False, no_bold=True).format(record)
+
+    assert "\033[1;" not in no_bold  # no bold ANSI codes like \033[1;32m
+    assert "\033[1m" not in no_bold
+    assert "\033[32mINFO:\033[0m" in no_bold  # regular unbolded green level
+    assert "\033[32mGET\033[0m" in no_bold  # regular unbolded green GET
+    assert "\033[32m200 OK\033[0m" in no_bold  # regular unbolded green status
+
+
+def test_pretty_formatter_status_codes_and_phrases():
+    for status_code, expected_phrase, expected_color in [
+        (200, "200 OK", "\033[1;32m"),
+        (201, "201 Created", "\033[1;32m"),
+        (304, "304 Not Modified", "\033[1;36m"),
+        (404, "404 Not Found", "\033[1;33m"),
+        (422, "422 Unprocessable Entity", "\033[1;33m"),
+        (500, "500 Internal Server Error", "\033[1;31m"),
+    ]:
+        record = _record("HTTP call", method="POST", path="/endpoint", status=status_code)
+        plain = PrettyFormatter(no_color=True).format(record)
+        colored = PrettyFormatter(no_color=False).format(record)
+
+        assert expected_phrase in plain
+        assert f"{expected_color}{expected_phrase}\033[0m" in colored
+
+
+def test_pretty_formatter_non_access_log_with_redaction():
+    record = _record("connected to postgresql://svc:supersecret@db:5432/mars")
+    plain = PrettyFormatter(no_color=True).format(record)
+
+    assert "supersecret" not in plain
+    assert "postgresql://svc:***@db:5432/mars" in plain
+    assert "[test_logging.py:1]" in plain
+    assert "INFO:" in plain
+
+
+def test_pretty_formatter_error_code_and_exception_handling():
+    try:
+        raise ValueError("failed with api_key=secretkey123")
+    except ValueError:
+        import sys
+
+        record = _record("operation failed", exc_info=sys.exc_info(), error_code="DB_ERROR")
+
+    plain = PrettyFormatter(no_color=True).format(record)
+    colored = PrettyFormatter(no_color=False).format(record)
+
+    assert "[DB_ERROR]" in plain
+    assert "secretkey123" not in plain
+    assert "api_key=***" in plain
+    assert "ValueError: failed with api_key=***" in plain
+    assert "\033[1;31m[DB_ERROR]\033[0m" in colored
+
+
+def test_configure_logging_activates_pretty_formatter():
+    configure_logging(log_format="pretty", no_color=True, no_bold=True, force=True)
+    root_handler = logging.getLogger().handlers[0]
+    assert isinstance(root_handler.formatter, PrettyFormatter)
+    assert root_handler.formatter.no_color is True
+    assert root_handler.formatter.no_bold is True
+
+    configure_logging(log_format="text", force=True)
+    root_handler = logging.getLogger().handlers[0]
+    assert isinstance(root_handler.formatter, TextFormatter)
+
+    configure_logging(log_format="json", force=True)
+    root_handler = logging.getLogger().handlers[0]
+    assert isinstance(root_handler.formatter, JsonFormatter)
+
+
+def test_app_settings_parses_no_color_and_no_bold_flags():
+    from app.core.config.app import AppSettings
+
+    settings = AppSettings(
+        APP_INTERNAL_API_KEY="x" * 64,
+        NO_COLOR="1",
+        NO_BOLD="true",
+    )
+    assert settings.no_color is True
+    assert settings.no_bold is True
+
+    settings_empty = AppSettings(
+        APP_INTERNAL_API_KEY="x" * 64,
+        NO_COLOR="",
+        NO_BOLD="false",
+    )
+    assert settings_empty.no_color is False
+    assert settings_empty.no_bold is False

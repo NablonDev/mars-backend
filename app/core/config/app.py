@@ -7,7 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _INTERNAL_API_KEY_MIN_LENGTH = 64
 _VALID_ENVIRONMENTS = ("production", "staging", "development")
-_VALID_LOG_FORMATS = ("json", "text")
+_VALID_LOG_FORMATS = ("json", "text", "pretty")
 _VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 
 
@@ -33,6 +33,8 @@ class AppSettings(BaseSettings):
     docs_enabled: bool = Field(default=True, validation_alias="APP_DOCS_ENABLED")
     log_level: str = Field(default="INFO", validation_alias="APP_LOG_LEVEL")
     log_format: str = Field(default="json", validation_alias="APP_LOG_FORMAT")
+    no_color: bool = Field(default=False, validation_alias="APP_NO_COLOR")
+    no_bold: bool = Field(default=False, validation_alias="APP_NO_BOLD")
     # Security: shared-secret gate on every route except /health. No default --
     # a missing APP_INTERNAL_API_KEY must fail app startup, never silently
     # accept unauthenticated requests.
@@ -53,12 +55,29 @@ class AppSettings(BaseSettings):
     @field_validator("log_format", mode="before")
     @classmethod
     def _validate_log_format(cls, value: str) -> str:
-        """Ensure log_format is strictly 'json' or 'text'."""
+        """Ensure log_format is one of the supported formats."""
         if not isinstance(value, str) or not value.strip():
             raise ValueError("LOG_FORMAT must not be blank")
-        if value not in _VALID_LOG_FORMATS:
-            raise ValueError(f"Invalid LOG_FORMAT: {value!r}. Must be 'json' or 'text'")
-        return value
+        val = value.strip().lower()
+        if val not in _VALID_LOG_FORMATS:
+            raise ValueError(
+                f"Invalid LOG_FORMAT: {value!r}. Must be one of: {', '.join(_VALID_LOG_FORMATS)}"
+            )
+        return val
+
+    @field_validator("no_color", "no_bold", mode="before")
+    @classmethod
+    def _validate_bool_flags(cls, value: object) -> bool:
+        """Parse boolean flag values from environment strings gracefully."""
+        if isinstance(value, str):
+            val = value.strip().lower()
+            if not val:
+                return False
+            if val in ("1", "true", "yes", "on"):
+                return True
+            if val in ("0", "false", "no", "off"):
+                return False
+        return bool(value)
 
     @field_validator("log_level", mode="before")
     @classmethod
@@ -66,17 +85,18 @@ class AppSettings(BaseSettings):
         """Ensure log_level is a valid standard level."""
         if not isinstance(value, str) or not value.strip():
             return "INFO"
-        if value not in _VALID_LOG_LEVELS:
+        val = value.strip()
+        if val not in _VALID_LOG_LEVELS:
             raise ValueError(
                 f"Invalid APP_LOG_LEVEL: {value!r}. Must be one of: {', '.join(_VALID_LOG_LEVELS)}"
             )
-        return value
+        return val
 
     @field_validator("internal_api_key")
     @classmethod
     def _internal_api_key_not_blank(cls, value: str) -> str:
         """Reject a blank or too-short APP_INTERNAL_API_KEY so a misconfigured app fails at startup."""
-        if not value.strip():
+        if not value or not value.strip():
             raise ValueError("APP_INTERNAL_API_KEY must not be blank")
 
         if len(value) < _INTERNAL_API_KEY_MIN_LENGTH:
