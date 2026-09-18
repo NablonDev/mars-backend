@@ -4,6 +4,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.dependencies import build_po_validation_service, build_service
 from app.api.router import router as api_v1_router
@@ -68,6 +69,14 @@ def create_app(
     app.state.po_service = po_service
 
     # Last-added middleware is outermost; request IDs must wrap access logging.
+    # CORSMiddleware added first (innermost), matching mars-bff's ordering.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=resolved.cors.allowed_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     app.add_middleware(AccessLogMiddleware)
     app.add_middleware(RequestIdMiddleware)
 
