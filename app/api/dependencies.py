@@ -359,6 +359,7 @@ def get_dispute_service(
     rules: PenaltyRuleRepository = Depends(get_penalty_rule_repository),
     projection_service: ProjectionService = Depends(get_projection_service),
     retailer_agreements: RetailerAgreementRepository = Depends(get_retailer_agreement_repository),
+    settings: Settings = Depends(get_settings),
 ) -> DisputeResolutionService:
     """Provide a dispute service for opening and managing penalty disputes."""
     return DisputeResolutionService(
@@ -368,6 +369,7 @@ def get_dispute_service(
         rules=rules,
         projection_service=projection_service,
         retailer_agreements=retailer_agreements,
+        default_window_days=settings.dispute.default_window_days,
     )
 
 

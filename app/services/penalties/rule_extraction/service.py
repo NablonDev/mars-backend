@@ -36,7 +36,7 @@ from app.agents.penalties.rule_extraction.prompts.v1 import (
 )
 from app.core.exceptions import ConflictError, ExternalServiceError, NotFoundError, ValidationError
 from app.models.enums import WorkflowThreadSubjectType
-from app.models.penalties.rule_extraction import RulePublication
+from app.models.penalties import RulePublication
 from app.repositories.common.master_data import MasterDataRepository
 from app.repositories.common.retailer_agreement import RetailerAgreementRepository
 from app.repositories.penalties.rule import PenaltyRuleRepository

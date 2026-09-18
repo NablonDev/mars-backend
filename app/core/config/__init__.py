@@ -10,7 +10,9 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.config.app import AppSettings
+from app.core.config.cors import CorsSettings
 from app.core.config.database import DatabaseSettings
+from app.core.config.dispute import DisputeSettings
 from app.core.config.email import EmailSettings
 from app.core.config.job_queue import JobQueueBackend, JobQueueSettings
 from app.core.config.llm import AzureOpenAISettings
@@ -31,12 +33,16 @@ _GROUP_CLASSES: dict[str, type[BaseSettings]] = {
     "job_queue": JobQueueSettings,
     "email": EmailSettings,
     "summary": SummarySettings,
+    "dispute": DisputeSettings,
+    "cors": CorsSettings,
 }
 
 __all__ = [
     "AppSettings",
     "AzureOpenAISettings",
+    "CorsSettings",
     "DatabaseSettings",
+    "DisputeSettings",
     "EmailConfig",
     "EmailSettings",
     "JobQueueBackend",
@@ -53,10 +59,10 @@ __all__ = [
 class Settings(BaseSettings):
     """Root application configuration, composed of one nested settings group per domain.
 
-    Groups app, database, llm, service_bus, job_queue, email, and summary
-    settings under one object. Each group is its own pydantic-settings
-    model, so a missing required env var fails at Settings() construction
-    time rather than when the field is first read.
+    Groups app, database, llm, service_bus, job_queue, email, summary,
+    dispute, and cors settings under one object. Each group is its own
+    pydantic-settings model, so a missing required env var fails at
+    Settings() construction time rather than when the field is first read.
     """
 
     # Each nested group validates its own env vars independently, ensuring
@@ -68,6 +74,8 @@ class Settings(BaseSettings):
     job_queue: JobQueueSettings = Field(default_factory=JobQueueSettings)
     email: EmailSettings = Field(default_factory=EmailSettings)
     summary: SummarySettings = Field(default_factory=SummarySettings)
+    dispute: DisputeSettings = Field(default_factory=DisputeSettings)
+    cors: CorsSettings = Field(default_factory=CorsSettings)
 
     model_config = SettingsConfigDict(
         env_file=".env",

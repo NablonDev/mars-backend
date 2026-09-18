@@ -1,72 +1,35 @@
-"""SQLAlchemy declarative base, metadata, and shared database schema configuration."""
+"""SQLAlchemy declarative base, metadata, and shared database schema configuration.
 
-import secrets
-import time
-from datetime import datetime
-from uuid import UUID
+Re-exports mars_common's db/base module. mars-common is the single source of
+truth for ORM model metadata, shared with mars-bff — every model in this
+codebase (via app/models/) and every model mars-bff imports registers against
+the exact same Base/metadata object defined there, not a local copy. This
+file's own historical definitions were byte-identical to mars-common's before
+this change; nothing here behaves differently after it.
+"""
 
-from sqlalchemy import JSON, DateTime, MetaData, Uuid, func
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from mars_common.db.base import (
+    CMIR_SCHEMA,
+    INDEX_NAMING_CONVENTION,
+    JSONB_OR_JSON,
+    LANGGRAPH_SCHEMA,
+    PENALTIES_SCHEMA,
+    PROCESS_SCHEMA,
+    UUID_PK,
+    Base,
+    TimestampMixin,
+    generate_uuid7,
+)
 
-PROCESS_SCHEMA = "process"
-CMIR_SCHEMA = "cmir"
-PENALTIES_SCHEMA = "penalties"
-LANGGRAPH_SCHEMA = "langgraph"
-
-# Keep index names aligned with the names used by Alembic migrations.
-INDEX_NAMING_CONVENTION = {
-    "ix": "ix_%(table_name)s_%(column_0_name)s",
-}
-
-
-class Base(DeclarativeBase):
-    """Declarative base shared by every ORM model, bound to the naming convention below."""
-
-    metadata = MetaData(naming_convention=INDEX_NAMING_CONVENTION)
-
-
-class TimestampMixin:
-    """Adds `created_at`/`updated_at`/`deleted_at` audit columns to a model."""
-
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        nullable=False,
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        onupdate=func.now(),
-        nullable=False,
-    )
-    deleted_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-    )
-
-
-def generate_uuid7() -> UUID:
-    """Generate a time-ordered UUIDv7 for surrogate primary keys.
-
-    Packs a millisecond timestamp into the high bits so values sort and
-    index in insertion order (unlike UUIDv4), while the version/variant bits
-    and remaining random bits keep collisions negligible across concurrent
-    writers.
-    """
-    timestamp_ms = time.time_ns() // 1_000_000
-    value = (
-        (timestamp_ms << 80)
-        | (0x7 << 76)
-        | (secrets.randbits(12) << 64)
-        | (0b10 << 62)
-        | secrets.randbits(62)
-    )
-    return UUID(int=value)
-
-
-UUID_PK = Uuid(as_uuid=True)
-
-# JSONB on Postgres (containment/indexing), plain JSON everywhere else
-# SQLite (the whole test suite) has no JSONB compiler at all.
-JSONB_OR_JSON = JSON().with_variant(JSONB(), "postgresql")
+__all__ = [
+    "CMIR_SCHEMA",
+    "INDEX_NAMING_CONVENTION",
+    "JSONB_OR_JSON",
+    "LANGGRAPH_SCHEMA",
+    "PENALTIES_SCHEMA",
+    "PROCESS_SCHEMA",
+    "UUID_PK",
+    "Base",
+    "TimestampMixin",
+    "generate_uuid7",
+]

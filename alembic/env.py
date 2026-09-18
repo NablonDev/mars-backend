@@ -4,9 +4,11 @@ Alembic environment.
 Database URL comes from app.core.config.Settings, so DATABASE_URL / .env
 remains the single source of truth.
 
-ORM metadata comes directly from app.models. Alembic autogenerate compares
-the actual database schema against Base.metadata; there is no separate
-hand-maintained schema definition.
+ORM metadata comes from mars_common (the single source of truth for ORM
+models across mars-backend and mars-bff); app/models/ re-exports it for
+backward-compatible imports. Alembic autogenerate compares the actual
+database schema against Base.metadata; there is no separate hand-maintained
+schema definition.
 
 Schema layout
 -------------
@@ -74,9 +76,8 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from app.core.config import get_settings
-from app.db.base import CMIR_SCHEMA, PENALTIES_SCHEMA, PROCESS_SCHEMA
+from app.db.base import CMIR_SCHEMA, PENALTIES_SCHEMA, PROCESS_SCHEMA, Base
 from app.db.session import apply_sqlite_schema_translation
-from app.models import Base
 
 config = context.config
 

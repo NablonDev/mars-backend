@@ -30,6 +30,10 @@ handling here.
 `langgraph` is not part of this comparison: it has no ORM model and its
 migration creates no tables (Postgres-only `CREATE SCHEMA`, a no-op on
 SQLite).
+
+`Base` is imported from `app.db.base` (not `app.models`) because mars_common
+is the single source of truth for ORM model metadata and `app.db.base` is a
+straight re-export of it; `app/models/` only re-exports the models themselves.
 """
 
 from pathlib import Path
@@ -38,8 +42,8 @@ from alembic.config import Config
 from sqlalchemy import create_engine, inspect
 
 from alembic import command
+from app.db.base import Base
 from app.db.session import apply_sqlite_schema_translation
-from app.models import Base
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 

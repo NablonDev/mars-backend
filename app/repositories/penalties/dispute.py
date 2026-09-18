@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from uuid import UUID
 
 from sqlalchemy import delete, select
@@ -35,6 +35,7 @@ def _to_dict(row: PenaltyDispute) -> dict:
         "override_verdict": row.override_verdict,
         "override_reason": row.override_reason,
         "notes": row.notes,
+        "response_due_date": row.response_due_date,
         "created_at": row.created_at,
     }
 
@@ -57,6 +58,7 @@ class PenaltyDisputeRepository:
         reason_code: str,
         claimed_amount: float,
         notes: str | None = None,
+        response_due_date: date | None = None,
     ) -> dict:
         """Open a new penalty dispute in OPEN status for a charged penalty."""
         row = PenaltyDispute(
@@ -66,6 +68,7 @@ class PenaltyDisputeRepository:
             claimed_amount=claimed_amount,
             dispute_status=DisputeStatus.OPEN,
             notes=notes,
+            response_due_date=response_due_date,
         )
         self._session.add(row)
         self._session.flush()

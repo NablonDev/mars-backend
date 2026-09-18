@@ -1086,6 +1086,7 @@ dependencies = [
     { name = "langchain-openai" },
     { name = "langgraph" },
     { name = "langgraph-checkpoint-postgres" },
+    { name = "mars-common" },
     { name = "psycopg", extra = ["binary", "pool"] },
     { name = "psycopg2-binary" },
     { name = "pydantic" },
@@ -1115,6 +1116,7 @@ requires-dist = [
     { name = "langchain-openai", specifier = ">=1.4,<2.0" },
     { name = "langgraph", specifier = ">=1.2,<2.0" },
     { name = "langgraph-checkpoint-postgres", specifier = ">=3.1,<4.0" },
+    { name = "mars-common", editable = "../mars-common" },
     { name = "psycopg", extras = ["binary", "pool"], specifier = ">=3.3,<4.0" },
     { name = "psycopg2-binary", specifier = ">=2.9,<3.0" },
     { name = "pydantic", specifier = ">=2.13,<3.0" },
@@ -1129,6 +1131,28 @@ dev = [
     { name = "mypy", specifier = ">=1.18,<2.0" },
     { name = "pytest", specifier = ">=9.1,<10.0" },
     { name = "ruff", specifier = ">=0.16,<1.0" },
+]
+
+[[package]]
+name = "mars-common"
+version = "0.1.0"
+source = { editable = "../mars-common" }
+dependencies = [
+    { name = "pydantic" },
+    { name = "sqlalchemy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pydantic", specifier = ">=2.7.0,<3.0" },
+    { name = "sqlalchemy", specifier = ">=2.0.30,<3.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "mypy", specifier = ">=2.3.1" },
+    { name = "pytest", specifier = ">=9.1.1" },
+    { name = "ruff", specifier = ">=0.16.8" },
 ]
 
 [[package]]

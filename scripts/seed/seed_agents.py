@@ -39,7 +39,7 @@ from app.agents.penalties.rule_extraction.prompts.v1 import (
 )
 from app.core.config import Settings
 from app.db.session import Database
-from app.models.process.agent import Agent
+from app.models.process import Agent
 from app.services.cmir.extractor import _PROMPT_TEMPLATE as CMIR_EXTRACTOR_PROMPT_TEMPLATE
 from app.services.po_validation.service import _SYSTEM_PROMPT as PO_VALIDATION_SYSTEM_PROMPT
 

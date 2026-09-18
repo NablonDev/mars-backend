@@ -18,7 +18,7 @@ from uuid import uuid4
 
 from app.models import JobItem, JobRun
 from app.models.enums import JobItemStatus, JobRunType, JobTaskType, SummaryType
-from app.models.penalties.job_context import PenaltyJobItemContext
+from app.models.penalties import PenaltyJobItemContext
 from app.repositories.penalties.summary import PenaltySummaryRepository
 
 _AGENT_ID = uuid4()

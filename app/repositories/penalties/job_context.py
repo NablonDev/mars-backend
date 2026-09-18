@@ -9,7 +9,7 @@ from uuid import UUID
 from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
-from app.models.penalties.job_context import PenaltyJobItemContext, PenaltyJobRunContext
+from app.models.penalties import PenaltyJobItemContext, PenaltyJobRunContext
 
 
 def _run_context_to_dict(row: PenaltyJobRunContext) -> dict:

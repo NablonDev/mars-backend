@@ -8,7 +8,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.cmir.job_context import CmirJobItemContext, CmirJobRunContext
+from app.models.cmir import CmirJobItemContext, CmirJobRunContext
 
 
 def _run_context_to_dict(row: CmirJobRunContext) -> dict:
