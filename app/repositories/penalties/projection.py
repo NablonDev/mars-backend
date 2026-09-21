@@ -172,8 +172,8 @@ class PenaltyProjectionRepository:
         self._session.flush()
 
     def _upsert(
-            self, purchase_order_id: UUID, rule_id: UUID, result: ProjectionResult, entry: _ProjectionRow
-        ) -> PenaltyProjection:
+        self, purchase_order_id: UUID, rule_id: UUID, result: ProjectionResult, entry: _ProjectionRow
+    ) -> PenaltyProjection:
         """Insert or replace one `penalty_projection` row for one (PO, rule, projection_date)."""
         existing = self._session.scalars(
             select(PenaltyProjection).where(
@@ -207,7 +207,7 @@ class PenaltyProjectionRepository:
         )
         self._session.add(row)
         return row
-    
+
     def _get_stacking_mode(self, purchase_order_id: UUID) -> str:
         """Resolve a purchase order's retailer `stacking_mode`, falling back to SUM.
 

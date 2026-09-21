@@ -235,9 +235,7 @@ def test_open_dispute_sets_response_due_date_from_default_window(repos):
     _, actual_penalty_id = _seed_shortage_dispute_scenario(repos)
     service = _build_service(repos)
 
-    dispute = service.open_dispute(
-        actual_penalty_id, "NOT_LATE", 100.0, now_date=date(2026, 1, 1)
-    )
+    dispute = service.open_dispute(actual_penalty_id, "NOT_LATE", 100.0, now_date=date(2026, 1, 1))
 
     assert dispute["response_due_date"] == date(2026, 1, 1) + timedelta(days=90)
 
@@ -250,9 +248,7 @@ def test_open_dispute_uses_retailer_agreement_dispute_window_when_set(repos, db_
     )
     service = _build_service(repos)
 
-    dispute = service.open_dispute(
-        actual_penalty_id, "NOT_LATE", 100.0, now_date=date(2026, 1, 1)
-    )
+    dispute = service.open_dispute(actual_penalty_id, "NOT_LATE", 100.0, now_date=date(2026, 1, 1))
 
     assert dispute["response_due_date"] == date(2026, 1, 1) + timedelta(
         days=retailer_agreement["dispute_window_days"]

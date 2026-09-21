@@ -30,7 +30,9 @@ class AppSettings(BaseSettings):
         default="development",  # "production" | "staging" | "development"
         validation_alias=AliasChoices("APP_ENVIRONMENT", "ENVIRONMENT"),
     )
-    docs_enabled: bool = Field(default=True, validation_alias=AliasChoices("APP_DOCS_ENABLED", "DOCS_ENABLED"))
+    docs_enabled: bool = Field(
+        default=True, validation_alias=AliasChoices("APP_DOCS_ENABLED", "DOCS_ENABLED")
+    )
     log_level: str = Field(default="INFO", validation_alias=AliasChoices("APP_LOG_LEVEL", "LOG_LEVEL"))
     log_format: str = Field(default="json", validation_alias=AliasChoices("APP_LOG_FORMAT", "LOG_FORMAT"))
     no_color: bool = Field(default=False, validation_alias=AliasChoices("APP_NO_COLOR", "NO_COLOR"))
