@@ -57,12 +57,23 @@ class Database:
         pool_timeout: int | None = None,
         **engine_kwargs: Any,
     ) -> None:
-        engine_kwargs.setdefault("future", True)
+        # pool_pre_ping catches a connection that's already dead, but under WSL2's
+        # NAT/conntrack layer an idle connection can be silently dropped without the
+        # socket ever erroring -- the next query on it then desyncs instead of failing
+        # cleanly. TCP keepalives keep the socket active during idle periods so it
+        # never goes quiet long enough to be reaped.
         engine_kwargs.setdefault("pool_pre_ping", True)
-        # UUID primary keys (agent_runs.id, email_events.id) flow into JSON/JSONB columns
-        # as raw graph state, and stock json.dumps cannot encode a uuid.UUID. Falling back
-        # to str() at the engine level covers every JSON/JSONB column reached through this
-        # one Database instance.
+        if database_url.startswith("postgresql"):
+            engine_kwargs.setdefault(
+                "connect_args",
+                {
+                    "keepalives": 1,
+                    "keepalives_idle": 2,
+                    "keepalives_interval": 2,
+                    "keepalives_count": 3,
+                },
+            )
+        # Fall back to str() for UUIDs and other non-standard types in JSON/JSONB columns
         engine_kwargs.setdefault("json_serializer", lambda obj: json.dumps(obj, default=str))
 
         if pool_size is not None:

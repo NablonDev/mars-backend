@@ -70,7 +70,7 @@ def seed_showcase_data() -> None:
                 retailer_code="RET-COSTCO",
                 retailer_name="Costco Wholesale",
                 priority_tier="TIER_1",
-                stacking_mode="INDEPENDENT",
+                stacking_mode="SUM",
                 source_system="SAP",
             )
             session.add(costco)
