@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _INTERNAL_API_KEY_MIN_LENGTH = 64
@@ -23,22 +23,22 @@ class AppSettings(BaseSettings):
             "Mars Petcare Backend: CMIR Email Resolution, PO Validation, "
             "and Projected Penalties, Mitigation & Dispute Resolution"
         ),
-        validation_alias="APP_PROJECT_NAME",
+        validation_alias=AliasChoices("APP_PROJECT_NAME", "PROJECT_NAME"),
     )
-    version: str = Field(default="0.1.0", validation_alias="APP_VERSION")
+    version: str = Field(default="0.1.0", validation_alias=AliasChoices("APP_VERSION", "VERSION"))
     environment: str = Field(
         default="development",  # "production" | "staging" | "development"
-        validation_alias="APP_ENVIRONMENT",
+        validation_alias=AliasChoices("APP_ENVIRONMENT", "ENVIRONMENT"),
     )
-    docs_enabled: bool = Field(default=True, validation_alias="APP_DOCS_ENABLED")
-    log_level: str = Field(default="INFO", validation_alias="APP_LOG_LEVEL")
-    log_format: str = Field(default="json", validation_alias="APP_LOG_FORMAT")
-    no_color: bool = Field(default=False, validation_alias="APP_NO_COLOR")
-    no_bold: bool = Field(default=False, validation_alias="APP_NO_BOLD")
+    docs_enabled: bool = Field(default=True, validation_alias=AliasChoices("APP_DOCS_ENABLED", "DOCS_ENABLED"))
+    log_level: str = Field(default="INFO", validation_alias=AliasChoices("APP_LOG_LEVEL", "LOG_LEVEL"))
+    log_format: str = Field(default="json", validation_alias=AliasChoices("APP_LOG_FORMAT", "LOG_FORMAT"))
+    no_color: bool = Field(default=False, validation_alias=AliasChoices("APP_NO_COLOR", "NO_COLOR"))
+    no_bold: bool = Field(default=False, validation_alias=AliasChoices("APP_NO_BOLD", "NO_BOLD"))
     # Security: shared-secret gate on every route except /health. No default --
     # a missing APP_INTERNAL_API_KEY must fail app startup, never silently
     # accept unauthenticated requests.
-    internal_api_key: str = Field(validation_alias="APP_INTERNAL_API_KEY")
+    internal_api_key: str = Field(validation_alias=AliasChoices("APP_INTERNAL_API_KEY", "INTERNAL_API_KEY"))
 
     @field_validator("environment", mode="before")
     @classmethod
