@@ -155,7 +155,7 @@ class MitigationSummaryService(
         if as_of_date > max_allowed_date:
             raise ValidationError(
                 code="INVALID_AS_OF_DATE",
-                message=f"as_of_date={as_of_date.isoformat()} is beyond recorded mitigation horizon ({max_allowed_date.isoformat()}).",
+                message=f"as_of_date={as_of_date.isoformat()} is in the future (beyond recorded mitigation horizon {max_allowed_date.isoformat()}).",
             )
 
         if as_of_date < earliest_options_date:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
 
 from sqlalchemy import select
 
@@ -114,7 +113,7 @@ def main() -> None:
                 logger.warning(f"PO {po_num} has no projections on record, skipping summary")
                 continue
 
-            valid_dates = sorted(list({p["projection_date"] for p in po_projs}))
+            valid_dates = sorted({p["projection_date"] for p in po_projs})
             if not valid_dates:
                 logger.warning(f"PO {po_num} has no projections on record, skipping")
                 continue
@@ -129,9 +128,13 @@ def main() -> None:
                 if not existing_mit or existing_mit.get("status") != "READY":
                     logger.info(f"Scheduling MITIGATION summary for {po_num} as of {target_date}...")
                     try:
-                        mit_summary_service.get_or_schedule(po.id, as_of_date=target_date, force_regenerate=True)
+                        mit_summary_service.get_or_schedule(
+                            po.id, as_of_date=target_date, force_regenerate=True
+                        )
                     except (ValidationError, BusinessRuleError) as e:
-                        logger.warning(f"Could not schedule mitigation summary for {po_num} as of {target_date}: {e}")
+                        logger.warning(
+                            f"Could not schedule mitigation summary for {po_num} as of {target_date}: {e}"
+                        )
 
         # Schedule dispute summaries for analyzed/resolved disputes
         disputes = session.scalars(

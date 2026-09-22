@@ -167,7 +167,7 @@ class ProjectionSummaryService(
         if as_of_date > max_allowed_date:
             raise ValidationError(
                 code="INVALID_AS_OF_DATE",
-                message=f"as_of_date={as_of_date.isoformat()} is beyond recorded projection horizon ({max_allowed_date.isoformat()}).",
+                message=f"as_of_date={as_of_date.isoformat()} is in the future (beyond recorded projection horizon {max_allowed_date.isoformat()}).",
             )
 
         if as_of_date < earliest_projection_date:
