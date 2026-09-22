@@ -1,9 +1,14 @@
-.PHONY: install run test test-unit test-integration lint format format-check typecheck check \
+.PHONY: install install-hooks run test test-unit test-integration lint format format-check typecheck check \
 	migrate migrate-docker seed daily-batch \
 	docker-up docker-down docker-reset docker-logs docker-migrate docker-worker docker-cmir-consumer
 
 install:
 	uv sync
+	$(MAKE) install-hooks
+
+install-hooks:
+	git config core.hooksPath .githooks
+	chmod +x .githooks/pre-commit
 
 run:
 	uv run uvicorn app.main:app --reload
