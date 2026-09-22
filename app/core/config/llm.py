@@ -18,6 +18,7 @@ class AzureOpenAISettings(BaseSettings):
     deployment: str = Field(default="", validation_alias="AZURE_OPENAI_DEPLOYMENT_NAME")
     timeout_seconds: float = Field(default=90.0, validation_alias="AZURE_OPENAI_TIMEOUT_SECONDS")
     max_attempts: int = Field(default=3, validation_alias="AZURE_OPENAI_MAX_ATTEMPTS")
+    max_retries: int = Field(default=3, validation_alias="AZURE_OPENAI_MAX_RETRIES")
     temperature: float = Field(default=0.0, validation_alias="AZURE_OPENAI_TEMPERATURE")
 
     # Shared rate-limit backoff across concurrent LLM calls. Per-call SDK retries

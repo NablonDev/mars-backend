@@ -208,6 +208,11 @@ class MitigationEngine:
         if inputs.express_carrier_cost is None or inputs.express_carrier_transit_days is None:
             return None  # "not present" tier
 
+        days_to_delivery = (snapshot.requested_delivery_date - snapshot.projection_date).days
+        if days_to_delivery < inputs.express_carrier_transit_days:
+            # Phase 4 Cutoff: carrier expedite cannot arrive before MABD delivery due date
+            return None
+
         hypothetical = replace(snapshot, expected_transit_days=inputs.express_carrier_transit_days)
         projected_penalty_after = self._projection_engine.project(
             hypothetical, rules, projection.stacking_mode
@@ -219,8 +224,8 @@ class MitigationEngine:
         risk_level = "LOW" if confidence == "CONFIRMED" else "MEDIUM"
 
         rationale = (
-            f"Re-routes via an express carrier ({inputs.express_carrier_transit_days}-day transit) "
-            f"for ${action_cost:.2f}"
+            f"Re-routes via an express carrier ({inputs.express_carrier_transit_days}-day transit, "
+            f"{days_to_delivery}d remaining) for ${action_cost:.2f}"
             f"{'' if confidence == 'CONFIRMED' else ' (carrier cost/transit data not fully confirmed)'}."
         )
 

@@ -18,7 +18,11 @@ from app.db.base import generate_uuid7
 from app.db.session import Database
 from app.models.common import Retailer, RetailerAgreement
 from app.utils.hashing import content_sha256
-from scripts.seed.contract_fixtures import KROGER_CONTRACT_TEXT, TARGET_CONTRACT_TEXT
+from scripts.seed.contract_fixtures import (
+    COSTCO_CONTRACT_TEXT,
+    KROGER_CONTRACT_TEXT,
+    TARGET_CONTRACT_TEXT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +53,19 @@ AGREEMENT_SPECS: list[dict[str, Any]] = [
         "effective_date": datetime.date(2024, 11, 1),
         "expiration_date": datetime.date(2027, 10, 31),
         "dispute_window_days": 45,
+    },
+    {
+        "retailer_code": "RET-COSTCO",
+        "retailer_name": "Costco Wholesale",
+        "priority_tier": "TIER_1",
+        "stacking_mode": "SUM",
+        "source_system": "SAP",
+        "contract_code": "COSTCO-MNA-2026",
+        "title": "Costco Wholesale Master Vendor Agreement 2026",
+        "markdown_text": COSTCO_CONTRACT_TEXT,
+        "effective_date": datetime.date(2024, 11, 1),
+        "expiration_date": datetime.date(2027, 10, 31),
+        "dispute_window_days": 30,
     },
 ]
 

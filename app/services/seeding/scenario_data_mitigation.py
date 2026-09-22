@@ -64,6 +64,19 @@ SEEDED_MITIGATION_INPUTS: dict[str, MitigationInputs] = {
         express_carrier_data_confirmed=True,
         split_shipment_handling_cost=80.00,
     ),
+    # Confirmed multi-option tier for Amazon: both carrier expedite and split shipment viable.
+    "AMZ-778501": MitigationInputs(
+        order_id="AMZ-778501",
+        shortage_cause=ShortageCause.LABOR_CAPACITY,
+        shortage_cause_confirmed=True,
+        capacity_boost_cost_per_unit=1.25,
+        capacity_boost_max_units_per_day=200,
+        capacity_boost_data_confirmed=True,
+        express_carrier_cost=85.00,
+        express_carrier_transit_days=1,
+        express_carrier_data_confirmed=True,
+        split_shipment_handling_cost=40.00,
+    ),
 }
 
 # ---------------------------------------------------------------------

@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.models import Agent, AgentRun, AgentTrace
@@ -89,6 +89,12 @@ class AgentRegistryRepository:
         ).first()
 
         if row is None:
+            if is_active:
+                self._session.execute(
+                    update(Agent)
+                    .where(Agent.agent_code == agent_code, Agent.is_active.is_(True))
+                    .values(is_active=False)
+                )
             row = Agent(
                 agent_code=agent_code,
                 agent_name=agent_name,

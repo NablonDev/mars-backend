@@ -349,3 +349,166 @@ Name: Marcus Vance
 Title: Vice President, Commercial Sales & Supply Chain  
 Date: November 1, 2024  
 """
+
+
+COSTCO_CONTRACT_TEXT = """# MASTER VENDOR AGREEMENT AND MERCHANDISE COMPLIANCE TERMS
+
+**THIS MASTER VENDOR AGREEMENT AND MERCHANDISE COMPLIANCE TERMS** (this “Agreement”) is entered into and made effective as of the 1st day of November, 2024 (the “Effective Date”), by and between **Costco Wholesale Corporation**, a Washington corporation having its principal corporate offices at 999 Lake Drive, Issaquah, Washington 98027, acting on behalf of itself, its operating club divisions, wholesale subsidiaries, and cross-dock distribution depots (collectively, “Costco” or “Buyer”), and **Mars Petcare US, Inc.**, a Delaware corporation having its principal place of business at 315 Cool Springs Boulevard, Franklin, Tennessee 37067, on behalf of itself and its manufacturing operating subsidiaries (collectively, “Vendor” or “Supplier”). Costco and Vendor are referred to individually as a “Party” and collectively as the “Parties.”
+
+## RECITALS
+
+**WHEREAS**, Costco operates a membership warehouse club merchandising network throughout the United States, consisting of wholesale warehouse locations, regional cross-dock distribution depots, business centers, and digital commerce fulfillment channels (Costco.com);
+
+**WHEREAS**, Vendor is a premier global manufacturer and commercial packager of companion animal nutrition and pet care consumables, including dry kibble, wet food cans and trays, specialty oral care dental treats, and companion snacks manufactured under proprietary brand families including *Pedigree®*, *Iams®*, *Greenies®*, *Cesar®*, and *Whiskas®* packaged in Costco-exclusive club configurations, multi-packs, and jumbo bag formats (collectively, the “Products”);
+
+**WHEREAS**, Costco desires to procure Products from Vendor for distribution and resale through its wholesale warehouse clubs and e-commerce depots, and Vendor agrees to manufacture, package, sell, palletize, and deliver conforming Products in strict adherence to the terms, logistics guidelines, On-Time In-Full (OTIF) compliance benchmarks, packaging specifications, and legal conditions set forth in this Agreement and the incorporated Costco Wholesale Vendor Handbook;
+
+**NOW, THEREFORE**, in consideration of the mutual covenants, representations, warranties, and commercial undertakings contained herein, and for other good and valuable consideration, the receipt and sufficiency of which are hereby acknowledged, the Parties agree as follows:
+
+---
+
+## 1. DEFINITIONS AND INCORPORATION OF STANDARDS
+
+**1.1 Defined Terms.** As used in this Agreement, the following capitalized terms shall have the respective meanings assigned below:
+- **“Advance Shipping Notice”** or **“ASN”** means the Electronic Data Interchange (EDI) Transaction Set 856 containing accurate, hierarchical carton-level and pallet-level shipping manifest data, purchase order identifiers, SKU details, and carrier tracking numbers.
+- **“Applicable Laws”** means all federal, state, and municipal statutes, codes, ordinances, regulations, and administrative guidelines governing companion animal consumables, including the Federal Food, Drug, and Cosmetic Act (FD&C Act), the Food Safety Modernization Act (FSMA) (21 CFR Part 507), Association of American Feed Control Officials (AAFCO) standards, the Fair Packaging and Labeling Act (FPLA), and California Proposition 65.
+- **“Bill of Lading”** or **“BOL”** means the legal shipping document issued by Vendor or its carrier acknowledging receipt of freight, specifying carrier pro-number, trailer seal numbers, case counts, pallet counts, and destination Costco Depot.
+- **“Business Day”** means any calendar day other than a Saturday, Sunday, or official federal banking holiday in the United States.
+- **“Costco Depot”** means any designated regional cross-dock distribution facility, consolidation terminal, dry grocery depot, or e-commerce fulfillment depot operated by Costco Wholesale Corporation across North America.
+- **“Costco Vendor Handbook”** means Costco’s official vendor compliance guide, inbound logistics routing guide, packaging specifications manual, and standard terms and conditions, accessible via the Costco Vendor Portal (CVIS), as amended from time to time.
+- **“EDI”** means Electronic Data Interchange operating under the ANSI ASC X12 standard protocol.
+- **“GS1-128”** means the international linear barcode standard (ISO/IEC 15417) utilized on master shipping containers, club display trays, and unit pallets encoding the Serial Shipping Container Code (SSCC-18).
+- **“Must Arrive By Date”** or **“MABD”** means the specific arrival appointment date and designated time window specified on each Purchase Order or booked through Costco’s dock scheduling system.
+- **“OTIF”** means On-Time In-Full logistics performance evaluated against confirmed Purchase Order quantities and booked depot appointment times.
+- **“Purchase Order”** or **“PO”** means each individual electronic purchase order issued by Costco to Vendor via EDI Transaction Set 850 specifying ordered SKUs, club pack quantities, wholesale pricing, freight terms, destination Depot, and required delivery date.
+
+**1.2 Precedence of Documents.** In the event of any direct conflict between the terms of this Agreement and any Purchase Order, invoice, or the Costco Vendor Handbook, the provisions of this Agreement shall control, followed in order of precedence by the Purchase Order, the Costco Vendor Handbook, and any mutually executed written amendment.
+
+---
+
+## 2. PURCHASE ORDERS, EDI PROTOCOLS, AND INVENTORY COMMITMENTS
+
+**2.1 Order Placement via EDI 850.** Costco shall transmit all purchase orders electronically utilizing EDI Transaction Set 850. Each Purchase Order constitutes a binding purchase commitment upon electronic acknowledgment by Vendor.
+
+**2.2 Purchase Order Acknowledgment (EDI 855).** Vendor shall transmit an electronic Purchase Order Acknowledgment (EDI Transaction Set 855) or functional acknowledgment (EDI 997) within twenty-four (24) hours following Vendor’s receipt of each EDI 850. The EDI 855 must confirm Vendor’s full acceptance of the PO, confirmed line-item case quantities, unit pricing, and scheduled shipping origin dates aligned with Costco’s designated delivery schedule. Any conditional acceptance, price variation, or quantity reduction submitted by Vendor without Costco’s prior written consent is void *ab initio*.
+
+**2.3 Cancellations and Rescheduling.** Costco reserves the right to cancel, modify, or reschedule any Purchase Order without penalty, restocking fee, or storage liability upon transmitting electronic notice to Vendor at least five (5) Business Days prior to the scheduled origin shipping date.
+
+**2.4 Rolling Volume Projections.** Any demand forecasts, promotional volume estimates, or member purchasing projections provided by Costco are non-binding estimates provided solely to assist Vendor in raw ingredient and packaging procurement. Costco makes no guarantee, express or implied, regarding minimum purchase volumes.
+
+---
+
+## 3. DEPOT LOGISTICS, APPOINTMENT SCHEDULING, AND INBOUND ROUTING
+
+**3.1 Freight Terms and Title Transfer.** Unless explicitly stated otherwise on the face of the Purchase Order, all shipments under this Agreement shall move on a prepaid freight basis under Delivered Duty Paid (DDP - Incoterms 2020) terms to the designated Costco Depot dock. Vendor retains title, risk of loss, and full transit insurance responsibility until the trailer is safely positioned at Costco’s depot dock, offloaded, and an authorized Costco receiving agent signs the electronic delivery receipt.
+
+**3.2 Inbound Dock Appointment Scheduling.** 
+- All inbound carrier deliveries to Costco Depots must secure an advance dock delivery appointment through the Costco Transportation Management System (TMS / Manhattan Associates) at least forty-eight (48) hours prior to the requested delivery appointment.
+- Deliveries are scheduled with a strict one-hour appointment window. Carriers arriving more than thirty (30) minutes after the scheduled appointment time are classified as late and subject to rescheduled unloading or compliance chargebacks under Section 4.
+
+---
+
+## 4. PERFORMANCE BENCHMARKS, COMPLIANCE CHARGEBACKS, AND LOGISTICS STANDARDS
+
+**4.1 On-Time Delivery Compliance Benchmark.** Vendor covenants to achieve and maintain a monthly On-Time delivery compliance score of not less than ninety-eight percent (98.0%) across all shipments dispatched to Costco Depots. On-Time performance is determined by dividing the total number of conforming shipments arriving and checking in within thirty (30) minutes of the scheduled appointment time by the total number of scheduled delivery appointments during the applicable calendar month.
+
+**4.2 Late Delivery Non-Compliance Penalty.**
+- In the event Vendor or Vendor’s designated carrier fails to arrive within the designated appointment window, or Vendor’s aggregate monthly On-Time delivery compliance falls below ninety-eight percent (98.0%), Costco shall assess, and Vendor shall be obligated to pay via invoice deduction, an On-Time Compliance Penalty equal to **three percent (3.0%) of the total gross purchase order invoice amount**, or a flat administrative fee of **five hundred dollars ($500.00)** per late truckload appointment, whichever dollar amount is greater.
+- In addition, where a carrier misses an appointment and Costco depot management is required to hold, reschedule, or re-stage the inbound load past twenty-four (24) hours, Costco shall assess a depot detention and yard management surcharge of **seventy-five dollars ($75.00) per pallet**.
+
+**4.3 In-Full Fulfillment Compliance Benchmark.** Vendor covenants to achieve and maintain an In-Full order fulfillment score of not less than ninety-eight percent (98.0%) on each individual Purchase Order line item. The In-Full fill rate is calculated by dividing the quantity of saleable club merchandise physically received and accepted at Costco’s depot dock by the total quantity ordered on the corresponding Purchase Order line.
+
+**4.4 Purchase Order Line Shortage Penalty.**
+- If the quantity of conforming Products delivered falls below ninety-eight percent (98.0%) of the ordered unit quantity, Costco shall assess, and Vendor shall pay via invoice deduction, a Shortage Chargeback equal to **two dollars and fifty cents ($2.50) per unfulfilled case**, or **four percent (4.0%) of the gross purchase order invoice value of the unfulfilled items**, whichever is greater.
+- Costco operates on rapid cross-dock flow-through principles; shorted quantities shall not be backordered or shipped on subsequent POs without express written authorization from Costco’s buying desk. Unfulfilled line quantities are automatically cancelled upon receipt processing.
+
+**4.5 Advance Shipping Notice (EDI 856 ASN) Compliance.**
+- Vendor must transmit a syntactically valid and accurate EDI 856 ASN to Costco at least four (4) hours prior to the arrival of the carrier's conveyance at the designated Costco Depot. The ASN must accurately reflect pallet-tier configuration, SSCC serial numbers, SKU identifiers, and purchase order associations.
+- If a delivery arrives at a Costco Depot without an accepted ASN on file, or if the ASN contains erroneous carton serial numbers requiring manual receiving overrides, Costco shall assess an administrative ASN non-compliance chargeback of **two hundred fifty dollars ($250.00) per occurrence (per Bill of Lading)**.
+
+**4.6 Club Pallet Specifications and Restacking Charge.**
+- All merchandise delivered to Costco Depots must be packaged on standard Grocery Manufacturers Association (GMA) Grade A #1 four-way hardwood pallets (48-inch x 40-inch). Pallets must be clean, structurally intact, free of chemical odors, and without broken deck boards or protruding hardware.
+- Full pallet loads must be built in block or pinwheel patterns with zero carton overhang (0.0 in allowance) beyond the pallet deck edges. Maximum pallet height must not exceed fifty-two (52) inches (including pallet base). Loads must be wrapped with a minimum of 80-gauge stretch film with top sheet dust covers.
+- Any pallet delivered with overhang exceeding one-half inch, visible leaning, crushed bottom cartons, or shifting in transit requiring Costco dock personnel to downstack, sort, or rebuild onto conforming pallets shall incur a pallet restacking compliance fee of **sixty-five dollars ($65.00) per non-compliant pallet**.
+
+**4.7 Barcode Integrity and Carton Relabeling.**
+- Every club master carton, multi-pack case, and pallet unit must bear clearly visible GS1-128 shipping container barcodes compliant with ANSI/ISO Grade B (2.5 on a 4.0 scale) or higher. Barcode labels must be placed squarely on the side and front panels at a height of between 2.0 and 3.0 inches from the base.
+- In the event barcodes fail initial optical scanner verification, exhibit print truncation, or fail ANSI Grade B verification requiring Costco personnel to hand-key serial numbers or print substitute labels, Costco shall assess a carton relabeling chargeback of **fifty cents ($0.50) per non-scannable carton**.
+
+---
+
+## 5. COMMERCIAL TERMS, CASH DISCOUNTS, AND PAYMENT DEDUCTIONS
+
+**5.1 Wholesale Pricing.** Purchase prices are firm, net wholesale prices established on the face of the Purchase Order. Unit prices are all-inclusive, covering product formulation, packaging, club tray display materials, palletization, shrink-wrapping, inland freight, fuel surcharges, and destination unloading. Pricing shall remain fixed for twelve (12) month intervals and may only be modified upon mutual written agreement executed at least ninety (90) days prior to the effective date.
+
+**5.2 Electronic Invoicing (EDI 810).** Invoices must be transmitted via EDI Transaction Set 810 following origin carrier dispatch. Each invoice must precisely match Purchase Order numbers, SKU quantities, and price terms acknowledged on the corresponding EDI 855 and ASN.
+
+**5.3 Payment Terms and Prompt Payment Discount.** Standard payment terms are Net thirty (30) days from the date of physical receipt and acceptance of conforming merchandise at the destination Costco Depot. Costco shall be entitled to deduct a prompt payment cash discount of **two percent (2.0%)** from the gross invoice total if payment is remitted within ten (10) calendar days following invoice receipt (“2% 10, Net 30”).
+
+**5.4 Spoilage and Damage Allowance.** In consideration of Costco handling minor, incidental carton crushing, exterior tray scuffs, or superficial package blemishes typical of high-velocity warehouse club handling without physical product returns, Vendor grants to Costco an off-invoice Damage and Swell Allowance of **one percent (1.0%)** on all gross invoice amounts. Costco shall automatically deduct this 1.0% credit on each invoice remittance. This allowance does not cover, nor release Vendor from liability for, manufacturer product recalls, hidden adulteration, or structural bag ruptures.
+
+**5.5 Right of Set-Off.** Costco reserves the unqualified right to set off and deduct any compliance chargebacks, OTIF penalties, shortage assessments, ASN fines, pallet restacking fees, damaged goods deductions, or indemnification obligations accrued by Vendor under this Agreement against any outstanding or future accounts payable balances owed to Vendor.
+
+---
+
+## 6. QUALITY CONTROL, CLUB MERCHANDISE PACKAGING, AND FSMA COMPLIANCE
+
+**6.1 Receipt and Quality Inspection.** Costco reserves the right to inspect all incoming shipments for organoleptic quality, packaging seal integrity, foreign material absence, and temperature history. Signing a delivery receipt or offloading freight does not constitute acceptance of latent defects or non-conforming goods. Costco may reject and return any shipment exhibiting pest infestation, broken seal tapes, wet packaging, or moisture damage at Vendor’s sole cost and risk.
+
+**6.2 Food Safety and Preventive Controls.** Vendor warrants and represents that all pet food and treat consumables are manufactured in full compliance with the FDA Food Safety Modernization Act (FSMA), Hazard Analysis and Critical Control Points (HACCP) principles, and Current Good Manufacturing Practices (cGMP) under 21 CFR Part 507. Vendor shall maintain comprehensive lot traceability enabling forward and backward trace within four (4) hours of notification.
+
+**6.3 Product Recalls and Critical Withdrawals.** In the event any Product is subjected to a voluntary or mandatory recall, stop-sale directive, or safety withdrawal initiated by the FDA, state regulatory authorities, Vendor, or Costco, Vendor shall bear 100% of all direct and indirect expenses incurred by Costco. Direct expenses include club inventory retrieval, warehouse segregation, quarantine storage, member notification mailings and automated telecommunications, safe destruction, and lost gross margin. In addition, Vendor shall pay an administrative recall processing fee of **seventy-five thousand dollars ($75,000.00)** to cover Costco’s emergency logistical management.
+
+---
+
+## 7. DISPUTE RESOLUTION, AUDIT PROCEDURES, AND CHARGEBACK REVERSALS
+
+**7.1 Dispute Window.** If Vendor disputes the contractual validity, calculation accuracy, or factual justification of any compliance chargeback, deduction, or penalty assessed under Section 4, Vendor must submit a formal electronic dispute claim via the Costco Vendor Inquiry System (CVIS) within **thirty (30) calendar days** from the date of the deduction remittance advice. Any deduction not disputed within thirty (30) days shall be deemed conclusively final, binding, and waived by Vendor.
+
+**7.2 Required Evidentiary Substantiation.** To be eligible for review and reversal, each dispute notice must include:
+- The specific Purchase Order number, Costco Depot number, deduction debit memo number, and contested dollar amount;
+- An itemized narrative statement outlining the factual basis of the dispute;
+- Carrier telematics data or EDI Transaction Set 214 confirming precise GPS arrival and gate-in timestamps within the scheduled appointment window; and
+- A legible copy of the signed Bill of Lading (BOL) or electronic delivery receipt containing the physical or digital signature of an authorized Costco receiving employee and receiving time stamp.
+
+**7.3 Reconciliation Timeline.** Costco Vendor Accounting shall review properly submitted dispute documentation and render a formal written determination within forty-five (45) calendar days of receipt. If Costco verifies that the deduction resulted from Costco depot dock congestion, TMS appointment scheduling errors, or carrier telematics confirm on-time gate arrival, Costco shall credit the disputed amount back to Vendor on the next scheduled payment remittance cycle.
+
+---
+
+## 8. WARRANTIES, INDEMNIFICATION, AND INSURANCE
+
+**8.1 Product Warranties.** Vendor warrants that all Products delivered under this Agreement shall:
+- Be pure, wholesome, merchantable, fit for their intended purpose, and safe for companion animal consumption;
+- Be packaged, labeled, barcoded, and manufactured in strict conformity with approved specifications and Applicable Laws;
+- Not be adulterated or misbranded within the meaning of the FD&C Act; and
+- Free and clear of all security interests, liens, or third-party intellectual property infringement claims.
+
+**8.2 Indemnification.** Vendor shall defend, indemnify, and hold harmless Costco Wholesale Corporation, its officers, directors, employees, members, and retail club affiliates from and against any and all claims, liabilities, losses, damages, fines, administrative penalties, settlements, and legal expenses (including reasonable attorneys' fees) arising out of or resulting from: (a) actual or alleged personal injury, illness, animal death, or property damage caused by consumption or handling of Products; (b) product recalls or regulatory enforcement actions; (c) Vendor’s breach of any warranty or covenant herein; or (d) third-party claims of patent, trademark, copyright, or trade dress infringement.
+
+**8.3 Mandatory Insurance Coverage.** Vendor shall maintain, at its sole cost, Commercial General Liability insurance (including Product Liability and Completed Operations) with limits of not less than ten million dollars ($10,000,000.00) per occurrence and aggregate, and Commercial Automobile Liability with limits of not less than five million dollars ($5,000,000.00). Costco Wholesale Corporation shall be named as an Additional Insured on all applicable liability policies. Certificates of insurance shall be furnished annually to Costco Risk Management.
+
+---
+
+## 9. TERM, FORCE MAJEURE, AND GOVERNING LAW
+
+**9.1 Term and Expiration.** This Agreement shall commence on the Effective Date and continue in full force and effect for an initial period of three (3) years, expiring on October 31, 2027, unless terminated earlier in accordance with Section 9.2. Thereafter, this Agreement shall automatically renew for successive one-year terms unless either Party provides written notice of non-renewal at least ninety (90) days prior to the expiration of the current term.
+
+**9.2 Termination for Cause.** Either Party may terminate this Agreement immediately upon written notice if the other Party: (a) materially breaches any provision of this Agreement and fails to cure such breach within thirty (30) days following receipt of written notice; (b) repeatedly fails to meet the OTIF compliance benchmarks set forth in Section 4 for three (3) consecutive months; or (c) becomes insolvent, files for bankruptcy, or executes an assignment for the benefit of creditors.
+
+**9.3 Force Majeure.** Neither Party shall be liable for failure to perform its delivery or receiving obligations (other than payment obligations) to the extent caused by catastrophic events beyond its reasonable control, including acts of God, declared hurricanes, catastrophic earthquakes, federal acts of war or domestic terrorism, pandemic-mandated facility shutdowns, or verified state Department of Transportation highway closures. Operational labor strikes at Vendor’s manufacturing plants, localized equipment breakdowns, routine severe weather, or carrier freight capacity shortages shall not constitute force majeure events. The affected Party must notify the other Party in writing within twenty-four (24) hours of the force majeure occurrence.
+
+**9.4 Governing Law and Exclusive Venue.** This Agreement and all transactions arising hereunder shall be governed by and construed in accordance with the substantive laws of the State of Washington, without regard to its conflict of law principles. Any legal suit, action, or proceeding arising out of or relating to this Agreement shall be instituted exclusively in the state or federal courts situated in King County, Washington, and each Party irrevocably submits to the exclusive personal jurisdiction of such courts.
+
+**9.5 Complete Agreement.** This Agreement, together with the incorporated Costco Vendor Handbook and issued Purchase Orders, represents the entire agreement between the Parties with respect to the subject matter hereof, superseding all prior oral or written negotiations, proposals, representations, or understandings. No modification or waiver of any provision shall be valid unless executed in writing by authorized executive officers of both Costco and Vendor.
+
+---
+
+**IN WITNESS WHEREOF**, the Parties hereto have caused this Master Vendor Agreement and Merchandise Compliance Terms to be duly executed by their authorized representatives as of the Effective Date set forth above.
+
+| **COSTCO WHOLESALE CORPORATION** | **MARS PETCARE US, INC.** |
+|---|---|
+| **By:** _/s/ Richard A. Galanti_ | **By:** _/s/ Ikdeep Singh_ |
+| **Name:** Richard A. Galanti | **Name:** Ikdeep Singh |
+| **Title:** Executive Vice President, Merchandising | **Title:** President, Mars Petcare North America |
+| **Date:** November 1, 2024 | **Date:** November 1, 2024 |
+"""

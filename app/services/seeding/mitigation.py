@@ -25,8 +25,6 @@ def _mitigation_to_seed_dict(inputs: Any) -> dict[str, Any]:
     }
 
 
-# AMZ-778501 is deliberately absent from SEEDED_MITIGATION_INPUTS: it covers the
-# "not present" tier, where get_inputs() returns all-defaults.
 _MITIGATION_INPUTS = [_mitigation_to_seed_dict(inputs) for inputs in SEEDED_MITIGATION_INPUTS.values()]
 
 

@@ -27,8 +27,12 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.agents.penalties.dispute.prompts.v1 import SYSTEM_PROMPT as DISPUTE_V1_PROMPT
+from app.agents.penalties.dispute.prompts.v2 import SYSTEM_PROMPT as DISPUTE_V2_PROMPT
 from app.agents.penalties.mitigation.prompts.v1 import SYSTEM_PROMPT as MITIGATION_V1_PROMPT
+from app.agents.penalties.mitigation.prompts.v2 import SYSTEM_PROMPT as MITIGATION_V2_PROMPT
 from app.agents.penalties.projection.prompts.v1 import SYSTEM_PROMPT as PROJECTION_V1_PROMPT
+from app.agents.penalties.projection.prompts.v2 import SYSTEM_PROMPT as PROJECTION_V2_PROMPT
 from app.agents.penalties.rule_extraction.prompts.v1 import (
     PENALTY_CLASSIFICATION_SYSTEM_PROMPT,
     PENALTY_FACT_EXTRACTION_SYSTEM_PROMPT,
@@ -94,6 +98,14 @@ AGENT_SEEDS: list[_AgentSeed] = [
         domain="penalties",
         agent_name="Penalty Projection Summary",
         system_prompt=PROJECTION_V1_PROMPT,
+        is_active=False,
+    ),
+    _AgentSeed(
+        agent_code="penalty_projection_summary",
+        prompt_version="v2",
+        domain="penalties",
+        agent_name="Penalty Projection Summary",
+        system_prompt=PROJECTION_V2_PROMPT,
         is_active=True,
     ),
     _AgentSeed(
@@ -102,6 +114,30 @@ AGENT_SEEDS: list[_AgentSeed] = [
         domain="penalties",
         agent_name="Penalty Mitigation Summary",
         system_prompt=MITIGATION_V1_PROMPT,
+        is_active=False,
+    ),
+    _AgentSeed(
+        agent_code="penalty_mitigation_summary",
+        prompt_version="v2",
+        domain="penalties",
+        agent_name="Penalty Mitigation Summary",
+        system_prompt=MITIGATION_V2_PROMPT,
+        is_active=True,
+    ),
+    _AgentSeed(
+        agent_code="penalty_dispute_summary",
+        prompt_version="v1",
+        domain="penalties",
+        agent_name="Penalty Dispute Summary",
+        system_prompt=DISPUTE_V1_PROMPT,
+        is_active=False,
+    ),
+    _AgentSeed(
+        agent_code="penalty_dispute_summary",
+        prompt_version="v2",
+        domain="penalties",
+        agent_name="Penalty Dispute Summary",
+        system_prompt=DISPUTE_V2_PROMPT,
         is_active=True,
     ),
     _AgentSeed(
