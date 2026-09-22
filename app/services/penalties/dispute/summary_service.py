@@ -46,7 +46,7 @@ from app.agents.penalties.dispute import (
     build_dispute_summary_tools,
 )
 from app.agents.penalties.dispute.agent import DisputeResolutionAgent
-from app.agents.penalties.dispute.prompts.v1 import PROMPT_VERSION, SYSTEM_PROMPT
+from app.agents.penalties.dispute.prompts.v2 import PROMPT_VERSION, SYSTEM_PROMPT
 from app.agents.providers.azure_openai import AzureOpenAIChatClient
 from app.core.config import get_settings
 from app.core.exceptions import BusinessRuleError, NotFoundError

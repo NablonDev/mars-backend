@@ -76,7 +76,7 @@ def ready_mitigation_summary(database):
     the only way an API test can observe a genuine READY `?include=summary`
     response in this test configuration (no worker drains the job queue,
     the default `get_llm_client` override raises on any call)."""
-    from app.agents.penalties.mitigation.prompts.v1 import PROMPT_VERSION, SYSTEM_PROMPT
+    from app.agents.penalties.mitigation.prompts.v2 import PROMPT_VERSION, SYSTEM_PROMPT
     from app.models.enums import SummaryType
     from app.repositories.penalties.summary import PenaltySummaryRepository
     from app.repositories.process.agent_registry import AgentRegistryRepository

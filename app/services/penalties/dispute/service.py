@@ -17,7 +17,7 @@ with one method per lifecycle transition.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from uuid import UUID
 
 from app.core.exceptions import BusinessRuleError, ConflictError, NotFoundError, ValidationError
@@ -36,7 +36,7 @@ from app.services.penalties.dispute.types import (
 from app.services.penalties.projection.commitment import resolve_measurement_window
 from app.services.penalties.projection.service import ProjectionService
 from app.services.penalties.projection.types import ENGINE_FAMILY_VOLUME_COMMITMENT
-from app.utils.clock import utc_now
+from app.utils.clock import business_today, utc_now
 
 _TERMINAL_STATUSES = {DisputeStatus.RESOLVED, DisputeStatus.OVERRIDDEN}
 
@@ -59,12 +59,18 @@ class DisputeResolutionService:
     # Only needed for a VOLUME_COMMITMENT dispute's actual-purchase-quantity lookup; every
     # other family works without it.
     retailer_agreements: RetailerAgreementRepository | None = None
+    # Fallback response window (days) when no retailer agreement carries its own
+    # dispute_window_days, or none is currently effective. Overridden by
+    # Settings.dispute.default_window_days at DI wiring time; the default here
+    # only matters for a service built directly (e.g. in tests).
+    default_window_days: int = 90
 
     def open_dispute(
         self,
         actual_penalty_id: UUID,
         reason_code: str,
         claimed_amount: float,
+        now_date: date | None = None,
         notes: str | None = None,
         claim_facts: dict | None = None,
     ) -> dict:
@@ -79,6 +85,12 @@ class DisputeResolutionService:
         `actual_penalty` row, never mutated after: raises `ConflictError` if this charge
         already carries claim_facts from an earlier dispute cycle. A charge needing
         different facts requires a new charge, not a second write here.
+
+        `response_due_date` is set from the retailer agreement effective on the
+        purchase order's retailer as of the open date, if one carries a
+        `dispute_window_days`; otherwise it falls back to `default_window_days`.
+        `now_date` pins the open date for tests, the same "injectable for tests"
+        purpose `now` serves on `analyze()`/`resolve()`.
         """
         actual_penalty = self.actual_penalties.get(actual_penalty_id)
         if actual_penalty is None:
@@ -98,7 +110,7 @@ class DisputeResolutionService:
             )
 
         purchase_order_id = actual_penalty["purchase_order_id"]
-        self.purchase_orders.require_purchase_order(purchase_order_id)
+        purchase_order = self.purchase_orders.require_purchase_order(purchase_order_id)
 
         if claim_facts is not None:
             try:
@@ -109,12 +121,22 @@ class DisputeResolutionService:
                     message=(f"claim_facts already recorded for actual_penalty {actual_penalty_id}: {exc}"),
                 ) from exc
 
+        open_date = now_date or business_today()
+        response_due_date = open_date + timedelta(days=self.default_window_days)
+        if self.retailer_agreements is not None:
+            effective_agreement = self.retailer_agreements.get_effective_for_retailer(
+                purchase_order["retailer_id"], open_date
+            )
+            if effective_agreement is not None and effective_agreement.get("dispute_window_days"):
+                response_due_date = open_date + timedelta(days=effective_agreement["dispute_window_days"])
+
         return self.disputes.create(
             actual_penalty_id=actual_penalty_id,
             purchase_order_id=purchase_order_id,
             reason_code=reason_code,
             claimed_amount=claimed_amount,
             notes=notes,
+            response_due_date=response_due_date,
         )
 
     def analyze(self, dispute_id: UUID, now: datetime | None = None) -> dict:

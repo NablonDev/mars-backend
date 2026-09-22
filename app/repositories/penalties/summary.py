@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.models import PenaltySummary
 from app.models.enums import SummaryStatus
-from app.models.penalties.job_context import PenaltyJobItemContext
+from app.models.penalties import PenaltyJobItemContext
 
 
 def _to_dict(row: PenaltySummary) -> dict:

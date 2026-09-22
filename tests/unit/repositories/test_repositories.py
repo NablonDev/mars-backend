@@ -12,7 +12,7 @@ from sqlalchemy import select
 
 from app.core.exceptions import ValidationError
 from app.models import DemandException, OrderConfirmation, ProductionSchedule, Retailer, Shipment
-from app.models.penalties.rule import PenaltyRuleTier
+from app.models.penalties import PenaltyRuleTier
 from app.services.penalties.projection import CalcType
 from tests.conftest import make_retailer_agreement
 
@@ -191,3 +191,20 @@ def test_fact_writers_are_idempotent_on_their_natural_key(repos, db_session):
     assert len(productions) == 1
     assert len(shipments) == 1
     assert len(exceptions) == 1
+
+
+def test_add_actual_penalty_persists_purchase_order_line_id(repos):
+    """Verify that `add_actual_penalty` preserves a given `purchase_order_line_id`."""
+    seeded = _seed_purchase_order(repos, "ORD-ACTUAL-PENALTY-LINE-ID")
+    purchase_order_id = seeded["purchase_order"]["id"]
+    purchase_order_line_id = seeded["line"]["id"]
+
+    result = repos.actual_penalties.add_actual_penalty(
+        actual_penalty_number="AP-TEST-001",
+        purchase_order_id=purchase_order_id,
+        violation_type="OTIF_LATE",
+        actual_penalty_amount=100.0,
+        invoice_or_deduction_date=date(2026, 1, 1),
+        purchase_order_line_id=purchase_order_line_id,
+    )
+    assert result["purchase_order_line_id"] == purchase_order_line_id

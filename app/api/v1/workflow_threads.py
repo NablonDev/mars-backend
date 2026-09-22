@@ -51,9 +51,9 @@ def list_workflow_threads(
     result = run_service.list_runs(view="threads", status=status, stage=stage, limit=limit, cursor=cursor)
     items = result["items"]
     if domain == "cmir":
-        items = [item for item in items if item["email_event_id"] is not None]
+        items = [item for item in items if item.get("email_event_id") is not None]
     elif domain == "po_validation":
-        items = [item for item in items if item["purchase_order_line_id"] is not None]
+        items = [item for item in items if item.get("purchase_order_line_id") is not None]
     return success_envelope(
         WorkflowThreadListResponse(
             items=[WorkflowThreadResponse.model_validate(item) for item in items],

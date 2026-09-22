@@ -1,5 +1,5 @@
 """Golden test for the dispute-summary system prompt
-(`app.agents.penalties.dispute.prompts.v1.SYSTEM_PROMPT`): the LLM must be
+(`app.agents.penalties.dispute.prompts.v2.SYSTEM_PROMPT`): the LLM must be
 explicitly forbidden from stating or implying a verdict other than the one
 the deterministic engine already persisted -- the verdict/computed_amount/
 claimed_amount/delta_amount are narrated, never second-guessed. See
@@ -7,7 +7,7 @@ claimed_amount/delta_amount are narrated, never second-guessed. See
 decides pay/no-pay/how-much") and `DisputeSummaryService`'s own docstring.
 """
 
-from app.agents.penalties.dispute.prompts.v1 import SYSTEM_PROMPT
+from app.agents.penalties.dispute.prompts.v2 import SYSTEM_PROMPT
 
 
 def test_prompt_forbids_stating_a_different_verdict():

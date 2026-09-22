@@ -34,7 +34,7 @@ from app.agents.penalties.mitigation import (
     build_penalty_mitigation_summary_tools,
 )
 from app.agents.penalties.mitigation.agent import PenaltyMitigationAgent
-from app.agents.penalties.mitigation.prompts.v1 import PROMPT_VERSION, SYSTEM_PROMPT
+from app.agents.penalties.mitigation.prompts.v2 import PROMPT_VERSION, SYSTEM_PROMPT
 from app.agents.providers.azure_openai import AzureOpenAIChatClient
 from app.core.exceptions import BusinessRuleError, NotFoundError, ValidationError
 from app.models.enums import JobTaskType, SummaryType
@@ -144,16 +144,18 @@ class MitigationSummaryService(
         as_of_date = as_of_date or today
 
         earliest_options_date = self.mitigation_options.earliest_date(purchase_order_id)
-        if earliest_options_date is None:
+        latest_options_date = self.mitigation_options.latest_date(purchase_order_id)
+        if earliest_options_date is None or latest_options_date is None:
             raise BusinessRuleError(
                 code="NO_MITIGATION_OPTIONS_EXIST",
                 message=f"No mitigation options exist yet for purchase_order_id={purchase_order_id}.",
             )
 
-        if as_of_date > today:
+        max_allowed_date = max(today, latest_options_date)
+        if as_of_date > max_allowed_date:
             raise ValidationError(
                 code="INVALID_AS_OF_DATE",
-                message=f"as_of_date={as_of_date.isoformat()} is in the future.",
+                message=f"as_of_date={as_of_date.isoformat()} is in the future (beyond recorded mitigation horizon {max_allowed_date.isoformat()}).",
             )
 
         if as_of_date < earliest_options_date:

@@ -2,7 +2,7 @@
 column default drifting apart again (see JobQueueRepository.enqueue/enqueue_many)."""
 
 from app.core.config import Settings
-from app.models.process.job import JobItem
+from app.models.process import JobItem
 
 
 def test_job_queue_max_attempts_setting_matches_column_default():

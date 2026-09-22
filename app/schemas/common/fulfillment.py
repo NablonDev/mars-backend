@@ -117,6 +117,7 @@ class ActualPenaltyRequest(BaseModel):
     """Request body for recording an actual, post-delivery penalty against a purchase order."""
 
     purchase_order_id: UUID
+    purchase_order_line_id: UUID | None = None
     actual_penalty_number: str
     violation_type: str
     actual_penalty_amount: float
@@ -132,6 +133,7 @@ class ActualPenaltyResponse(BaseModel):
     id: UUID
     actual_penalty_number: str
     purchase_order_id: UUID
+    purchase_order_line_id: UUID | None = None
     violation_type: str
     actual_penalty_amount: float
     invoice_or_deduction_date: date

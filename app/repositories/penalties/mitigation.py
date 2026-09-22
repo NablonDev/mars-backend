@@ -217,3 +217,11 @@ class MitigationOptionRepository:
                 MitigationOptionModel.purchase_order_id == purchase_order_id
             )
         )
+
+    def latest_date(self, purchase_order_id: UUID) -> date | None:
+        """Fetch the latest projection_date on record for a PO, or None if none exist."""
+        return self._session.scalar(
+            select(func.max(MitigationOptionModel.projection_date)).where(
+                MitigationOptionModel.purchase_order_id == purchase_order_id
+            )
+        )

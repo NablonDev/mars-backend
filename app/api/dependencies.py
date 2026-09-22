@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import secrets
-from collections.abc import Iterator
+from collections.abc import Generator
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session
@@ -105,17 +105,16 @@ def get_database(request: Request) -> Database:
     return request.app.state.database
 
 
-def get_session(database: Database = Depends(get_database)) -> Iterator[Session]:
-    """Provide a scoped database session with automatic commit/rollback."""
-    session = database.new_session()
-    try:
+def get_session(database: Database = Depends(get_database)) -> Generator[Session, None, None]:
+    """Provide a scoped database session, committed/rolled-back/closed by `database.session()`.
+
+    Note:
+        Call sites should pass `scope="function"` to `Depends(get_session)` to ensure
+        the session is committed and returned to the pool *before* the response is sent,
+        preventing race conditions on immediate read-after-write operations.
+    """
+    with database.session() as session:
         yield session
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
 
 
 # ---------------------------------------------------------------------------
@@ -123,17 +122,23 @@ def get_session(database: Database = Depends(get_database)) -> Iterator[Session]
 # ---------------------------------------------------------------------------
 
 
-def get_master_data_repository(session: Session = Depends(get_session)) -> MasterDataRepository:
+def get_master_data_repository(
+    session: Session = Depends(get_session, scope="function"),
+) -> MasterDataRepository:
     """Provide a master data repository for reading carrier, plant, and SKU data."""
     return MasterDataRepository(session)
 
 
-def get_purchase_order_repository(session: Session = Depends(get_session)) -> PurchaseOrderRepository:
+def get_purchase_order_repository(
+    session: Session = Depends(get_session, scope="function"),
+) -> PurchaseOrderRepository:
     """Provide a purchase order repository for reading and writing PO headers and lines."""
     return PurchaseOrderRepository(session)
 
 
-def get_fulfillment_repository(session: Session = Depends(get_session)) -> FulfillmentRepository:
+def get_fulfillment_repository(
+    session: Session = Depends(get_session, scope="function"),
+) -> FulfillmentRepository:
     """Provide a fulfillment repository for reading and writing shipments and demand exceptions."""
     return FulfillmentRepository(session)
 
@@ -143,17 +148,19 @@ def get_fulfillment_repository(session: Session = Depends(get_session)) -> Fulfi
 # ---------------------------------------------------------------------------
 
 
-def get_job_queue_repository(session: Session = Depends(get_session)) -> JobQueueRepository:
+def get_job_queue_repository(session: Session = Depends(get_session, scope="function")) -> JobQueueRepository:
     """Provide a job queue repository for managing background job execution state."""
     return JobQueueRepository(session)
 
 
-def get_agent_registry_repository(session: Session = Depends(get_session)) -> AgentRegistryRepository:
+def get_agent_registry_repository(
+    session: Session = Depends(get_session, scope="function"),
+) -> AgentRegistryRepository:
     """Provide an agent registry repository for tracking agent state and runs."""
     return AgentRegistryRepository(session)
 
 
-def get_agent_run_repository(session: Session = Depends(get_session)) -> AgentRunRepository:
+def get_agent_run_repository(session: Session = Depends(get_session, scope="function")) -> AgentRunRepository:
     """Provide an agent-run repository bound to the request session."""
     return AgentRunRepository(session)
 
@@ -163,87 +170,107 @@ def get_agent_run_repository(session: Session = Depends(get_session)) -> AgentRu
 # ---------------------------------------------------------------------------
 
 
-def get_penalty_rule_repository(session: Session = Depends(get_session)) -> PenaltyRuleRepository:
+def get_penalty_rule_repository(
+    session: Session = Depends(get_session, scope="function"),
+) -> PenaltyRuleRepository:
     """Provide a penalty rule repository for accessing rule configurations."""
     return PenaltyRuleRepository(session)
 
 
 def get_penalty_projection_repository(
-    session: Session = Depends(get_session),
+    session: Session = Depends(get_session, scope="function"),
 ) -> PenaltyProjectionRepository:
     """Provide a penalty projection repository for reading and writing projections."""
     return PenaltyProjectionRepository(session)
 
 
-def get_actual_penalty_repository(session: Session = Depends(get_session)) -> ActualPenaltyRepository:
+def get_actual_penalty_repository(
+    session: Session = Depends(get_session, scope="function"),
+) -> ActualPenaltyRepository:
     """Provide an actual penalty repository for reading and writing realized penalties."""
     return ActualPenaltyRepository(session)
 
 
-def get_penalty_summary_repository(session: Session = Depends(get_session)) -> PenaltySummaryRepository:
+def get_penalty_summary_repository(
+    session: Session = Depends(get_session, scope="function"),
+) -> PenaltySummaryRepository:
     """Provide a penalty summary repository for accessing summary job data."""
     return PenaltySummaryRepository(session)
 
 
-def get_mitigation_input_repository(session: Session = Depends(get_session)) -> MitigationInputRepository:
+def get_mitigation_input_repository(
+    session: Session = Depends(get_session, scope="function"),
+) -> MitigationInputRepository:
     """Provide a mitigation input repository for reading mitigation configuration."""
     return MitigationInputRepository(session)
 
 
-def get_mitigation_option_repository(session: Session = Depends(get_session)) -> MitigationOptionRepository:
+def get_mitigation_option_repository(
+    session: Session = Depends(get_session, scope="function"),
+) -> MitigationOptionRepository:
     """Provide a mitigation option repository for reading and writing computed options."""
     return MitigationOptionRepository(session)
 
 
-def get_dispute_repository(session: Session = Depends(get_session)) -> PenaltyDisputeRepository:
+def get_dispute_repository(
+    session: Session = Depends(get_session, scope="function"),
+) -> PenaltyDisputeRepository:
     """Provide a dispute repository for reading and writing penalty disputes."""
     return PenaltyDisputeRepository(session)
 
 
 def get_delivery_change_request_repository(
-    session: Session = Depends(get_session),
+    session: Session = Depends(get_session, scope="function"),
 ) -> PoDeliveryChangeRequestRepository:
     """Provide a delivery change request repository for tracking PO delivery modifications."""
     return PoDeliveryChangeRequestRepository(session)
 
 
 def get_penalty_job_item_context_repository(
-    session: Session = Depends(get_session),
+    session: Session = Depends(get_session, scope="function"),
 ) -> PenaltyJobItemContextRepository:
     """Provide a penalty job item context repository for job execution details."""
     return PenaltyJobItemContextRepository(session)
 
 
 def get_penalty_job_run_context_repository(
-    session: Session = Depends(get_session),
+    session: Session = Depends(get_session, scope="function"),
 ) -> PenaltyJobRunContextRepository:
     """Provide a penalty job run context repository for top-level job state."""
     return PenaltyJobRunContextRepository(session)
 
 
-def get_retailer_agreement_repository(session: Session = Depends(get_session)) -> RetailerAgreementRepository:
+def get_retailer_agreement_repository(
+    session: Session = Depends(get_session, scope="function"),
+) -> RetailerAgreementRepository:
     """Provide a retailer agreement repository for reading and writing retailer agreement documents."""
     return RetailerAgreementRepository(session)
 
 
 def get_extracted_penalty_rule_repository(
-    session: Session = Depends(get_session),
+    session: Session = Depends(get_session, scope="function"),
 ) -> ExtractedPenaltyRuleRepository:
     """Provide an extracted penalty rule repository for the review-and-publication staging area."""
     return ExtractedPenaltyRuleRepository(session)
 
 
-def get_rule_publication_repository(session: Session = Depends(get_session)) -> RulePublicationRepository:
+def get_rule_publication_repository(
+    session: Session = Depends(get_session, scope="function"),
+) -> RulePublicationRepository:
     """Provide a rule publication repository for the append-only publication audit trail."""
     return RulePublicationRepository(session)
 
 
-def get_workflow_thread_repository(session: Session = Depends(get_session)) -> WorkflowThreadRepository:
+def get_workflow_thread_repository(
+    session: Session = Depends(get_session, scope="function"),
+) -> WorkflowThreadRepository:
     """Provide a workflow thread repository bound to the request session."""
     return WorkflowThreadRepository(session)
 
 
-def get_human_action_repository(session: Session = Depends(get_session)) -> HumanActionRepository:
+def get_human_action_repository(
+    session: Session = Depends(get_session, scope="function"),
+) -> HumanActionRepository:
     """Provide a human action repository bound to the request session."""
     return HumanActionRepository(session)
 
@@ -359,6 +386,7 @@ def get_dispute_service(
     rules: PenaltyRuleRepository = Depends(get_penalty_rule_repository),
     projection_service: ProjectionService = Depends(get_projection_service),
     retailer_agreements: RetailerAgreementRepository = Depends(get_retailer_agreement_repository),
+    settings: Settings = Depends(get_settings),
 ) -> DisputeResolutionService:
     """Provide a dispute service for opening and managing penalty disputes."""
     return DisputeResolutionService(
@@ -368,6 +396,7 @@ def get_dispute_service(
         rules=rules,
         projection_service=projection_service,
         retailer_agreements=retailer_agreements,
+        default_window_days=settings.dispute.default_window_days,
     )
 
 
@@ -453,7 +482,7 @@ def get_mitigation_summary_service(
 
 
 def get_penalty_rule_extraction_service(
-    session: Session = Depends(get_session),
+    session: Session = Depends(get_session, scope="function"),
     retailer_agreements: RetailerAgreementRepository = Depends(get_retailer_agreement_repository),
     extracted_rules: ExtractedPenaltyRuleRepository = Depends(get_extracted_penalty_rule_repository),
     publications: RulePublicationRepository = Depends(get_rule_publication_repository),

@@ -20,12 +20,16 @@ def test_cmir_extractor_system_prompt_has_no_interpolation_placeholder():
     assert "{" not in seed_agents.CMIR_EXTRACTOR_SYSTEM_PROMPT
 
 
-def test_agent_seeds_cover_all_eight_rows():
-    """Guards against a silent drop of one of the eight documented seed rows."""
+def test_agent_seeds_cover_all_documented_rows():
+    """Guards against a silent drop of any documented seed row."""
     keys = {(seed.agent_code, seed.prompt_version) for seed in seed_agents.AGENT_SEEDS}
     assert keys == {
         ("penalty_projection_summary", "v1"),
+        ("penalty_projection_summary", "v2"),
         ("penalty_mitigation_summary", "v1"),
+        ("penalty_mitigation_summary", "v2"),
+        ("penalty_dispute_summary", "v1"),
+        ("penalty_dispute_summary", "v2"),
         ("penalty_rule_extractor", "v1"),
         ("penalty_rule_screening", "v1"),
         ("penalty_rule_classification", "v1"),

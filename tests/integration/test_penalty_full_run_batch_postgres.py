@@ -234,9 +234,7 @@ def open_purchase_order_with_rule(pg_database: Database):
         text("DELETE FROM penalties.penalty_rule WHERE rule_code = :rule_code"),
         {"rule_code": "RULE-FULL-RUN-IT"},
     )
-    cleanup.execute(
-        text("DELETE FROM retailer_agreement WHERE retailer_id = :id"), {"id": retailer["id"]}
-    )
+    cleanup.execute(text("DELETE FROM retailer_agreement WHERE retailer_id = :id"), {"id": retailer["id"]})
     cleanup.execute(text("DELETE FROM retailer WHERE id = :id"), {"id": retailer["id"]})
     cleanup.execute(text("DELETE FROM material WHERE id = :id"), {"id": material["id"]})
     cleanup.execute(text("DELETE FROM plant WHERE id = :id"), {"id": plant["id"]})

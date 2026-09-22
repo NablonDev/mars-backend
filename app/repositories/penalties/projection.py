@@ -48,6 +48,7 @@ def _actual_penalty_to_dict(row: ActualPenalty) -> dict:
         "id": row.id,
         "actual_penalty_number": row.actual_penalty_number,
         "purchase_order_id": row.purchase_order_id,
+        "purchase_order_line_id": row.purchase_order_line_id,
         "violation_type": row.violation_type,
         "actual_penalty_amount": float(row.actual_penalty_amount),
         "invoice_or_deduction_date": row.invoice_or_deduction_date,
@@ -171,8 +172,8 @@ class PenaltyProjectionRepository:
         self._session.flush()
 
     def _upsert(
-            self, purchase_order_id: UUID, rule_id: UUID, result: ProjectionResult, entry: _ProjectionRow
-        ) -> PenaltyProjection:
+        self, purchase_order_id: UUID, rule_id: UUID, result: ProjectionResult, entry: _ProjectionRow
+    ) -> PenaltyProjection:
         """Insert or replace one `penalty_projection` row for one (PO, rule, projection_date)."""
         existing = self._session.scalars(
             select(PenaltyProjection).where(
@@ -206,7 +207,7 @@ class PenaltyProjectionRepository:
         )
         self._session.add(row)
         return row
-    
+
     def _get_stacking_mode(self, purchase_order_id: UUID) -> str:
         """Resolve a purchase order's retailer `stacking_mode`, falling back to SUM.
 
@@ -240,6 +241,7 @@ class ActualPenaltyRepository:
         actual_penalty_amount: float,
         invoice_or_deduction_date: date,
         dispute_status: str = "NONE",
+        purchase_order_line_id: UUID | None = None,
     ) -> dict:
         """Create an actual_penalty row and return it as a dict.
 
@@ -253,6 +255,7 @@ class ActualPenaltyRepository:
             actual_penalty_amount=actual_penalty_amount,
             invoice_or_deduction_date=invoice_or_deduction_date,
             dispute_status=dispute_status,
+            purchase_order_line_id=purchase_order_line_id,
         )
         self._session.add(row)
         self._session.flush()

@@ -23,6 +23,7 @@ def _retailer_agreement_to_dict(r: RetailerAgreement) -> dict:
         "markdown_text": r.markdown_text,
         "effective_date": r.effective_date,
         "expiration_date": r.expiration_date,
+        "dispute_window_days": r.dispute_window_days,
     }
 
 
@@ -88,3 +89,26 @@ class RetailerAgreementRepository:
         """Delete every retailer agreement; callers must first clear anything that FK-references it."""
         self._session.execute(delete(RetailerAgreement))
         self._session.flush()
+
+    def get_effective_for_retailer(self, retailer_id: UUID, as_of_date: date) -> dict | None:
+        """Return the retailer's currently-effective agreement as of a date, or None.
+
+        "Currently effective" means effective_date <= as_of_date and
+        (expiration_date IS NULL OR expiration_date >= as_of_date). If more than
+        one agreement matches (a retailer can accumulate several over time), the
+        most recently effective one wins -- same tie-break DisputeResolutionService.analyze()
+        already uses for overlapping penalty_rule effective ranges.
+        """
+        rows = self._session.scalars(
+            select(RetailerAgreement)
+            .where(
+                RetailerAgreement.retailer_id == retailer_id,
+                RetailerAgreement.effective_date.is_not(None),
+                RetailerAgreement.effective_date <= as_of_date,
+                (RetailerAgreement.expiration_date.is_(None))
+                | (RetailerAgreement.expiration_date >= as_of_date),
+            )
+            .order_by(RetailerAgreement.effective_date.desc())
+            .limit(1)
+        ).all()
+        return _retailer_agreement_to_dict(rows[0]) if rows else None

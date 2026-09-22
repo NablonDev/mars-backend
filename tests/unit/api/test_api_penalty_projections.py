@@ -47,7 +47,7 @@ def ready_projection_summary(database):
     the `client`/`seeded_client` fixtures' app reads from -- `database` is
     the same cached fixture instance those fixtures build `app` from.
     """
-    from app.agents.penalties.projection.prompts.v1 import PROMPT_VERSION, SYSTEM_PROMPT
+    from app.agents.penalties.projection.prompts.v2 import PROMPT_VERSION, SYSTEM_PROMPT
     from app.models.enums import SummaryType
     from app.repositories.penalties.summary import PenaltySummaryRepository
     from app.repositories.process.agent_registry import AgentRegistryRepository

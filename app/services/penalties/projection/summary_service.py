@@ -34,7 +34,7 @@ from app.agents.penalties.projection import (
     build_penalty_projection_summary_tools,
 )
 from app.agents.penalties.projection.agent import PenaltyProjectionAgent
-from app.agents.penalties.projection.prompts.v1 import PROMPT_VERSION, SYSTEM_PROMPT
+from app.agents.penalties.projection.prompts.v2 import PROMPT_VERSION, SYSTEM_PROMPT
 from app.agents.providers.azure_openai import AzureOpenAIChatClient
 from app.core.exceptions import BusinessRuleError, NotFoundError, ValidationError
 from app.models.enums import JobTaskType, SummaryType
@@ -161,11 +161,13 @@ class ProjectionSummaryService(
             )
 
         earliest_projection_date = min(row["projection_date"] for row in history)
+        latest_projection_date = max(row["projection_date"] for row in history)
+        max_allowed_date = max(today, latest_projection_date)
 
-        if as_of_date > today:
+        if as_of_date > max_allowed_date:
             raise ValidationError(
                 code="INVALID_AS_OF_DATE",
-                message=f"as_of_date={as_of_date.isoformat()} is in the future.",
+                message=f"as_of_date={as_of_date.isoformat()} is in the future (beyond recorded projection horizon {max_allowed_date.isoformat()}).",
             )
 
         if as_of_date < earliest_projection_date:

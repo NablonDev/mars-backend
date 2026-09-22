@@ -12,11 +12,13 @@ pre-delivery promise a dispute must not use (see
 `app.services.penalties.dispute.types`'s module docstring).
 """
 
-from datetime import date, datetime
+import hashlib
+from datetime import date, datetime, timedelta
 
 import pytest
 
 from app.core.exceptions import BusinessRuleError, ConflictError, NotFoundError, ValidationError
+from app.models import RetailerAgreement
 from app.services.penalties.dispute.service import DisputeResolutionService
 from app.services.penalties.projection.delay import price_delay_penalty
 from app.services.penalties.projection.service import ProjectionService
@@ -161,6 +163,27 @@ def _seed_shortage_dispute_scenario(
     return purchase_order_id, actual_penalty["id"]
 
 
+def _seed_retailer_agreement_with_window(
+    repos, db_session, retailer_id, dispute_window_days: int = 30
+) -> dict:
+    """Create a retailer agreement effective in the past, with `dispute_window_days` set,
+    for the given retailer. `add_retailer_agreement` doesn't take `dispute_window_days`
+    directly (it's set post-insert here, against the same session `repos` shares), since
+    wiring it through the repository's write path is outside this task's scope."""
+    agreement = repos.retailer_agreements.add_retailer_agreement(
+        retailer_id=retailer_id,
+        contract_code=f"TEST-WINDOW-{retailer_id}",
+        title="Test retailer agreement with dispute window",
+        document_sha256=hashlib.sha256(f"test-window-agreement:{retailer_id}".encode()).hexdigest(),
+        effective_date=date(2025, 1, 1),
+    )
+    row = db_session.get(RetailerAgreement, agreement["id"])
+    row.dispute_window_days = dispute_window_days
+    db_session.flush()
+    agreement["dispute_window_days"] = dispute_window_days
+    return agreement
+
+
 # ---------------------------------------------------------------------------
 # open_dispute
 # ---------------------------------------------------------------------------
@@ -206,6 +229,30 @@ def test_open_dispute_allowed_again_once_prior_is_terminal(repos):
     second = service.open_dispute(actual_penalty_id, "OTHER", 90.0)
     assert second["id"] != first["id"]
     assert second["dispute_status"] == "OPEN"
+
+
+def test_open_dispute_sets_response_due_date_from_default_window(repos):
+    _, actual_penalty_id = _seed_shortage_dispute_scenario(repos)
+    service = _build_service(repos)
+
+    dispute = service.open_dispute(actual_penalty_id, "NOT_LATE", 100.0, now_date=date(2026, 1, 1))
+
+    assert dispute["response_due_date"] == date(2026, 1, 1) + timedelta(days=90)
+
+
+def test_open_dispute_uses_retailer_agreement_dispute_window_when_set(repos, db_session):
+    purchase_order_id, actual_penalty_id = _seed_shortage_dispute_scenario(repos)
+    retailer_id = repos.purchase_orders.require_purchase_order(purchase_order_id)["retailer_id"]
+    retailer_agreement = _seed_retailer_agreement_with_window(
+        repos, db_session, retailer_id, dispute_window_days=45
+    )
+    service = _build_service(repos)
+
+    dispute = service.open_dispute(actual_penalty_id, "NOT_LATE", 100.0, now_date=date(2026, 1, 1))
+
+    assert dispute["response_due_date"] == date(2026, 1, 1) + timedelta(
+        days=retailer_agreement["dispute_window_days"]
+    )
 
 
 # ---------------------------------------------------------------------------
