@@ -112,3 +112,35 @@ def test_no_issues_for_a_clean_single_branch_rule():
     ]
 
     assert consistency_issues(facts, calc_type="PER_UNIT") == []
+
+
+def test_flags_a_rate_carrying_a_time_unit():
+    facts = [{"group_no": 1, "attribute_role": "RATE", "value": 30, "value_unit": "CALENDAR_DAYS"}]
+
+    issues = consistency_issues(facts, calc_type="PER_UNIT")
+
+    assert any("Rule 15" in issue for issue in issues)
+
+
+def test_a_rate_with_a_currency_unit_and_applies_per_day_is_not_flagged():
+    facts = [
+        {
+            "group_no": 1,
+            "attribute_role": "RATE",
+            "value": 50,
+            "value_unit": "USD",
+            "applies_per": "DAY",
+        }
+    ]
+
+    issues = consistency_issues(facts, calc_type="PER_UNIT")
+
+    assert not any("Rule 15" in issue for issue in issues)
+
+
+def test_a_threshold_with_a_time_unit_is_not_flagged():
+    facts = [{"group_no": 1, "attribute_role": "THRESHOLD", "value": 30, "value_unit": "HOURS"}]
+
+    issues = consistency_issues(facts, calc_type="PER_UNIT")
+
+    assert not any("Rule 15" in issue for issue in issues)
