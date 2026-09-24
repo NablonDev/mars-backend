@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 import app.models  # noqa: F401
 from app.db.base import CMIR_SCHEMA, PENALTIES_SCHEMA, PROCESS_SCHEMA, Base
+from app.utils.sanitize import strip_nul_bytes
 
 
 def apply_sqlite_schema_translation(engine: Engine) -> Engine:
@@ -46,7 +47,7 @@ def checkpoint_dsn(database_url: str, schema: str) -> str:
 
 
 class Database:
-    """Owns one SQLAlchemy engine and session factory for the application's lifetime."""
+    """Owns the application's SQLAlchemy engine and session factory."""
 
     def __init__(
         self,
@@ -57,13 +58,14 @@ class Database:
         pool_timeout: int | None = None,
         **engine_kwargs: Any,
     ) -> None:
-        # pool_pre_ping catches a connection that's already dead, but under WSL2's
-        # NAT/conntrack layer an idle connection can be silently dropped without the
-        # socket ever erroring -- the next query on it then desyncs instead of failing
-        # cleanly. TCP keepalives keep the socket active during idle periods so it
-        # never goes quiet long enough to be reaped.
+        # Validate pooled connections before handing them to the application.
+        # This is especially useful for long-idle connections that may have been
+        # closed by the network or database while still present in the pool.
         engine_kwargs.setdefault("pool_pre_ping", True)
         if database_url.startswith("postgresql"):
+            # Keep PostgreSQL connections active during idle periods. This helps
+            # prevent network infrastructure (notably WSL2/NAT) from silently
+            # expiring otherwise-idle TCP connections between database operations.
             engine_kwargs.setdefault(
                 "connect_args",
                 {
@@ -73,8 +75,13 @@ class Database:
                     "keepalives_count": 3,
                 },
             )
-        # Fall back to str() for UUIDs and other non-standard types in JSON/JSONB columns
-        engine_kwargs.setdefault("json_serializer", lambda obj: json.dumps(obj, default=str))
+        # Serialize arbitrary application objects as JSON, falling back to str()
+        # for values such as UUIDs that the standard encoder does not handle.
+        # Remove embedded NUL bytes first because PostgreSQL JSON/JSONB rejects them.
+        engine_kwargs.setdefault(
+            "json_serializer",
+            lambda obj: json.dumps(strip_nul_bytes(obj), default=str),
+        )
 
         if pool_size is not None:
             engine_kwargs.setdefault("pool_size", pool_size)
