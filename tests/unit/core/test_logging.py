@@ -299,3 +299,184 @@ def test_app_settings_parses_no_color_and_no_bold_flags():
     )
     assert settings_empty.no_color is False
     assert settings_empty.no_bold is False
+
+
+def test_pretty_formatter_response_badge_empty():
+    record = _record(
+        "GET /api/v1/rules 200 3.38ms",
+        method="GET",
+        path="/api/v1/rules",
+        status=200,
+        duration_ms=3.38,
+        response_badge="empty",
+    )
+    plain = PrettyFormatter(no_color=True).format(record)
+    colored = PrettyFormatter(no_color=False).format(record)
+
+    assert 'INFO:      [test_logging.py:1] "GET /api/v1/rules" 200 OK - 3.38ms [empty]' in plain
+    assert "\033[33m[empty]\033[0m" in colored
+
+
+def test_pretty_formatter_response_badge_n_items():
+    record = _record(
+        "GET /api/v1/rules 200 12.50ms",
+        method="GET",
+        path="/api/v1/rules",
+        status=200,
+        duration_ms=12.5,
+        response_badge="12 items",
+    )
+    plain = PrettyFormatter(no_color=True).format(record)
+    colored = PrettyFormatter(no_color=False).format(record)
+
+    assert 'INFO:      [test_logging.py:1] "GET /api/v1/rules" 200 OK - 12.50ms [12 items]' in plain
+    assert "\033[36m[12 items]\033[0m" in colored
+
+
+def test_json_and_text_formatter_response_badge():
+    record = _record(
+        "GET /api/v1/rules 200 3.38ms",
+        method="GET",
+        path="/api/v1/rules",
+        status=200,
+        duration_ms=3.38,
+        response_badge="empty",
+    )
+    payload = _formatted(record)
+    assert payload["response_badge"] == "empty"
+
+    text = TextFormatter().format(record)
+    assert "response_badge=empty" in text
+
+
+def test_determine_response_badge():
+    from app.core.middleware.logging import determine_response_badge
+
+    # Empty list envelope
+    body_empty_list = json.dumps({"success": True, "message": "OK", "data": []}).encode()
+    badge, err = determine_response_badge(200, True, body_empty_list)
+    assert badge == "empty"
+    assert err is None
+
+    # Null data envelope
+    body_null_data = json.dumps({"success": True, "message": "OK", "data": None}).encode()
+    badge, err = determine_response_badge(200, True, body_null_data)
+    assert badge == "empty"
+    assert err is None
+
+    # Single item list envelope
+    body_1_item = json.dumps({"success": True, "message": "OK", "data": [{"id": 1}]}).encode()
+    badge, err = determine_response_badge(200, True, body_1_item)
+    assert badge == "1 item"
+    assert err is None
+
+    # Multiple items list envelope
+    body_multi = json.dumps({"success": True, "message": "OK", "data": [1, 2, 3]}).encode()
+    badge, err = determine_response_badge(200, True, body_multi)
+    assert badge == "3 items"
+    assert err is None
+
+    # Single object envelope
+    body_obj = json.dumps(
+        {"success": True, "message": "OK", "data": {"id": 100, "status": "PENDING"}}
+    ).encode()
+    badge, err = determine_response_badge(200, True, body_obj)
+    assert badge == "1 item"
+    assert err is None
+
+    # Paginated response dict with items key
+    body_paginated_empty = json.dumps(
+        {"success": True, "message": "OK", "data": {"items": [], "total": 0}}
+    ).encode()
+    badge, err = determine_response_badge(200, True, body_paginated_empty)
+    assert badge == "empty"
+    assert err is None
+
+    body_paginated_items = json.dumps(
+        {"success": True, "message": "OK", "data": {"items": ["a", "b"]}}
+    ).encode()
+    badge, err = determine_response_badge(200, True, body_paginated_items)
+    assert badge == "2 items"
+    assert err is None
+
+    # 204 No Content
+    badge, err = determine_response_badge(204, False, b"")
+    assert badge == "empty"
+    assert err is None
+
+    # 304 Not Modified
+    badge, err = determine_response_badge(304, False, b"")
+    assert badge is None
+    assert err is None
+
+    # 404 error envelope
+    body_404 = json.dumps(
+        {
+            "success": False,
+            "message": "Not found",
+            "data": None,
+            "error": {"code": "RULE_NOT_FOUND"},
+        }
+    ).encode()
+    badge, err = determine_response_badge(404, True, body_404)
+    assert badge is None
+    assert err == "RULE_NOT_FOUND"
+
+
+def test_access_log_middleware_end_to_end():
+    from starlette.applications import Starlette
+    from starlette.responses import JSONResponse, Response
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from app.core.middleware.logging import AccessLogMiddleware
+
+    records: list[logging.LogRecord] = []
+
+    class CapturingHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    access_logger = logging.getLogger("app.access")
+    handler = CapturingHandler()
+    access_logger.addHandler(handler)
+    access_logger.setLevel(logging.INFO)
+
+    try:
+        routes = [
+            Route("/empty-list", lambda req: JSONResponse({"success": True, "message": "OK", "data": []})),
+            Route(
+                "/has-items",
+                lambda req: JSONResponse({"success": True, "message": "OK", "data": [{"id": 1}, {"id": 2}]}),
+            ),
+            Route("/no-content", lambda req: Response(status_code=204)),
+            Route(
+                "/not-found",
+                lambda req: JSONResponse(
+                    {"success": False, "message": "Nope", "error": {"code": "NOT_FOUND"}}, status_code=404
+                ),
+            ),
+        ]
+        app = Starlette(routes=routes)
+        app.add_middleware(AccessLogMiddleware)
+
+        client = TestClient(app)
+
+        client.get("/empty-list")
+        assert getattr(records[-1], "response_badge", None) == "empty"
+        assert getattr(records[-1], "status", None) == 200
+
+        client.get("/has-items")
+        assert getattr(records[-1], "response_badge", None) == "2 items"
+        assert getattr(records[-1], "status", None) == 200
+
+        client.get("/no-content")
+        assert getattr(records[-1], "response_badge", None) == "empty"
+        assert getattr(records[-1], "status", None) == 204
+
+        client.get("/not-found")
+        assert getattr(records[-1], "response_badge", None) is None
+        assert getattr(records[-1], "error_code", None) == "NOT_FOUND"
+        assert getattr(records[-1], "status", None) == 404
+    finally:
+        access_logger.removeHandler(handler)
