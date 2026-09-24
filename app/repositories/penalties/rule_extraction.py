@@ -1,21 +1,46 @@
-"""Repositories for extracted_penalty_rule, its attributes, and rule_publication."""
+"""Repositories for extracted penalty rules, publications, and reviewer revisions."""
 
 from __future__ import annotations
 
-from collections import defaultdict
 from collections.abc import Sequence
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import ValidationError
 from app.models import ExtractedPenaltyRule, ExtractedPenaltyRuleAttribute, RulePublication
+from app.models.penalties import ExtractedPenaltyRuleRevision
 from app.services.penalties.rule_extraction.types import PublishedRule, StagedFact, StagedRule
+from app.utils.sanitize import strip_nul_bytes
 
 _REVIEW_STATUSES = ("APPROVED", "REJECTED")
+
+_OPEN_REVISION_STATUSES = ("QUEUED", "RUNNING")
+
+# The exact `ExtractedPenaltyRuleAttribute` columns a snapshot keeps, excluding the
+# surrogate id, its FK back to the rule, and the timestamp columns from `TimestampMixin`.
+_ATTRIBUTE_SNAPSHOT_COLUMNS = (
+    "branch_no",
+    "attribute_role",
+    "metric_code",
+    "metric_denominator",
+    "operator",
+    "value",
+    "value_max",
+    "value_unit",
+    "value_status",
+    "currency_code",
+    "basis_type",
+    "applies_per",
+    "tier_application",
+    "cap_scope",
+    "source_text",
+    "confidence",
+)
 
 
 def published_rule_insert_kwargs(published: PublishedRule) -> dict[str, Any]:
@@ -64,12 +89,10 @@ def published_rule_insert_kwargs(published: PublishedRule) -> dict[str, Any]:
 def _rule_to_dict(
     rule: ExtractedPenaltyRule, attribute_rows: Sequence[ExtractedPenaltyRuleAttribute]
 ) -> dict[str, Any]:
-    """Shape one extracted rule plus its attribute rows into the API-facing dict shape.
+    """Shape an extracted rule and its attributes for the API response.
 
-    `ExtractedPenaltyRule` carries no ORM relationship to its attributes (this codebase
-    queries them explicitly rather than declaring `relationship()`), so any caller that
-    hands an extracted rule to `ExtractedPenaltyRuleResponse` needs this dict, not the bare
-    ORM row, or `attributes` silently falls back to its schema default of `[]`.
+    `ExtractedPenaltyRule` has no ORM relationship to its attributes, so callers must
+    provide the attribute rows explicitly.
     """
     return {
         "id": rule.id,
@@ -86,8 +109,71 @@ def _rule_to_dict(
         "status": rule.status,
         "confidence": rule.confidence,
         "review_notes": rule.review_notes,
+        "plain_explanation": (rule.extra or {}).get("plain_explanation"),
+        "computed_summary": (rule.extra or {}).get("computed_summary"),
+        "extra": dict(rule.extra or {}),
         "attributes": list(attribute_rows),
     }
+
+
+def _attribute_snapshot(attribute: ExtractedPenaltyRuleAttribute) -> dict[str, Any]:
+    """Shape one attribute row into JSON-safe snapshot data: every typed column plus `extra`."""
+    row: dict[str, Any] = {}
+    for column in _ATTRIBUTE_SNAPSHOT_COLUMNS:
+        value = getattr(attribute, column)
+        row[column] = float(value) if isinstance(value, Decimal) else value
+    row["extra"] = dict(attribute.extra or {})
+    return row
+
+
+def rule_snapshot(rule: dict[str, Any]) -> dict[str, Any]:
+    """Shape an extracted rule into JSON-safe revision snapshot data.
+
+    `rule["attributes"]` contains ORM attribute rows rather than plain dictionaries.
+    """
+    confidence = rule.get("confidence")
+    return {
+        "penalty_category": rule.get("penalty_category"),
+        "calc_type": rule.get("calc_type"),
+        "pricing_readiness": rule.get("pricing_readiness"),
+        "confidence": float(confidence) if confidence is not None else None,
+        "po_shortage_flag": rule.get("po_shortage_flag"),
+        "po_delay_flag": rule.get("po_delay_flag"),
+        "review_notes": rule.get("review_notes"),
+        "extra": dict(rule.get("extra") or {}),
+        "attributes": [_attribute_snapshot(a) for a in rule.get("attributes") or []],
+    }
+
+
+def _revision_to_dict(row: ExtractedPenaltyRuleRevision) -> dict[str, Any]:
+    """Shape one `extracted_penalty_rule_revision` row into the plain dict callers read."""
+    return {
+        "id": row.id,
+        "extracted_rule_id": row.extracted_rule_id,
+        "revision_no": row.revision_no,
+        "instruction": row.instruction,
+        "requested_by": row.requested_by,
+        "status": row.status,
+        "agent_reply": row.agent_reply,
+        "before_snapshot": row.before_snapshot,
+        "after_snapshot": row.after_snapshot,
+        "error": row.error,
+        "started_at": row.started_at,
+        "completed_at": row.completed_at,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }
+
+
+def _stale_cutoff(session: Session, older_than: datetime) -> datetime:
+    """Normalize a stale-revision cutoff for the bound database dialect.
+
+    SQLite stores `DateTime(timezone=True)` values without timezone information, so a
+    timezone-aware cutoff must be made naive before binding.
+    """
+    if older_than.tzinfo is not None and session.get_bind().dialect.name == "sqlite":
+        return older_than.replace(tzinfo=None)
+    return older_than
 
 
 def _to_staged_fact(a: ExtractedPenaltyRuleAttribute) -> StagedFact:
@@ -197,33 +283,6 @@ class ExtractedPenaltyRuleRepository:
             stmt = stmt.where(ExtractedPenaltyRule.agent_run_id == agent_run_id)
         return list(self._session.scalars(stmt).all())
 
-    def list_with_attributes_for_retailer_agreement(
-        self, retailer_agreement_id: UUID, status: str | None = None
-    ) -> list[dict[str, Any]]:
-        """Return extracted rules for one retailer agreement with attributes attached, newest run included.
-
-        Batches attribute rows in one query keyed by rule id, instead of one query per
-        rule, for the same reason `get_with_attributes` builds a dict: `ExtractedPenaltyRule`
-        has no ORM relationship to its attributes.
-        """
-        rules = self.list_for_retailer_agreement(retailer_agreement_id, status=status)
-        if not rules:
-            return []
-
-        rule_ids = [rule.id for rule in rules]
-        attribute_rows = self._session.scalars(
-            select(ExtractedPenaltyRuleAttribute)
-            .where(ExtractedPenaltyRuleAttribute.extracted_rule_id.in_(rule_ids))
-            .order_by(
-                ExtractedPenaltyRuleAttribute.extracted_rule_id, ExtractedPenaltyRuleAttribute.branch_no.asc()
-            )
-        ).all()
-        attributes_by_rule: dict[UUID, list[ExtractedPenaltyRuleAttribute]] = defaultdict(list)
-        for attribute in attribute_rows:
-            attributes_by_rule[attribute.extracted_rule_id].append(attribute)
-
-        return [_rule_to_dict(rule, attributes_by_rule.get(rule.id, [])) for rule in rules]
-
     def set_review_decision(
         self,
         extracted_rule_id: UUID,
@@ -250,12 +309,53 @@ class ExtractedPenaltyRuleRepository:
         self._session.flush()
         return rule
 
-    def list_publishable(self, retailer_agreement_id: UUID, agent_run_id: UUID) -> list[StagedRule]:
-        """Return the retailer agreement's APPROVED rules from one run as pure `StagedRule` value objects.
+    def apply_revision(
+        self,
+        extracted_rule_id: UUID,
+        *,
+        penalty_category: str,
+        calc_type: str,
+        pricing_readiness: str,
+        confidence: float,
+        po_shortage_flag: bool,
+        po_delay_flag: bool,
+        review_notes: str | None,
+        extra: dict[str, Any],
+        attributes: list[dict[str, Any]],
+    ) -> ExtractedPenaltyRule:
+        """Replace one rule's classification and attributes with a revision.
 
-        The boundary between the ORM and `PenaltyRulePublisher`
-        (`app/services/penalties/rule_extraction/publisher.py`), which the publisher reads
-        instead of the `ExtractedPenaltyRule`/`ExtractedPenaltyRuleAttribute` models directly.
+        The replacement resets `status` to `PENDING_REVIEW` so the revised rule is
+        reviewed against its new facts.
+        """
+        rule = self._session.get(ExtractedPenaltyRule, extracted_rule_id)
+        if rule is None:
+            raise ValueError(f"No extracted penalty rule found with id={extracted_rule_id!r}")
+
+        rule.penalty_category = penalty_category
+        rule.calc_type = calc_type
+        rule.pricing_readiness = pricing_readiness
+        rule.confidence = confidence
+        rule.po_shortage_flag = po_shortage_flag
+        rule.po_delay_flag = po_delay_flag
+        rule.review_notes = review_notes
+        rule.extra = extra
+        rule.status = "PENDING_REVIEW"
+
+        self._session.execute(
+            delete(ExtractedPenaltyRuleAttribute).where(
+                ExtractedPenaltyRuleAttribute.extracted_rule_id == extracted_rule_id
+            )
+        )
+        for attribute in attributes:
+            self._session.add(ExtractedPenaltyRuleAttribute(extracted_rule_id=rule.id, **attribute))
+        self._session.flush()
+        return rule
+
+    def list_publishable(self, retailer_agreement_id: UUID, agent_run_id: UUID) -> list[StagedRule]:
+        """Return approved rules from one run as `StagedRule` values.
+
+        This method is the ORM boundary for `PenaltyRulePublisher`.
         """
         rows = self._session.scalars(
             select(ExtractedPenaltyRule).where(
@@ -318,25 +418,136 @@ class RulePublicationRepository:
         self._session.flush()
         return row
 
-    def list_for_retailer_agreement(self, retailer_agreement_id: UUID) -> list[RulePublication]:
-        """Return every publication outcome for a retailer agreement's extracted rules, oldest first."""
-        rows = self._session.scalars(
-            select(RulePublication)
-            .join(ExtractedPenaltyRule, RulePublication.extracted_rule_id == ExtractedPenaltyRule.id)
-            .where(ExtractedPenaltyRule.retailer_agreement_id == retailer_agreement_id)
-            .order_by(RulePublication.created_at.asc())
-        ).all()
-        return list(rows)
 
-    def reason_histogram(self, retailer_agreement_id: UUID) -> dict[str, int]:
-        """Count rejection reasons for a retailer agreement; the signal for which penalty shape to build next."""
-        rows = self._session.execute(
-            select(RulePublication.reason_code, func.count())
-            .join(ExtractedPenaltyRule, RulePublication.extracted_rule_id == ExtractedPenaltyRule.id)
-            .where(
-                ExtractedPenaltyRule.retailer_agreement_id == retailer_agreement_id,
-                RulePublication.outcome == "REJECTED",
+class ExtractedPenaltyRuleRevisionRepository:
+    """Access layer for extracted_penalty_rule_revision, the reviewer revision audit trail.
+
+    Every method returns plain dicts, not ORM rows: the background task that runs a
+    revision (`app.services.penalties.rule_extraction.revision.run_rule_revision`) opens
+    a fresh scoped session per step, so a caller must not hold a row across a session
+    boundary where it would go detached.
+    """
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def create(
+        self,
+        extracted_rule_id: UUID,
+        *,
+        instruction: str,
+        requested_by: str | None,
+        before_snapshot: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Open one new revision for a rule, numbering it one past the highest existing revision_no."""
+        max_revision_no = self._session.scalar(
+            select(func.max(ExtractedPenaltyRuleRevision.revision_no)).where(
+                ExtractedPenaltyRuleRevision.extracted_rule_id == extracted_rule_id
             )
-            .group_by(RulePublication.reason_code)
+        )
+        row = ExtractedPenaltyRuleRevision(
+            extracted_rule_id=extracted_rule_id,
+            revision_no=(max_revision_no or 0) + 1,
+            instruction=instruction,
+            requested_by=requested_by,
+            status="QUEUED",
+            before_snapshot=before_snapshot,
+        )
+        self._session.add(row)
+        self._session.flush()
+        return _revision_to_dict(row)
+
+    def get(self, revision_id: UUID) -> dict[str, Any] | None:
+        """Fetch one revision by id, or None if it doesn't exist."""
+        row = self._session.get(ExtractedPenaltyRuleRevision, revision_id)
+        return _revision_to_dict(row) if row is not None else None
+
+    def list_for_rule(self, extracted_rule_id: UUID) -> list[dict[str, Any]]:
+        """List every revision requested for one rule, oldest first."""
+        rows = self._session.scalars(
+            select(ExtractedPenaltyRuleRevision)
+            .where(ExtractedPenaltyRuleRevision.extracted_rule_id == extracted_rule_id)
+            .order_by(ExtractedPenaltyRuleRevision.revision_no.asc())
         ).all()
-        return {reason_code: count for reason_code, count in rows if reason_code is not None}
+        return [_revision_to_dict(row) for row in rows]
+
+    def latest_for_rules(self, rule_ids: Sequence[UUID]) -> dict[UUID, dict[str, Any]]:
+        """Return each rule's highest-`revision_no` revision, keyed by `extracted_rule_id`, in one query."""
+        if not rule_ids:
+            return {}
+        rows = self._session.scalars(
+            select(ExtractedPenaltyRuleRevision)
+            .where(ExtractedPenaltyRuleRevision.extracted_rule_id.in_(rule_ids))
+            .order_by(
+                ExtractedPenaltyRuleRevision.extracted_rule_id,
+                ExtractedPenaltyRuleRevision.revision_no.desc(),
+            )
+        ).all()
+        latest: dict[UUID, dict[str, Any]] = {}
+        for row in rows:
+            if row.extracted_rule_id not in latest:
+                latest[row.extracted_rule_id] = _revision_to_dict(row)
+        return latest
+
+    def open_for_rule(self, extracted_rule_id: UUID) -> dict[str, Any] | None:
+        """Return a rule's open (QUEUED or RUNNING) revision, the highest-numbered one if more than one."""
+        row = self._session.scalars(
+            select(ExtractedPenaltyRuleRevision)
+            .where(
+                ExtractedPenaltyRuleRevision.extracted_rule_id == extracted_rule_id,
+                ExtractedPenaltyRuleRevision.status.in_(_OPEN_REVISION_STATUSES),
+            )
+            .order_by(ExtractedPenaltyRuleRevision.revision_no.desc())
+        ).first()
+        return _revision_to_dict(row) if row is not None else None
+
+    def mark_running(self, revision_id: UUID) -> None:
+        """Move one revision from QUEUED to RUNNING and stamp `started_at`."""
+        row = self._session.get(ExtractedPenaltyRuleRevision, revision_id)
+        if row is None:
+            return
+        row.status = "RUNNING"
+        row.started_at = func.now()
+        self._session.flush()
+
+    def mark_completed(
+        self, revision_id: UUID, *, agent_reply: str | None, after_snapshot: dict[str, Any]
+    ) -> None:
+        """Move one revision to COMPLETED, recording the agent's reply and the rule's new snapshot."""
+        row = self._session.get(ExtractedPenaltyRuleRevision, revision_id)
+        if row is None:
+            return
+        row.status = "COMPLETED"
+        row.agent_reply = agent_reply
+        row.after_snapshot = after_snapshot
+        row.completed_at = func.now()
+        self._session.flush()
+
+    def mark_failed(self, revision_id: UUID, *, error: str) -> None:
+        """Move one revision to FAILED, recording a sanitized, length-capped error message."""
+        row = self._session.get(ExtractedPenaltyRuleRevision, revision_id)
+        if row is None:
+            return
+        row.status = "FAILED"
+        row.error = strip_nul_bytes(error)[:2000]
+        row.completed_at = func.now()
+        self._session.flush()
+
+    def fail_stale(self, extracted_rule_id: UUID | None, *, older_than: datetime) -> int:
+        """Fail every open revision (optionally scoped to one rule) idle since before `older_than`."""
+        cutoff = _stale_cutoff(self._session, older_than)
+        stmt = select(ExtractedPenaltyRuleRevision).where(
+            ExtractedPenaltyRuleRevision.status.in_(_OPEN_REVISION_STATUSES),
+            ExtractedPenaltyRuleRevision.updated_at < cutoff,
+        )
+        if extracted_rule_id is not None:
+            stmt = stmt.where(ExtractedPenaltyRuleRevision.extracted_rule_id == extracted_rule_id)
+
+        rows = self._session.scalars(stmt).all()
+        for row in rows:
+            row.status = "FAILED"
+            row.error = "Revision timed out."
+            row.completed_at = func.now()
+        if rows:
+            self._session.flush()
+        return len(rows)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import secrets
 from collections.abc import Generator
+from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session
@@ -31,6 +32,7 @@ from app.repositories.penalties.projection import ActualPenaltyRepository, Penal
 from app.repositories.penalties.rule import PenaltyRuleRepository
 from app.repositories.penalties.rule_extraction import (
     ExtractedPenaltyRuleRepository,
+    ExtractedPenaltyRuleRevisionRepository,
     RulePublicationRepository,
 )
 from app.repositories.penalties.summary import PenaltySummaryRepository
@@ -45,6 +47,7 @@ from app.services.penalties.mitigation.service import MitigationService
 from app.services.penalties.mitigation.summary_service import MitigationSummaryService
 from app.services.penalties.projection.service import ProjectionService
 from app.services.penalties.projection.summary_service import ProjectionSummaryService
+from app.services.penalties.rule_extraction.revision import RuleRevisionService
 from app.services.penalties.rule_extraction.service import PenaltyRuleExtractionService
 from app.services.po_validation.service import PoValidationService
 from app.services.seeding.service import PenaltySeedingService
@@ -53,8 +56,8 @@ logger = logging.getLogger(__name__)
 
 
 def require_internal_api_key(
-    x_internal_api_key: str | None = Header(default=None, alias="X-Internal-Api-Key"),
-    settings: Settings = Depends(get_settings),
+    settings: Annotated[Settings, Depends(get_settings)],
+    x_internal_api_key: Annotated[str | None, Header(alias="X-Internal-Api-Key")] = None,
 ) -> None:
     """Gate every non-health route behind a shared-secret header.
 
@@ -78,7 +81,7 @@ def require_internal_api_key(
 def parse_include(allowed: frozenset[str]):
     """Return a dependency that validates `?include=` query params against an allow-list."""
 
-    def _dependency(include: str | None = Query(default=None)) -> set[str]:
+    def _dependency(include: Annotated[str | None, Query()] = None) -> set[str]:
         """Parse and validate the `?include=` query parameter against the allowed list.
 
         Splits comma-separated tokens and validates each against the allowed set,
@@ -105,7 +108,7 @@ def get_database(request: Request) -> Database:
     return request.app.state.database
 
 
-def get_session(database: Database = Depends(get_database)) -> Generator[Session, None, None]:
+def get_session(database: Annotated[Database, Depends(get_database)]) -> Generator[Session, None, None]:
     """Provide a scoped database session, committed/rolled-back/closed by `database.session()`.
 
     Note:
@@ -123,21 +126,21 @@ def get_session(database: Database = Depends(get_database)) -> Generator[Session
 
 
 def get_master_data_repository(
-    session: Session = Depends(get_session, scope="function"),
+    session: Annotated[Session, Depends(get_session, scope="function")],
 ) -> MasterDataRepository:
     """Provide a master data repository for reading carrier, plant, and SKU data."""
     return MasterDataRepository(session)
 
 
 def get_purchase_order_repository(
-    session: Session = Depends(get_session, scope="function"),
+    session: Annotated[Session, Depends(get_session, scope="function")],
 ) -> PurchaseOrderRepository:
     """Provide a purchase order repository for reading and writing PO headers and lines."""
     return PurchaseOrderRepository(session)
 
 
 def get_fulfillment_repository(
-    session: Session = Depends(get_session, scope="function"),
+    session: Annotated[Session, Depends(get_session, scope="function")],
 ) -> FulfillmentRepository:
     """Provide a fulfillment repository for reading and writing shipments and demand exceptions."""
     return FulfillmentRepository(session)
@@ -148,19 +151,23 @@ def get_fulfillment_repository(
 # ---------------------------------------------------------------------------
 
 
-def get_job_queue_repository(session: Session = Depends(get_session, scope="function")) -> JobQueueRepository:
+def get_job_queue_repository(
+    session: Annotated[Session, Depends(get_session, scope="function")],
+) -> JobQueueRepository:
     """Provide a job queue repository for managing background job execution state."""
     return JobQueueRepository(session)
 
 
 def get_agent_registry_repository(
-    session: Session = Depends(get_session, scope="function"),
+    session: Annotated[Session, Depends(get_session, scope="function")],
 ) -> AgentRegistryRepository:
     """Provide an agent registry repository for tracking agent state and runs."""
     return AgentRegistryRepository(session)
 
 
-def get_agent_run_repository(session: Session = Depends(get_session, scope="function")) -> AgentRunRepository:
+def get_agent_run_repository(
+    session: Annotated[Session, Depends(get_session, scope="function")],
+) -> AgentRunRepository:
     """Provide an agent-run repository bound to the request session."""
     return AgentRunRepository(session)
 
@@ -171,105 +178,112 @@ def get_agent_run_repository(session: Session = Depends(get_session, scope="func
 
 
 def get_penalty_rule_repository(
-    session: Session = Depends(get_session, scope="function"),
+    session: Annotated[Session, Depends(get_session, scope="function")],
 ) -> PenaltyRuleRepository:
     """Provide a penalty rule repository for accessing rule configurations."""
     return PenaltyRuleRepository(session)
 
 
 def get_penalty_projection_repository(
-    session: Session = Depends(get_session, scope="function"),
+    session: Annotated[Session, Depends(get_session, scope="function")],
 ) -> PenaltyProjectionRepository:
     """Provide a penalty projection repository for reading and writing projections."""
     return PenaltyProjectionRepository(session)
 
 
 def get_actual_penalty_repository(
-    session: Session = Depends(get_session, scope="function"),
+    session: Annotated[Session, Depends(get_session, scope="function")],
 ) -> ActualPenaltyRepository:
     """Provide an actual penalty repository for reading and writing realized penalties."""
     return ActualPenaltyRepository(session)
 
 
 def get_penalty_summary_repository(
-    session: Session = Depends(get_session, scope="function"),
+    session: Annotated[Session, Depends(get_session, scope="function")],
 ) -> PenaltySummaryRepository:
     """Provide a penalty summary repository for accessing summary job data."""
     return PenaltySummaryRepository(session)
 
 
 def get_mitigation_input_repository(
-    session: Session = Depends(get_session, scope="function"),
+    session: Annotated[Session, Depends(get_session, scope="function")],
 ) -> MitigationInputRepository:
     """Provide a mitigation input repository for reading mitigation configuration."""
     return MitigationInputRepository(session)
 
 
 def get_mitigation_option_repository(
-    session: Session = Depends(get_session, scope="function"),
+    session: Annotated[Session, Depends(get_session, scope="function")],
 ) -> MitigationOptionRepository:
     """Provide a mitigation option repository for reading and writing computed options."""
     return MitigationOptionRepository(session)
 
 
 def get_dispute_repository(
-    session: Session = Depends(get_session, scope="function"),
+    session: Annotated[Session, Depends(get_session, scope="function")],
 ) -> PenaltyDisputeRepository:
     """Provide a dispute repository for reading and writing penalty disputes."""
     return PenaltyDisputeRepository(session)
 
 
 def get_delivery_change_request_repository(
-    session: Session = Depends(get_session, scope="function"),
+    session: Annotated[Session, Depends(get_session, scope="function")],
 ) -> PoDeliveryChangeRequestRepository:
     """Provide a delivery change request repository for tracking PO delivery modifications."""
     return PoDeliveryChangeRequestRepository(session)
 
 
 def get_penalty_job_item_context_repository(
-    session: Session = Depends(get_session, scope="function"),
+    session: Annotated[Session, Depends(get_session, scope="function")],
 ) -> PenaltyJobItemContextRepository:
     """Provide a penalty job item context repository for job execution details."""
     return PenaltyJobItemContextRepository(session)
 
 
 def get_penalty_job_run_context_repository(
-    session: Session = Depends(get_session, scope="function"),
+    session: Annotated[Session, Depends(get_session, scope="function")],
 ) -> PenaltyJobRunContextRepository:
     """Provide a penalty job run context repository for top-level job state."""
     return PenaltyJobRunContextRepository(session)
 
 
 def get_retailer_agreement_repository(
-    session: Session = Depends(get_session, scope="function"),
+    session: Annotated[Session, Depends(get_session, scope="function")],
 ) -> RetailerAgreementRepository:
     """Provide a retailer agreement repository for reading and writing retailer agreement documents."""
     return RetailerAgreementRepository(session)
 
 
 def get_extracted_penalty_rule_repository(
-    session: Session = Depends(get_session, scope="function"),
+    session: Annotated[Session, Depends(get_session, scope="function")],
 ) -> ExtractedPenaltyRuleRepository:
     """Provide an extracted penalty rule repository for the review-and-publication staging area."""
     return ExtractedPenaltyRuleRepository(session)
 
 
 def get_rule_publication_repository(
-    session: Session = Depends(get_session, scope="function"),
+    session: Annotated[Session, Depends(get_session, scope="function")],
 ) -> RulePublicationRepository:
     """Provide a rule publication repository for the append-only publication audit trail."""
     return RulePublicationRepository(session)
 
 
+def get_extracted_penalty_rule_revision_repository(
+    session: Annotated[Session, Depends(get_session, scope="function")],
+) -> ExtractedPenaltyRuleRevisionRepository:
+    """Provide an extracted penalty rule revision repository for the reviewer revision audit trail."""
+    return ExtractedPenaltyRuleRevisionRepository(session)
+
+
 def get_workflow_thread_repository(
-    session: Session = Depends(get_session, scope="function"),
+    session: Annotated[Session, Depends(get_session, scope="function")],
 ) -> WorkflowThreadRepository:
     """Provide a workflow thread repository bound to the request session."""
     return WorkflowThreadRepository(session)
 
 
 def get_human_action_repository(
-    session: Session = Depends(get_session, scope="function"),
+    session: Annotated[Session, Depends(get_session, scope="function")],
 ) -> HumanActionRepository:
     """Provide a human action repository bound to the request session."""
     return HumanActionRepository(session)
@@ -289,7 +303,7 @@ def get_job_queue(request: Request) -> tuple[JobDispatcher, JobSource]:
 
 
 def get_job_dispatcher(
-    job_queue: tuple[JobDispatcher, JobSource] = Depends(get_job_queue),
+    job_queue: Annotated[tuple[JobDispatcher, JobSource], Depends(get_job_queue)],
 ) -> JobDispatcher:
     """Provide the job dispatcher for enqueuing background work."""
     return job_queue[0]
@@ -314,7 +328,9 @@ def get_llm_client_for_app(app: FastAPI, settings: Settings) -> AzureOpenAIChatC
     return client
 
 
-def get_llm_client(request: Request, settings: Settings = Depends(get_settings)) -> AzureOpenAIChatClient:
+def get_llm_client(
+    request: Request, settings: Annotated[Settings, Depends(get_settings)]
+) -> AzureOpenAIChatClient:
     """Provide the application-scoped Azure OpenAI LLM client."""
     return get_llm_client_for_app(request.app, settings)
 
@@ -325,11 +341,11 @@ def get_llm_client(request: Request, settings: Settings = Depends(get_settings))
 
 
 def get_projection_service(
-    purchase_orders: PurchaseOrderRepository = Depends(get_purchase_order_repository),
-    fulfillment: FulfillmentRepository = Depends(get_fulfillment_repository),
-    rules: PenaltyRuleRepository = Depends(get_penalty_rule_repository),
-    master_data: MasterDataRepository = Depends(get_master_data_repository),
-    projections: PenaltyProjectionRepository = Depends(get_penalty_projection_repository),
+    purchase_orders: Annotated[PurchaseOrderRepository, Depends(get_purchase_order_repository)],
+    fulfillment: Annotated[FulfillmentRepository, Depends(get_fulfillment_repository)],
+    rules: Annotated[PenaltyRuleRepository, Depends(get_penalty_rule_repository)],
+    master_data: Annotated[MasterDataRepository, Depends(get_master_data_repository)],
+    projections: Annotated[PenaltyProjectionRepository, Depends(get_penalty_projection_repository)],
 ) -> ProjectionService:
     """Provide a penalty projection service for computing penalty exposure."""
     return ProjectionService(
@@ -342,13 +358,13 @@ def get_projection_service(
 
 
 def get_mitigation_service(
-    purchase_orders: PurchaseOrderRepository = Depends(get_purchase_order_repository),
-    rules: PenaltyRuleRepository = Depends(get_penalty_rule_repository),
-    master_data: MasterDataRepository = Depends(get_master_data_repository),
-    projections: PenaltyProjectionRepository = Depends(get_penalty_projection_repository),
-    mitigation_inputs: MitigationInputRepository = Depends(get_mitigation_input_repository),
-    mitigation_options: MitigationOptionRepository = Depends(get_mitigation_option_repository),
-    projection_service: ProjectionService = Depends(get_projection_service),
+    purchase_orders: Annotated[PurchaseOrderRepository, Depends(get_purchase_order_repository)],
+    rules: Annotated[PenaltyRuleRepository, Depends(get_penalty_rule_repository)],
+    master_data: Annotated[MasterDataRepository, Depends(get_master_data_repository)],
+    projections: Annotated[PenaltyProjectionRepository, Depends(get_penalty_projection_repository)],
+    mitigation_inputs: Annotated[MitigationInputRepository, Depends(get_mitigation_input_repository)],
+    mitigation_options: Annotated[MitigationOptionRepository, Depends(get_mitigation_option_repository)],
+    projection_service: Annotated[ProjectionService, Depends(get_projection_service)],
 ) -> MitigationService:
     """Provide a mitigation service for computing penalty reduction options."""
     return MitigationService(
@@ -363,12 +379,12 @@ def get_mitigation_service(
 
 
 def get_delivery_change_request_service(
-    purchase_orders: PurchaseOrderRepository = Depends(get_purchase_order_repository),
-    delivery_change_requests: PoDeliveryChangeRequestRepository = Depends(
-        get_delivery_change_request_repository
-    ),
-    projection_service: ProjectionService = Depends(get_projection_service),
-    master_data: MasterDataRepository = Depends(get_master_data_repository),
+    purchase_orders: Annotated[PurchaseOrderRepository, Depends(get_purchase_order_repository)],
+    delivery_change_requests: Annotated[
+        PoDeliveryChangeRequestRepository, Depends(get_delivery_change_request_repository)
+    ],
+    projection_service: Annotated[ProjectionService, Depends(get_projection_service)],
+    master_data: Annotated[MasterDataRepository, Depends(get_master_data_repository)],
 ) -> PoDeliveryChangeRequestService:
     """Provide a delivery change request service for managing delivery date modifications."""
     return PoDeliveryChangeRequestService(
@@ -380,13 +396,13 @@ def get_delivery_change_request_service(
 
 
 def get_dispute_service(
-    purchase_orders: PurchaseOrderRepository = Depends(get_purchase_order_repository),
-    disputes: PenaltyDisputeRepository = Depends(get_dispute_repository),
-    actual_penalties: ActualPenaltyRepository = Depends(get_actual_penalty_repository),
-    rules: PenaltyRuleRepository = Depends(get_penalty_rule_repository),
-    projection_service: ProjectionService = Depends(get_projection_service),
-    retailer_agreements: RetailerAgreementRepository = Depends(get_retailer_agreement_repository),
-    settings: Settings = Depends(get_settings),
+    purchase_orders: Annotated[PurchaseOrderRepository, Depends(get_purchase_order_repository)],
+    disputes: Annotated[PenaltyDisputeRepository, Depends(get_dispute_repository)],
+    actual_penalties: Annotated[ActualPenaltyRepository, Depends(get_actual_penalty_repository)],
+    rules: Annotated[PenaltyRuleRepository, Depends(get_penalty_rule_repository)],
+    projection_service: Annotated[ProjectionService, Depends(get_projection_service)],
+    retailer_agreements: Annotated[RetailerAgreementRepository, Depends(get_retailer_agreement_repository)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> DisputeResolutionService:
     """Provide a dispute service for opening and managing penalty disputes."""
     return DisputeResolutionService(
@@ -401,15 +417,15 @@ def get_dispute_service(
 
 
 def get_dispute_summary_service(
-    purchase_orders: PurchaseOrderRepository = Depends(get_purchase_order_repository),
-    summaries: PenaltySummaryRepository = Depends(get_penalty_summary_repository),
-    agent_registry: AgentRegistryRepository = Depends(get_agent_registry_repository),
-    job_queue: JobQueueRepository = Depends(get_job_queue_repository),
-    job_context: PenaltyJobItemContextRepository = Depends(get_penalty_job_item_context_repository),
-    llm: AzureOpenAIChatClient = Depends(get_llm_client),
-    disputes: PenaltyDisputeRepository = Depends(get_dispute_repository),
-    rules: PenaltyRuleRepository = Depends(get_penalty_rule_repository),
-    master_data: MasterDataRepository = Depends(get_master_data_repository),
+    purchase_orders: Annotated[PurchaseOrderRepository, Depends(get_purchase_order_repository)],
+    summaries: Annotated[PenaltySummaryRepository, Depends(get_penalty_summary_repository)],
+    agent_registry: Annotated[AgentRegistryRepository, Depends(get_agent_registry_repository)],
+    job_queue: Annotated[JobQueueRepository, Depends(get_job_queue_repository)],
+    job_context: Annotated[PenaltyJobItemContextRepository, Depends(get_penalty_job_item_context_repository)],
+    llm: Annotated[AzureOpenAIChatClient, Depends(get_llm_client)],
+    disputes: Annotated[PenaltyDisputeRepository, Depends(get_dispute_repository)],
+    rules: Annotated[PenaltyRuleRepository, Depends(get_penalty_rule_repository)],
+    master_data: Annotated[MasterDataRepository, Depends(get_master_data_repository)],
 ) -> DisputeSummaryService:
     """Provide a dispute summary service for generating LLM-powered dispute resolutions."""
     return DisputeSummaryService(
@@ -426,17 +442,17 @@ def get_dispute_summary_service(
 
 
 def get_projection_summary_service(
-    purchase_orders: PurchaseOrderRepository = Depends(get_purchase_order_repository),
-    summaries: PenaltySummaryRepository = Depends(get_penalty_summary_repository),
-    agent_registry: AgentRegistryRepository = Depends(get_agent_registry_repository),
-    job_queue: JobQueueRepository = Depends(get_job_queue_repository),
-    job_context: PenaltyJobItemContextRepository = Depends(get_penalty_job_item_context_repository),
-    llm: AzureOpenAIChatClient = Depends(get_llm_client),
-    rules: PenaltyRuleRepository = Depends(get_penalty_rule_repository),
-    master_data: MasterDataRepository = Depends(get_master_data_repository),
-    projections: PenaltyProjectionRepository = Depends(get_penalty_projection_repository),
-    actual_penalties: ActualPenaltyRepository = Depends(get_actual_penalty_repository),
-    projection_service: ProjectionService = Depends(get_projection_service),
+    purchase_orders: Annotated[PurchaseOrderRepository, Depends(get_purchase_order_repository)],
+    summaries: Annotated[PenaltySummaryRepository, Depends(get_penalty_summary_repository)],
+    agent_registry: Annotated[AgentRegistryRepository, Depends(get_agent_registry_repository)],
+    job_queue: Annotated[JobQueueRepository, Depends(get_job_queue_repository)],
+    job_context: Annotated[PenaltyJobItemContextRepository, Depends(get_penalty_job_item_context_repository)],
+    llm: Annotated[AzureOpenAIChatClient, Depends(get_llm_client)],
+    rules: Annotated[PenaltyRuleRepository, Depends(get_penalty_rule_repository)],
+    master_data: Annotated[MasterDataRepository, Depends(get_master_data_repository)],
+    projections: Annotated[PenaltyProjectionRepository, Depends(get_penalty_projection_repository)],
+    actual_penalties: Annotated[ActualPenaltyRepository, Depends(get_actual_penalty_repository)],
+    projection_service: Annotated[ProjectionService, Depends(get_projection_service)],
 ) -> ProjectionSummaryService:
     """Provide a projection summary service for generating LLM-powered projection analyses."""
     return ProjectionSummaryService(
@@ -455,16 +471,16 @@ def get_projection_summary_service(
 
 
 def get_mitigation_summary_service(
-    purchase_orders: PurchaseOrderRepository = Depends(get_purchase_order_repository),
-    summaries: PenaltySummaryRepository = Depends(get_penalty_summary_repository),
-    agent_registry: AgentRegistryRepository = Depends(get_agent_registry_repository),
-    job_queue: JobQueueRepository = Depends(get_job_queue_repository),
-    job_context: PenaltyJobItemContextRepository = Depends(get_penalty_job_item_context_repository),
-    llm: AzureOpenAIChatClient = Depends(get_llm_client),
-    master_data: MasterDataRepository = Depends(get_master_data_repository),
-    mitigation_options: MitigationOptionRepository = Depends(get_mitigation_option_repository),
-    actual_penalties: ActualPenaltyRepository = Depends(get_actual_penalty_repository),
-    projection_service: ProjectionService = Depends(get_projection_service),
+    purchase_orders: Annotated[PurchaseOrderRepository, Depends(get_purchase_order_repository)],
+    summaries: Annotated[PenaltySummaryRepository, Depends(get_penalty_summary_repository)],
+    agent_registry: Annotated[AgentRegistryRepository, Depends(get_agent_registry_repository)],
+    job_queue: Annotated[JobQueueRepository, Depends(get_job_queue_repository)],
+    job_context: Annotated[PenaltyJobItemContextRepository, Depends(get_penalty_job_item_context_repository)],
+    llm: Annotated[AzureOpenAIChatClient, Depends(get_llm_client)],
+    master_data: Annotated[MasterDataRepository, Depends(get_master_data_repository)],
+    mitigation_options: Annotated[MitigationOptionRepository, Depends(get_mitigation_option_repository)],
+    actual_penalties: Annotated[ActualPenaltyRepository, Depends(get_actual_penalty_repository)],
+    projection_service: Annotated[ProjectionService, Depends(get_projection_service)],
 ) -> MitigationSummaryService:
     """Provide a mitigation summary service for generating LLM-powered mitigation recommendations."""
     return MitigationSummaryService(
@@ -482,16 +498,19 @@ def get_mitigation_summary_service(
 
 
 def get_penalty_rule_extraction_service(
-    session: Session = Depends(get_session, scope="function"),
-    retailer_agreements: RetailerAgreementRepository = Depends(get_retailer_agreement_repository),
-    extracted_rules: ExtractedPenaltyRuleRepository = Depends(get_extracted_penalty_rule_repository),
-    publications: RulePublicationRepository = Depends(get_rule_publication_repository),
-    rules: PenaltyRuleRepository = Depends(get_penalty_rule_repository),
-    agent_registry: AgentRegistryRepository = Depends(get_agent_registry_repository),
-    agent_runs: AgentRunRepository = Depends(get_agent_run_repository),
-    master_data: MasterDataRepository = Depends(get_master_data_repository),
-    workflow_threads: WorkflowThreadRepository = Depends(get_workflow_thread_repository),
-    human_actions: HumanActionRepository = Depends(get_human_action_repository),
+    session: Annotated[Session, Depends(get_session, scope="function")],
+    retailer_agreements: Annotated[RetailerAgreementRepository, Depends(get_retailer_agreement_repository)],
+    extracted_rules: Annotated[
+        ExtractedPenaltyRuleRepository, Depends(get_extracted_penalty_rule_repository)
+    ],
+    publications: Annotated[RulePublicationRepository, Depends(get_rule_publication_repository)],
+    rules: Annotated[PenaltyRuleRepository, Depends(get_penalty_rule_repository)],
+    agent_registry: Annotated[AgentRegistryRepository, Depends(get_agent_registry_repository)],
+    agent_runs: Annotated[AgentRunRepository, Depends(get_agent_run_repository)],
+    master_data: Annotated[MasterDataRepository, Depends(get_master_data_repository)],
+    revisions: Annotated[
+        ExtractedPenaltyRuleRevisionRepository, Depends(get_extracted_penalty_rule_revision_repository)
+    ],
 ) -> PenaltyRuleExtractionService:
     """Provide a penalty rule extraction service built from per-request repositories.
 
@@ -507,34 +526,58 @@ def get_penalty_rule_extraction_service(
         agent_registry=agent_registry,
         agent_runs=agent_runs,
         master_data=master_data,
-        workflow_threads=workflow_threads,
-        human_actions=human_actions,
+        revisions=revisions,
         session=session,
         graph=Container.build().rule_extraction_graph,
     )
 
 
+def get_rule_revision_service(
+    session: Annotated[Session, Depends(get_session, scope="function")],
+    retailer_agreements: Annotated[RetailerAgreementRepository, Depends(get_retailer_agreement_repository)],
+    extracted_rules: Annotated[
+        ExtractedPenaltyRuleRepository, Depends(get_extracted_penalty_rule_repository)
+    ],
+    revisions: Annotated[
+        ExtractedPenaltyRuleRevisionRepository, Depends(get_extracted_penalty_rule_revision_repository)
+    ],
+    agent_runs: Annotated[AgentRunRepository, Depends(get_agent_run_repository)],
+) -> RuleRevisionService:
+    """Provide a rule revision service, built from per-request repositories like the extraction service above."""
+    return RuleRevisionService(
+        retailer_agreements=retailer_agreements,
+        extracted_rules=extracted_rules,
+        revisions=revisions,
+        agent_runs=agent_runs,
+        session=session,
+    )
+
+
 def get_penalty_seeding_service(
-    master_data: MasterDataRepository = Depends(get_master_data_repository),
-    retailer_agreements: RetailerAgreementRepository = Depends(get_retailer_agreement_repository),
-    rules: PenaltyRuleRepository = Depends(get_penalty_rule_repository),
-    purchase_orders: PurchaseOrderRepository = Depends(get_purchase_order_repository),
-    fulfillment: FulfillmentRepository = Depends(get_fulfillment_repository),
-    projection_service: ProjectionService = Depends(get_projection_service),
-    mitigation_inputs: MitigationInputRepository = Depends(get_mitigation_input_repository),
-    delivery_change_service: PoDeliveryChangeRequestService = Depends(get_delivery_change_request_service),
-    delivery_change_requests: PoDeliveryChangeRequestRepository = Depends(
-        get_delivery_change_request_repository
-    ),
-    penalty_summaries: PenaltySummaryRepository = Depends(get_penalty_summary_repository),
-    penalty_projections: PenaltyProjectionRepository = Depends(get_penalty_projection_repository),
-    actual_penalties: ActualPenaltyRepository = Depends(get_actual_penalty_repository),
-    disputes: PenaltyDisputeRepository = Depends(get_dispute_repository),
-    job_queue: JobQueueRepository = Depends(get_job_queue_repository),
-    penalty_job_item_context: PenaltyJobItemContextRepository = Depends(
-        get_penalty_job_item_context_repository
-    ),
-    penalty_job_run_context: PenaltyJobRunContextRepository = Depends(get_penalty_job_run_context_repository),
+    master_data: Annotated[MasterDataRepository, Depends(get_master_data_repository)],
+    retailer_agreements: Annotated[RetailerAgreementRepository, Depends(get_retailer_agreement_repository)],
+    rules: Annotated[PenaltyRuleRepository, Depends(get_penalty_rule_repository)],
+    purchase_orders: Annotated[PurchaseOrderRepository, Depends(get_purchase_order_repository)],
+    fulfillment: Annotated[FulfillmentRepository, Depends(get_fulfillment_repository)],
+    projection_service: Annotated[ProjectionService, Depends(get_projection_service)],
+    mitigation_inputs: Annotated[MitigationInputRepository, Depends(get_mitigation_input_repository)],
+    delivery_change_service: Annotated[
+        PoDeliveryChangeRequestService, Depends(get_delivery_change_request_service)
+    ],
+    delivery_change_requests: Annotated[
+        PoDeliveryChangeRequestRepository, Depends(get_delivery_change_request_repository)
+    ],
+    penalty_summaries: Annotated[PenaltySummaryRepository, Depends(get_penalty_summary_repository)],
+    penalty_projections: Annotated[PenaltyProjectionRepository, Depends(get_penalty_projection_repository)],
+    actual_penalties: Annotated[ActualPenaltyRepository, Depends(get_actual_penalty_repository)],
+    disputes: Annotated[PenaltyDisputeRepository, Depends(get_dispute_repository)],
+    job_queue: Annotated[JobQueueRepository, Depends(get_job_queue_repository)],
+    penalty_job_item_context: Annotated[
+        PenaltyJobItemContextRepository, Depends(get_penalty_job_item_context_repository)
+    ],
+    penalty_job_run_context: Annotated[
+        PenaltyJobRunContextRepository, Depends(get_penalty_job_run_context_repository)
+    ],
 ) -> PenaltySeedingService:
     """Provide a penalty seeding service for populating test data and simulations."""
     return PenaltySeedingService(

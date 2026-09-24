@@ -33,13 +33,6 @@ class RetailerAgreementRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
-    def get_by_sha256(self, document_sha256: str) -> dict | None:
-        """Return the retailer agreement matching a document's sha256, or None; backs upload idempotency."""
-        row = self._session.scalars(
-            select(RetailerAgreement).where(RetailerAgreement.document_sha256 == document_sha256)
-        ).first()
-        return _retailer_agreement_to_dict(row) if row is not None else None
-
     def add_retailer_agreement(
         self,
         retailer_id: UUID,
@@ -71,13 +64,6 @@ class RetailerAgreementRepository:
         row = self._session.get(RetailerAgreement, retailer_agreement_id)
         return _retailer_agreement_to_dict(row) if row is not None else None
 
-    def list_all(self) -> list[dict]:
-        """Return every retailer agreement, newest first."""
-        rows = self._session.scalars(
-            select(RetailerAgreement).order_by(RetailerAgreement.created_at.desc())
-        ).all()
-        return [_retailer_agreement_to_dict(r) for r in rows]
-
     def list_for_retailer(self, retailer_id: UUID) -> list[dict]:
         """Return every retailer agreement for one retailer."""
         rows = self._session.scalars(
@@ -91,13 +77,11 @@ class RetailerAgreementRepository:
         self._session.flush()
 
     def get_effective_for_retailer(self, retailer_id: UUID, as_of_date: date) -> dict | None:
-        """Return the retailer's currently-effective agreement as of a date, or None.
+        """Return the retailer's effective agreement as of a date, or `None`.
 
-        "Currently effective" means effective_date <= as_of_date and
-        (expiration_date IS NULL OR expiration_date >= as_of_date). If more than
-        one agreement matches (a retailer can accumulate several over time), the
-        most recently effective one wins -- same tie-break DisputeResolutionService.analyze()
-        already uses for overlapping penalty_rule effective ranges.
+        An agreement is effective when `effective_date` is on or before `as_of_date`
+        and `expiration_date` is either unset or on or after `as_of_date`. If multiple
+        agreements match, the one with the latest `effective_date` wins.
         """
         rows = self._session.scalars(
             select(RetailerAgreement)
