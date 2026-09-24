@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
@@ -21,7 +22,7 @@ router = APIRouter(prefix="/penalties", tags=["penalty-rules"])
 )
 def create_penalty_rule(
     body: PenaltyRuleRequest,
-    rules: PenaltyRuleRepository = Depends(get_penalty_rule_repository),
+    rules: Annotated[PenaltyRuleRepository, Depends(get_penalty_rule_repository)],
 ) -> Envelope[PenaltyRuleResponse]:
     """Create a penalty rule for a retailer's violation type.
 
@@ -49,8 +50,8 @@ def create_penalty_rule(
 
 @router.get("/rules", response_model=Envelope[list[PenaltyRuleResponse]])
 def list_penalty_rules(
-    retailer_id: UUID | None = Query(default=None),
-    rules: PenaltyRuleRepository = Depends(get_penalty_rule_repository),
+    rules: Annotated[PenaltyRuleRepository, Depends(get_penalty_rule_repository)],
+    retailer_id: Annotated[UUID | None, Query()] = None,
 ) -> Envelope[list[PenaltyRuleResponse]]:
     """List all penalty rules, optionally filtered by retailer."""
     rows = [PenaltyRuleResponse.model_validate(r) for r in rules.list_rules(retailer_id)]

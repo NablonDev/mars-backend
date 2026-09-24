@@ -9,7 +9,7 @@ rule compiler, an engine-work exception to that split).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, status
@@ -41,7 +41,7 @@ router = APIRouter(prefix="/penalties", tags=["penalty-rule-extraction"])
 )
 def start_extraction(
     retailer_agreement_id: UUID,
-    service: PenaltyRuleExtractionService = Depends(get_penalty_rule_extraction_service),
+    service: Annotated[PenaltyRuleExtractionService, Depends(get_penalty_rule_extraction_service)],
 ) -> Envelope[ExtractionStartResponse]:
     """Start the rule extraction graph for a retailer agreement, returning its run id and staged count."""
     result = service.start_extraction(retailer_agreement_id)
@@ -65,8 +65,8 @@ def request_rule_revision(
     extracted_rule_id: UUID,
     body: RuleRevisionRequest,
     background_tasks: BackgroundTasks,
-    revision_service: RuleRevisionService = Depends(get_rule_revision_service),
-    database: Database = Depends(get_database),
+    revision_service: Annotated[RuleRevisionService, Depends(get_rule_revision_service)],
+    database: Annotated[Database, Depends(get_database)],
 ) -> Envelope[RuleRevisionResponse]:
     """Queue a reviewer's revision instruction for one staged rule and run it in the background."""
     revision = revision_service.request_revision(
@@ -92,7 +92,7 @@ def request_rule_revision(
 )
 def publish_retailer_agreement_rules(
     retailer_agreement_id: UUID,
-    service: PenaltyRuleExtractionService = Depends(get_penalty_rule_extraction_service),
+    service: Annotated[PenaltyRuleExtractionService, Depends(get_penalty_rule_extraction_service)],
 ) -> Envelope[RulePublicationResultResponse]:
     """Publish a retailer agreement's approved extracted rules into live penalty rules."""
     result = service.publish(retailer_agreement_id)

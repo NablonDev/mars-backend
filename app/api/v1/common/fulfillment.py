@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, status
@@ -51,8 +52,8 @@ def _first_line_id(purchase_orders: PurchaseOrderRepository, purchase_order_id: 
 def add_confirmation(
     purchase_order_id: UUID,
     body: OrderConfirmationRequest,
-    purchase_orders: PurchaseOrderRepository = Depends(get_purchase_order_repository),
-    fulfillment: FulfillmentRepository = Depends(get_fulfillment_repository),
+    purchase_orders: Annotated[PurchaseOrderRepository, Depends(get_purchase_order_repository)],
+    fulfillment: Annotated[FulfillmentRepository, Depends(get_fulfillment_repository)],
 ) -> Envelope[OrderConfirmationResponse]:
     """Record an order confirmation with line-level confirmed quantities and delivery dates."""
     purchase_orders.require_purchase_order(purchase_order_id)
@@ -90,8 +91,8 @@ def add_confirmation(
 )
 def list_confirmations(
     purchase_order_id: UUID,
-    purchase_orders: PurchaseOrderRepository = Depends(get_purchase_order_repository),
-    fulfillment: FulfillmentRepository = Depends(get_fulfillment_repository),
+    purchase_orders: Annotated[PurchaseOrderRepository, Depends(get_purchase_order_repository)],
+    fulfillment: Annotated[FulfillmentRepository, Depends(get_fulfillment_repository)],
 ) -> Envelope[list[OrderConfirmationLineResponse]]:
     """Return confirmation history across every line of the purchase order.
 
@@ -121,8 +122,8 @@ def list_confirmations(
 def record_shipment(
     purchase_order_id: UUID,
     body: ShipmentRequest,
-    purchase_orders: PurchaseOrderRepository = Depends(get_purchase_order_repository),
-    fulfillment: FulfillmentRepository = Depends(get_fulfillment_repository),
+    purchase_orders: Annotated[PurchaseOrderRepository, Depends(get_purchase_order_repository)],
+    fulfillment: Annotated[FulfillmentRepository, Depends(get_fulfillment_repository)],
 ) -> Envelope[ShipmentResponse]:
     """Record a shipment event for a purchase order.
 
@@ -157,8 +158,8 @@ def record_shipment(
 )
 def list_shipments(
     purchase_order_id: UUID,
-    purchase_orders: PurchaseOrderRepository = Depends(get_purchase_order_repository),
-    fulfillment: FulfillmentRepository = Depends(get_fulfillment_repository),
+    purchase_orders: Annotated[PurchaseOrderRepository, Depends(get_purchase_order_repository)],
+    fulfillment: Annotated[FulfillmentRepository, Depends(get_fulfillment_repository)],
 ) -> Envelope[list[ShipmentResponse]]:
     """List all shipments recorded for a purchase order.
 
@@ -182,8 +183,8 @@ def list_shipments(
 def add_demand_exception(
     purchase_order_id: UUID,
     body: DemandExceptionRequest,
-    purchase_orders: PurchaseOrderRepository = Depends(get_purchase_order_repository),
-    fulfillment: FulfillmentRepository = Depends(get_fulfillment_repository),
+    purchase_orders: Annotated[PurchaseOrderRepository, Depends(get_purchase_order_repository)],
+    fulfillment: Annotated[FulfillmentRepository, Depends(get_fulfillment_repository)],
 ) -> Envelope[DemandExceptionResponse]:
     """Record a demand exception (e.g., shortage or cancellation) for a purchase order line."""
     purchase_orders.require_purchase_order(purchase_order_id)
@@ -205,8 +206,8 @@ def add_demand_exception(
 )
 def list_demand_exceptions(
     purchase_order_id: UUID,
-    purchase_orders: PurchaseOrderRepository = Depends(get_purchase_order_repository),
-    fulfillment: FulfillmentRepository = Depends(get_fulfillment_repository),
+    purchase_orders: Annotated[PurchaseOrderRepository, Depends(get_purchase_order_repository)],
+    fulfillment: Annotated[FulfillmentRepository, Depends(get_fulfillment_repository)],
 ) -> Envelope[list[DemandExceptionResponse]]:
     """List all demand exceptions recorded for a purchase order's lines."""
     purchase_orders.require_purchase_order(purchase_order_id)

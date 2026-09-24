@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, Query, status
 
 from app.api.dependencies import get_purchase_order_repository
@@ -29,7 +31,7 @@ def _to_response(purchase_orders: PurchaseOrderRepository, po: dict) -> Purchase
 )
 def create_purchase_order(
     body: PurchaseOrderRequest,
-    purchase_orders: PurchaseOrderRepository = Depends(get_purchase_order_repository),
+    purchase_orders: Annotated[PurchaseOrderRepository, Depends(get_purchase_order_repository)],
 ) -> Envelope[PurchaseOrderResponse]:
     """Create a purchase order header with line items.
 
@@ -46,8 +48,8 @@ def create_purchase_order(
 
 @router.get("/purchase-orders", response_model=Envelope[list[PurchaseOrderResponse]])
 def list_purchase_orders(
-    order_status: str | None = Query(default=None),
-    purchase_orders: PurchaseOrderRepository = Depends(get_purchase_order_repository),
+    purchase_orders: Annotated[PurchaseOrderRepository, Depends(get_purchase_order_repository)],
+    order_status: Annotated[str | None, Query()] = None,
 ) -> Envelope[list[PurchaseOrderResponse]]:
     """List all purchase orders, optionally filtered by order status."""
     rows = [_to_response(purchase_orders, po) for po in purchase_orders.list_purchase_orders(order_status)]

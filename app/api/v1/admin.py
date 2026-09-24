@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, Query
 
 from app.api.dependencies import get_penalty_seeding_service
@@ -14,8 +16,8 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 
 @router.post("/seed-master-data", response_model=Envelope[SeedDataResponse])
 def seed_master_data(
-    force: bool = Query(default=False),
-    seeding_service: PenaltySeedingService = Depends(get_penalty_seeding_service),
+    seeding_service: Annotated[PenaltySeedingService, Depends(get_penalty_seeding_service)],
+    force: Annotated[bool, Query()] = False,
 ) -> Envelope[SeedDataResponse]:
     """Populate the database with demo master data (retailers, carriers, materials, plants, SKUs)."""
     counts = seeding_service.seed_master_data(force=force)
@@ -24,7 +26,7 @@ def seed_master_data(
 
 @router.post("/simulate-daily-run", response_model=Envelope[SimulateDailyRunResponse])
 def simulate_daily_run(
-    seeding_service: PenaltySeedingService = Depends(get_penalty_seeding_service),
+    seeding_service: Annotated[PenaltySeedingService, Depends(get_penalty_seeding_service)],
 ) -> Envelope[SimulateDailyRunResponse]:
     """Simulate a daily operational run: create orders, record fulfillment, and compute penalties."""
     scenarios = [ScenarioSummary.model_validate(s) for s in seeding_service.simulate_daily_run()]

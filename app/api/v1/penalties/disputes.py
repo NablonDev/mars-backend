@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Response, status
@@ -36,7 +37,7 @@ router = APIRouter(prefix="/penalties", tags=["penalty-disputes"])
 )
 def open_penalty_dispute(
     body: DisputeOpenRequest,
-    service: DisputeResolutionService = Depends(get_dispute_service),
+    service: Annotated[DisputeResolutionService, Depends(get_dispute_service)],
 ) -> Envelope[DisputeResponse]:
     """Open a dispute against an incurred penalty."""
     created = service.open_dispute(
@@ -54,9 +55,9 @@ def open_penalty_dispute(
     response_model=Envelope[list[DisputeResponse]],
 )
 def list_penalty_disputes(
-    purchase_order_id: UUID | None = Query(default=None),
-    purchase_orders: PurchaseOrderRepository = Depends(get_purchase_order_repository),
-    service: DisputeResolutionService = Depends(get_dispute_service),
+    purchase_orders: Annotated[PurchaseOrderRepository, Depends(get_purchase_order_repository)],
+    service: Annotated[DisputeResolutionService, Depends(get_dispute_service)],
+    purchase_order_id: Annotated[UUID | None, Query()] = None,
 ) -> Envelope[list[DisputeResponse]]:
     """List penalty disputes, optionally narrowed to one purchase order.
 
@@ -74,7 +75,7 @@ def list_penalty_disputes(
 )
 def get_penalty_dispute(
     dispute_id: UUID,
-    service: DisputeResolutionService = Depends(get_dispute_service),
+    service: Annotated[DisputeResolutionService, Depends(get_dispute_service)],
 ) -> Envelope[DisputeResponse]:
     """Retrieve a dispute by its ID."""
     return success_envelope(DisputeResponse.model_validate(service.get(dispute_id)))
@@ -86,7 +87,7 @@ def get_penalty_dispute(
 )
 def analyze_penalty_dispute(
     dispute_id: UUID,
-    service: DisputeResolutionService = Depends(get_dispute_service),
+    service: Annotated[DisputeResolutionService, Depends(get_dispute_service)],
 ) -> Envelope[DisputeResponse]:
     """Compute and persist a dispute verdict synchronously, moving the dispute to ANALYZED."""
     analyzed = service.analyze(dispute_id)
@@ -100,7 +101,7 @@ def analyze_penalty_dispute(
 def resolve_penalty_dispute(
     dispute_id: UUID,
     body: DisputeResolveRequest,
-    service: DisputeResolutionService = Depends(get_dispute_service),
+    service: Annotated[DisputeResolutionService, Depends(get_dispute_service)],
 ) -> Envelope[DisputeResponse]:
     """Resolve a dispute by accepting, rejecting, or overriding the verdict."""
     resolved = service.resolve(
@@ -121,7 +122,7 @@ def trigger_penalty_dispute_summary(
     dispute_id: UUID,
     body: DisputeSummaryRequest,
     response: Response,
-    summary_service: DisputeSummaryService = Depends(get_dispute_summary_service),
+    summary_service: Annotated[DisputeSummaryService, Depends(get_dispute_summary_service)],
 ) -> Envelope[DisputeSummaryStatusResponse]:
     """Request or retrieve a summary analysis of a dispute, returning 202 if queued."""
     job = summary_service.get_or_schedule_for_dispute(dispute_id, force_regenerate=body.force_regenerate)
@@ -152,7 +153,7 @@ def trigger_penalty_dispute_summary(
 )
 def get_penalty_dispute_summary(
     dispute_id: UUID,
-    summary_service: DisputeSummaryService = Depends(get_dispute_summary_service),
+    summary_service: Annotated[DisputeSummaryService, Depends(get_dispute_summary_service)],
 ) -> Envelope[DisputeSummaryStatusResponse]:
     """Poll a dispute summary job; never schedules one.
 

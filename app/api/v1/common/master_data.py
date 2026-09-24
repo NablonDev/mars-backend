@@ -6,6 +6,7 @@ material-masters, plants, and carriers.
 
 from __future__ import annotations
 
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, status
@@ -46,7 +47,7 @@ router = APIRouter(tags=["master-data"])
 )
 def create_retailer(
     body: RetailerRequest,
-    master_data: MasterDataRepository = Depends(get_master_data_repository),
+    master_data: Annotated[MasterDataRepository, Depends(get_master_data_repository)],
 ) -> Envelope[RetailerResponse]:
     """Create a new retailer record."""
     created = master_data.add_retailer(**body.model_dump())
@@ -55,7 +56,7 @@ def create_retailer(
 
 @router.get("/retailers", response_model=Envelope[list[RetailerResponse]])
 def list_retailers(
-    master_data: MasterDataRepository = Depends(get_master_data_repository),
+    master_data: Annotated[MasterDataRepository, Depends(get_master_data_repository)],
 ) -> Envelope[list[RetailerResponse]]:
     """List all retailers."""
     rows = [RetailerResponse.model_validate(r) for r in master_data.list_retailers()]
@@ -70,7 +71,7 @@ def list_retailers(
 def create_retailer_location(
     retailer_id: UUID,
     body: RetailerLocationRequest,
-    master_data: MasterDataRepository = Depends(get_master_data_repository),
+    master_data: Annotated[MasterDataRepository, Depends(get_master_data_repository)],
 ) -> Envelope[RetailerLocationResponse]:
     """Create a location for a retailer."""
     created = master_data.add_retailer_location(retailer_id=retailer_id, **body.model_dump())
@@ -83,7 +84,7 @@ def create_retailer_location(
 )
 def list_retailer_locations(
     retailer_id: UUID,
-    master_data: MasterDataRepository = Depends(get_master_data_repository),
+    master_data: Annotated[MasterDataRepository, Depends(get_master_data_repository)],
 ) -> Envelope[list[RetailerLocationResponse]]:
     """List all locations for a retailer."""
     rows = [
@@ -104,7 +105,7 @@ def list_retailer_locations(
 )
 def create_sku(
     body: SkuRequest,
-    master_data: MasterDataRepository = Depends(get_master_data_repository),
+    master_data: Annotated[MasterDataRepository, Depends(get_master_data_repository)],
 ) -> Envelope[SkuResponse]:
     """Create a new SKU (stock keeping unit)."""
     created = master_data.add_sku(**body.model_dump())
@@ -113,7 +114,7 @@ def create_sku(
 
 @router.get("/skus", response_model=Envelope[list[SkuResponse]])
 def list_skus(
-    master_data: MasterDataRepository = Depends(get_master_data_repository),
+    master_data: Annotated[MasterDataRepository, Depends(get_master_data_repository)],
 ) -> Envelope[list[SkuResponse]]:
     """List all SKUs."""
     rows = [SkuResponse.model_validate(r) for r in master_data.list_skus()]
@@ -127,7 +128,7 @@ def list_skus(
 )
 def create_material(
     body: MaterialRequest,
-    master_data: MasterDataRepository = Depends(get_master_data_repository),
+    master_data: Annotated[MasterDataRepository, Depends(get_master_data_repository)],
 ) -> Envelope[MaterialResponse]:
     """Create a new material."""
     created = master_data.add_material(**body.model_dump())
@@ -136,7 +137,7 @@ def create_material(
 
 @router.get("/materials", response_model=Envelope[list[MaterialResponse]])
 def list_materials(
-    master_data: MasterDataRepository = Depends(get_master_data_repository),
+    master_data: Annotated[MasterDataRepository, Depends(get_master_data_repository)],
 ) -> Envelope[list[MaterialResponse]]:
     """List all materials."""
     rows = [MaterialResponse.model_validate(r) for r in master_data.list_materials()]
@@ -150,7 +151,7 @@ def list_materials(
 )
 def create_material_master(
     body: MaterialMasterRequest,
-    master_data: MasterDataRepository = Depends(get_master_data_repository),
+    master_data: Annotated[MasterDataRepository, Depends(get_master_data_repository)],
 ) -> Envelope[MaterialMasterResponse]:
     """Create a material master record."""
     created = master_data.add_material_master(**body.model_dump())
@@ -161,7 +162,7 @@ def create_material_master(
 
 @router.get("/material-masters", response_model=Envelope[list[MaterialMasterResponse]])
 def list_material_masters(
-    master_data: MasterDataRepository = Depends(get_master_data_repository),
+    master_data: Annotated[MasterDataRepository, Depends(get_master_data_repository)],
 ) -> Envelope[list[MaterialMasterResponse]]:
     """List all material masters."""
     rows = [MaterialMasterResponse.model_validate(r) for r in master_data.list_material_masters()]
@@ -175,7 +176,7 @@ def list_material_masters(
 )
 def create_plant(
     body: PlantRequest,
-    master_data: MasterDataRepository = Depends(get_master_data_repository),
+    master_data: Annotated[MasterDataRepository, Depends(get_master_data_repository)],
 ) -> Envelope[PlantResponse]:
     """Create a new plant (manufacturing facility)."""
     created = master_data.add_plant(**body.model_dump())
@@ -184,7 +185,7 @@ def create_plant(
 
 @router.get("/plants", response_model=Envelope[list[PlantResponse]])
 def list_plants(
-    master_data: MasterDataRepository = Depends(get_master_data_repository),
+    master_data: Annotated[MasterDataRepository, Depends(get_master_data_repository)],
 ) -> Envelope[list[PlantResponse]]:
     """List all plants."""
     rows = [PlantResponse.model_validate(r) for r in master_data.list_plants()]
@@ -198,7 +199,7 @@ def list_plants(
 )
 def create_carrier(
     body: CarrierRequest,
-    master_data: MasterDataRepository = Depends(get_master_data_repository),
+    master_data: Annotated[MasterDataRepository, Depends(get_master_data_repository)],
 ) -> Envelope[CarrierResponse]:
     """Create a new carrier (shipping provider)."""
     created = master_data.add_carrier(**body.model_dump())
@@ -207,7 +208,7 @@ def create_carrier(
 
 @router.get("/carriers", response_model=Envelope[list[CarrierResponse]])
 def list_carriers(
-    master_data: MasterDataRepository = Depends(get_master_data_repository),
+    master_data: Annotated[MasterDataRepository, Depends(get_master_data_repository)],
 ) -> Envelope[list[CarrierResponse]]:
     """List all carriers."""
     rows = [CarrierResponse.model_validate(r) for r in master_data.list_carriers()]
@@ -217,7 +218,7 @@ def list_carriers(
 @router.get("/carriers/{carrier_id}", response_model=Envelope[CarrierResponse])
 def get_carrier(
     carrier_id: UUID,
-    master_data: MasterDataRepository = Depends(get_master_data_repository),
+    master_data: Annotated[MasterDataRepository, Depends(get_master_data_repository)],
 ) -> Envelope[CarrierResponse]:
     """Retrieve a single carrier by its ID.
 

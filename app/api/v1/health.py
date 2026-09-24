@@ -1,6 +1,7 @@
 """Health endpoint that verifies database connectivity."""
 
 import logging
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Response
 from sqlalchemy import text
@@ -21,7 +22,7 @@ router = APIRouter(tags=["health"])
 )
 def health(
     response: Response,
-    database: Database = Depends(get_database),
+    database: Annotated[Database, Depends(get_database)],
 ) -> HealthResponse:
     """Check application health and database connectivity.
 

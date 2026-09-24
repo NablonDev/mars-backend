@@ -281,7 +281,7 @@ def seed_showcase_data() -> None:
             print("Seeding penalty disputes...")
             # Pick actual penalties by specific calibrated numbers
             pen_map = {ap.actual_penalty_number: ap for ap in session.scalars(select(ActualPenalty)).all()}
-            dispute_specs = [
+            dispute_specs: list[dict[str, Any]] = [
                 {
                     "num": "DSP-2026-001",
                     "pen": pen_map.get("ACT-2026-0925"),
@@ -343,25 +343,29 @@ def seed_showcase_data() -> None:
                     "due_date": datetime.date(2026, 8, 15),
                 },
             ]
-            for spec in dispute_specs:
-                actual_pen_id = spec["pen"].id if spec["pen"] else None
+            for dispute_spec in dispute_specs:
+                actual_pen_id = dispute_spec["pen"].id if dispute_spec["pen"] else None
                 disp = PenaltyDispute(
                     id=generate_uuid7(),
-                    dispute_number=spec["num"],
+                    dispute_number=dispute_spec["num"],
                     actual_penalty_id=actual_pen_id,
-                    purchase_order_id=spec["po"].id,
-                    reason_code=spec["reason"],
-                    claimed_amount=spec["claimed"],
-                    computed_amount=spec["computed"],
-                    delta_amount=(spec["claimed"] - spec["computed"])
-                    if spec["computed"] is not None
+                    purchase_order_id=dispute_spec["po"].id,
+                    reason_code=dispute_spec["reason"],
+                    claimed_amount=dispute_spec["claimed"],
+                    computed_amount=dispute_spec["computed"],
+                    delta_amount=(dispute_spec["claimed"] - dispute_spec["computed"])
+                    if dispute_spec["computed"] is not None
                     else None,
-                    verdict=spec["verdict"],
-                    dispute_status=spec["status"],
-                    notes=spec["notes"],
-                    response_due_date=spec["due_date"],
-                    resolved_at=datetime.datetime.now(datetime.UTC) if spec["status"] == "RESOLVED" else None,
-                    resolved_by="agent:dispute_auto_resolver" if spec["status"] == "RESOLVED" else None,
+                    verdict=dispute_spec["verdict"],
+                    dispute_status=dispute_spec["status"],
+                    notes=dispute_spec["notes"],
+                    response_due_date=dispute_spec["due_date"],
+                    resolved_at=datetime.datetime.now(datetime.UTC)
+                    if dispute_spec["status"] == "RESOLVED"
+                    else None,
+                    resolved_by="agent:dispute_auto_resolver"
+                    if dispute_spec["status"] == "RESOLVED"
+                    else None,
                 )
                 session.add(disp)
             session.flush()
@@ -461,7 +465,7 @@ def seed_showcase_data() -> None:
             session.add(agent_run)
             session.flush()
 
-            rule_specs = [
+            rule_specs: list[dict[str, Any]] = [
                 {
                     "agreement": walmart_agreement,
                     "section": "Section 7.1",
@@ -530,31 +534,31 @@ def seed_showcase_data() -> None:
                     ],
                 },
             ]
-            for spec in rule_specs:
+            for rule_spec in rule_specs:
                 rule_id = generate_uuid7()
                 # 32 char fingerprint
                 fp = uuid.uuid4().hex[:32]
                 ex_rule = ExtractedPenaltyRule(
                     id=rule_id,
-                    retailer_agreement_id=spec["agreement"].id,
+                    retailer_agreement_id=rule_spec["agreement"].id,
                     agent_run_id=agent_run.id,
-                    section=spec["section"],
-                    clause_text=spec["clause"],
+                    section=rule_spec["section"],
+                    clause_text=rule_spec["clause"],
                     clause_fingerprint=fp,
-                    penalty_category=spec["category"],
-                    calc_type=spec["calc"],
+                    penalty_category=rule_spec["category"],
+                    calc_type=rule_spec["calc"],
                     po_shortage_flag=True,
                     po_delay_flag=True,
                     pricing_readiness="READY",
-                    status=spec["status"],
-                    confidence=spec["confidence"],
-                    review_notes=spec["notes"],
+                    status=rule_spec["status"],
+                    confidence=rule_spec["confidence"],
+                    review_notes=rule_spec["notes"],
                     extra={},
                 )
                 session.add(ex_rule)
                 session.flush()
 
-                for branch_no, (metric, op, val, unit, src) in enumerate(spec["attrs"], 1):
+                for branch_no, (metric, op, val, unit, src) in enumerate(rule_spec["attrs"], 1):
                     attr = ExtractedPenaltyRuleAttribute(
                         id=generate_uuid7(),
                         extracted_rule_id=rule_id,
@@ -566,7 +570,7 @@ def seed_showcase_data() -> None:
                         value_unit=unit,
                         value_status="EXTRACTED",
                         source_text=src,
-                        confidence=spec["confidence"],
+                        confidence=rule_spec["confidence"],
                         extra={},
                     )
                     session.add(attr)
@@ -754,13 +758,23 @@ def seed_showcase_data() -> None:
                 ),
             ]
 
-            for sender_type, cust, mat, existing_ref, brand, site, grd, target_ref, v_from in cmir_specs:
+            for (
+                sender_type,
+                cust,
+                mat_ident,
+                existing_ref,
+                brand,
+                site,
+                grd,
+                target_ref,
+                v_from,
+            ) in cmir_specs:
                 rec = CmirRecord(
                     id=generate_uuid7(),
                     sender_type=sender_type,
                     customer_identity=cust,
                     customer_identity_key=cust.strip().lower(),
-                    material_identity=mat,
+                    material_identity=mat_ident,
                     intent_phrase="Add or update SKU customer material reference",
                     existing_cmir_ref=existing_ref,
                     brand=brand,
@@ -901,18 +915,18 @@ def seed_showcase_data() -> None:
                 },
             ]
 
-            for spec in thread_specs:
+            for thread_spec in thread_specs:
                 th_id = generate_uuid7()
                 th = WorkflowThread(
                     id=th_id,
-                    status=spec["status"],
-                    stage=spec["stage"],
-                    current_node=spec["node"],
+                    status=thread_spec["status"],
+                    stage=thread_spec["stage"],
+                    current_node=thread_spec["node"],
                     completed_at=datetime.datetime.now(datetime.UTC)
-                    if spec["status"] == "COMPLETED"
+                    if thread_spec["status"] == "COMPLETED"
                     else None,
                     error=None,
-                    metadata_json=spec["meta"],
+                    metadata_json=thread_spec["meta"],
                 )
                 session.add(th)
                 session.flush()
@@ -921,14 +935,14 @@ def seed_showcase_data() -> None:
                 subj = WorkflowThreadSubject(
                     workflow_thread_id=th_id,
                     subject_type=WorkflowThreadSubjectType.EMAIL_EVENT.value
-                    if "sender" in spec["meta"]
+                    if "sender" in thread_spec["meta"]
                     else WorkflowThreadSubjectType.PURCHASE_ORDER_LINE.value,
                     subject_id=generate_uuid7(),
                 )
                 session.add(subj)
 
                 # Human action
-                act_spec = spec["action"]
+                act_spec = thread_spec["action"]
                 act = HumanAction(
                     id=generate_uuid7(),
                     workflow_thread_id=th_id,
