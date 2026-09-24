@@ -62,8 +62,9 @@ class ServiceBusMailQueue:
         from azure.servicebus import ServiceBusClient
 
         # Development - Use Connection String
-        if getattr(self._config, "connection_string", None):
-            return ServiceBusClient.from_connection_string(conn_str=self._config.connection_string)
+        conn_str = getattr(self._config, "connection_string", None)
+        if conn_str:
+            return ServiceBusClient.from_connection_string(conn_str=conn_str)
 
         # Production - Use Managed Identity / Azure AD
         credential = self._credential or self._default_credential()
