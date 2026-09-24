@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
@@ -23,8 +24,8 @@ router = APIRouter(prefix="/penalties", tags=["actual-penalties"])
 )
 def add_actual_penalty(
     body: ActualPenaltyRequest,
-    purchase_orders: PurchaseOrderRepository = Depends(get_purchase_order_repository),
-    actual_penalties: ActualPenaltyRepository = Depends(get_actual_penalty_repository),
+    purchase_orders: Annotated[PurchaseOrderRepository, Depends(get_purchase_order_repository)],
+    actual_penalties: Annotated[ActualPenaltyRepository, Depends(get_actual_penalty_repository)],
 ) -> Envelope[ActualPenaltyResponse]:
     """Record an actual penalty incurred for a purchase order.
 
@@ -40,9 +41,9 @@ def add_actual_penalty(
     response_model=Envelope[list[ActualPenaltyResponse]],
 )
 def list_actual_penalties(
-    purchase_order_id: UUID | None = Query(default=None),
-    purchase_orders: PurchaseOrderRepository = Depends(get_purchase_order_repository),
-    actual_penalties: ActualPenaltyRepository = Depends(get_actual_penalty_repository),
+    purchase_orders: Annotated[PurchaseOrderRepository, Depends(get_purchase_order_repository)],
+    actual_penalties: Annotated[ActualPenaltyRepository, Depends(get_actual_penalty_repository)],
+    purchase_order_id: Annotated[UUID | None, Query()] = None,
 ) -> Envelope[list[ActualPenaltyResponse]]:
     """List incurred penalties, optionally narrowed to one purchase order.
 
@@ -64,7 +65,7 @@ def list_actual_penalties(
 )
 def get_actual_penalty(
     actual_penalty_id: UUID,
-    actual_penalties: ActualPenaltyRepository = Depends(get_actual_penalty_repository),
+    actual_penalties: Annotated[ActualPenaltyRepository, Depends(get_actual_penalty_repository)],
 ) -> Envelope[ActualPenaltyResponse]:
     """Standalone fetch by the row's own surrogate id."""
     row = actual_penalties.get(actual_penalty_id)

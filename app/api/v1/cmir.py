@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, status
 
 from app.api.dependencies import get_service
@@ -20,7 +22,7 @@ router = APIRouter(tags=["cmir"])
 )
 def start_email_ingest(
     body: IngestEmailEventsRequest,
-    run_service: CmirService = Depends(get_service),
+    run_service: Annotated[CmirService, Depends(get_service)],
 ) -> Envelope[IngestEmailEventsResponse]:
     """Start email ingestion from Gmail.
 

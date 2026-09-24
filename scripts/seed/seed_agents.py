@@ -33,12 +33,12 @@ from app.agents.penalties.mitigation.prompts.v1 import SYSTEM_PROMPT as MITIGATI
 from app.agents.penalties.mitigation.prompts.v2 import SYSTEM_PROMPT as MITIGATION_V2_PROMPT
 from app.agents.penalties.projection.prompts.v1 import SYSTEM_PROMPT as PROJECTION_V1_PROMPT
 from app.agents.penalties.projection.prompts.v2 import SYSTEM_PROMPT as PROJECTION_V2_PROMPT
-from app.agents.penalties.rule_extraction.prompts.v1 import (
+from app.agents.penalties.rule_extraction.prompts.v2 import (
     PENALTY_CLASSIFICATION_SYSTEM_PROMPT,
     PENALTY_FACT_EXTRACTION_SYSTEM_PROMPT,
     SECTION_SCREENING_SYSTEM_PROMPT,
 )
-from app.agents.penalties.rule_extraction.prompts.v1 import (
+from app.agents.penalties.rule_extraction.prompts.v2 import (
     PROMPT_VERSION as RULE_EXTRACTION_PROMPT_VERSION,
 )
 from app.core.config import Settings

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
@@ -70,14 +71,18 @@ def _execution_note(job_queue_backend: str) -> str:
 )
 def trigger_job_run(
     body: JobRunRequest,
-    session: Session = Depends(get_session),
-    purchase_orders: PurchaseOrderRepository = Depends(get_purchase_order_repository),
-    projections: PenaltyProjectionRepository = Depends(get_penalty_projection_repository),
-    job_queue: JobQueueRepository = Depends(get_job_queue_repository),
-    job_run_context: PenaltyJobRunContextRepository = Depends(get_penalty_job_run_context_repository),
-    job_item_context: PenaltyJobItemContextRepository = Depends(get_penalty_job_item_context_repository),
-    job_dispatcher: JobDispatcher = Depends(get_job_dispatcher),
-    settings: Settings = Depends(get_settings),
+    session: Annotated[Session, Depends(get_session)],
+    purchase_orders: Annotated[PurchaseOrderRepository, Depends(get_purchase_order_repository)],
+    projections: Annotated[PenaltyProjectionRepository, Depends(get_penalty_projection_repository)],
+    job_queue: Annotated[JobQueueRepository, Depends(get_job_queue_repository)],
+    job_run_context: Annotated[
+        PenaltyJobRunContextRepository, Depends(get_penalty_job_run_context_repository)
+    ],
+    job_item_context: Annotated[
+        PenaltyJobItemContextRepository, Depends(get_penalty_job_item_context_repository)
+    ],
+    job_dispatcher: Annotated[JobDispatcher, Depends(get_job_dispatcher)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> Envelope[JobRunResponse]:
     """Enqueue a batch job run, dispatching on the `job_type` discriminator."""
     if isinstance(body, PenaltyMitigationBatchRequest):
@@ -401,8 +406,8 @@ def _trigger_penalty_full_run_batch(
 @router.get("/job-runs/{job_run_id}", response_model=Envelope[JobRunStatusResponse])
 def get_job_run_status(
     job_run_id: UUID,
-    session: Session = Depends(get_session),
-    job_queue: JobQueueRepository = Depends(get_job_queue_repository),
+    session: Annotated[Session, Depends(get_session)],
+    job_queue: Annotated[JobQueueRepository, Depends(get_job_queue_repository)],
 ) -> Envelope[JobRunStatusResponse]:
     """Retrieve the execution status and completion state of a job run."""
     # A run with zero items is valid; absence of the JobRun distinguishes
@@ -439,10 +444,10 @@ def get_job_run_status(
 )
 def list_job_run_items(
     job_run_id: UUID,
-    status: JobItemStatus | None = Query(default=None),
-    limit: int = Query(default=50, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
-    job_queue: JobQueueRepository = Depends(get_job_queue_repository),
+    job_queue: Annotated[JobQueueRepository, Depends(get_job_queue_repository)],
+    status: Annotated[JobItemStatus | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> Envelope[JobItemListResponse]:
     """List items in a job run, optionally filtered by status, with pagination."""
     rows = job_queue.list_run_items(job_run_id, status=status, limit=limit, offset=offset)

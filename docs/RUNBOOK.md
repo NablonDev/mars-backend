@@ -1300,53 +1300,57 @@ inference time (`penalty_rule_screening`, `penalty_rule_classification`,
 `penalty_rule_fact_extraction`), alongside the summary and CMIR/PO-validation
 agents it already seeded: no separate seeding step needed beyond §6.
 
-The lifecycle, end to end:
+The lifecycle, end to end. Steps 1, 3, 4, and 6 now run against mars-bff (same
+`/penalties/retailer-agreements/...` paths, its own base URL and internal API key);
+only extraction (step 2), revision requests, and publish (step 5) still run here:
 
 ```bash
 # 1. Upload the retailer agreement (idempotent: re-posting the same markdown_text
-#    returns the existing row, 200, instead of a duplicate):
-curl -X POST http://127.0.0.1:8000/api/v1/penalties/retailer-agreements \
-  -H "X-Internal-Api-Key: $APP_INTERNAL_API_KEY" \
+#    returns the existing row, 200, instead of a duplicate) -- mars-bff:
+curl -X POST http://<mars-bff-host>/api/v1/penalties/retailer-agreements \
+  -H "X-Internal-Api-Key: $BFF_INTERNAL_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"retailer_id": "<retailer_id>", "contract_code": "CT-TGT-2026", "title": "Target Master Agreement 2026", "markdown_text": "..."}'
 
-# 2. Start extraction (returns agent_run_id and workflow_thread_id; runs
-#    the LangGraph pipeline through to a human-review interrupt):
+# 2. Run extraction (returns agent_run_id and staged_count; runs the LangGraph
+#    pipeline synchronously to completion -- no interrupt, no thread to resume.
+#    The run is `completed` or `failed` by the time this call returns):
 curl -X POST http://127.0.0.1:8000/api/v1/penalties/retailer-agreements/<retailer_agreement_id>/extract \
   -H "X-Internal-Api-Key: $APP_INTERNAL_API_KEY"
 
-# 3. List what is pending review:
-curl "http://127.0.0.1:8000/api/v1/penalties/retailer-agreements/<retailer_agreement_id>/extracted-rules?status=PENDING_REVIEW" \
-  -H "X-Internal-Api-Key: $APP_INTERNAL_API_KEY"
+# 3. List what is pending review (agent_run_id defaults to the latest completed run)
+#    -- mars-bff:
+curl "http://<mars-bff-host>/api/v1/penalties/retailer-agreements/<retailer_agreement_id>/extracted-rules?status=PENDING_REVIEW" \
+  -H "X-Internal-Api-Key: $BFF_INTERNAL_API_KEY"
 
-# 4. Approve or reject each candidate (<extracted_rule_id> from step 3):
-curl -X POST http://127.0.0.1:8000/api/v1/penalties/retailer-agreements/<retailer_agreement_id>/extracted-rules/<extracted_rule_id>/review \
-  -H "X-Internal-Api-Key: $APP_INTERNAL_API_KEY" \
+# 4. Approve or reject each candidate (<extracted_rule_id> from step 3). This
+#    writes extracted_penalty_rule.status directly -- there is no run to resume
+#    afterward -- mars-bff:
+curl -X POST http://<mars-bff-host>/api/v1/penalties/retailer-agreements/<retailer_agreement_id>/extracted-rules/<extracted_rule_id>/review \
+  -H "X-Internal-Api-Key: $BFF_INTERNAL_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"status": "APPROVED"}'
 
-curl -X POST http://127.0.0.1:8000/api/v1/penalties/retailer-agreements/<retailer_agreement_id>/extracted-rules/<extracted_rule_id>/review \
-  -H "X-Internal-Api-Key: $APP_INTERNAL_API_KEY" \
+curl -X POST http://<mars-bff-host>/api/v1/penalties/retailer-agreements/<retailer_agreement_id>/extracted-rules/<extracted_rule_id>/review \
+  -H "X-Internal-Api-Key: $BFF_INTERNAL_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"status": "REJECTED", "review_notes": "Not a PO shortage/delay clause."}'
 
-# 5. Resume the run once every rule you care about is decided (workflow_thread_id
-#    from step 2's response; expected_updated_at from that thread's current stage,
-#    e.g. GET /api/v1/workflow-threads/<workflow_thread_id>). Carries no verdicts of
-#    its own -- apply_decisions re-reads step 4's decisions from the database:
-curl -X POST http://127.0.0.1:8000/api/v1/workflow-threads/<workflow_thread_id>/decisions \
+#    Instead of approving/rejecting as-is, a reviewer can ask for a targeted
+#    re-extraction (queues a background job, resets the rule to PENDING_REVIEW):
+curl -X POST http://127.0.0.1:8000/api/v1/penalties/retailer-agreements/<retailer_agreement_id>/extracted-rules/<extracted_rule_id>/revisions \
   -H "X-Internal-Api-Key: $APP_INTERNAL_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"decision_type": "RULE_REVIEW_RESUME", "actor": "reviewer@company.com", "expected_updated_at": "<updated_at>"}'
+  -d '{"instruction": "The cap is 15% of invoice value, not 15% of PO value."}'
 
-# 6. Publish the approved rules into live penalty_rule rows:
+# 5. Publish the approved rules into live penalty_rule rows:
 curl -X POST http://127.0.0.1:8000/api/v1/penalties/retailer-agreements/<retailer_agreement_id>/publish \
   -H "X-Internal-Api-Key: $APP_INTERNAL_API_KEY"
 
-# 7. Read the publication audit (every outcome ever recorded, plus a
-#    rejection-reason histogram):
-curl http://127.0.0.1:8000/api/v1/penalties/retailer-agreements/<retailer_agreement_id>/publications \
-  -H "X-Internal-Api-Key: $APP_INTERNAL_API_KEY"
+# 6. Read the publication audit (every outcome ever recorded, plus a
+#    rejection-reason histogram) -- mars-bff:
+curl http://<mars-bff-host>/api/v1/penalties/retailer-agreements/<retailer_agreement_id>/publications \
+  -H "X-Internal-Api-Key: $BFF_INTERNAL_API_KEY"
 ```
 
 Approving a rule is necessary but not sufficient for publication: `POST
@@ -1356,12 +1360,15 @@ Approving a rule is necessary but not sufficient for publication: `POST
 is skipped and recorded as `NOT_READY` in the publication audit, not
 published, and not an error.
 
-Step 5 (resume) closes out the run's own bookkeeping (the `workflow_thread`
-and `agent_run` rows) but is not a publication prerequisite: `POST .../publish`
-reads `extracted_penalty_rule.status` directly and never checks whether the
-run's `workflow_thread` has completed, so an operator who skips step 5 can
-still publish -- the run just stays parked at `waiting_rule_review` instead of
-closing.
+`POST .../publish` (here) and mars-bff's `GET .../extracted-rules` (when
+`agent_run_id` is omitted) both only ever see the latest completed run for
+the retailer agreement -- the newest `process.agent_run` row tagged
+`metadata.retailer_agreement_id` for this agreement with `status=completed`.
+Reviewing a rule staged by an older run fails with `409
+RULE_NOT_IN_LATEST_RUN`; re-run extraction (step 2) again first if you need a
+fresh pass over the contract. mars-bff's `GET .../extraction-runs` lists
+every run ever tagged for the agreement, so you can tell which one is
+current before acting.
 
 ### Rejection reason codes
 
@@ -1388,7 +1395,7 @@ with a `reason_code`. The common ones and what to do about them:
 | `ALREADY_PUBLISHED` | A `penalty_rule` with this rule's deterministic `rule_code` already exists | Expected on a repeat publish of the same run; no action needed |
 
 `reason_code` is `null` on a `PUBLISHED` outcome. The
-`rejection_reason_histogram` on `GET .../publications` counts each code
+`rejection_reason_histogram` on mars-bff's `GET .../publications` counts each code
 across every publication run recorded for the retailer agreement, so a large
 `NOT_READY` or `UNSUPPORTED_CALC_TYPE` count is a signal to look at the
 extraction pipeline's prompts or the engine's coverage, not at any one

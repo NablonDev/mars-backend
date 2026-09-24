@@ -41,6 +41,7 @@ def _agent_run_to_dict(row: AgentRun) -> dict:
         "completed_at": row.completed_at,
         "error": row.error,
         "metadata_json": row.metadata_json,
+        "created_at": row.created_at,
         "updated_at": row.updated_at,
     }
 
@@ -136,6 +137,7 @@ class AgentRunRepository:
         run_type: str,
         job_item_id: UUID | None = None,
         workflow_thread_id: UUID | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> UUID:
         """Open a new agent run in `running` status, returning its id."""
         row = AgentRun(
@@ -144,7 +146,7 @@ class AgentRunRepository:
             job_item_id=job_item_id,
             workflow_thread_id=workflow_thread_id,
             status="running",
-            metadata_json={},
+            metadata_json=metadata or {},
         )
         self._session.add(row)
         self._session.flush()
@@ -218,6 +220,26 @@ class AgentRunRepository:
         items = [_agent_run_to_dict(r) for r in rows]
         next_cursor = next_cursor_from_page(items, limit)
         return items, next_cursor
+
+    def list_by_metadata(self, run_type: str, key: str, value: str) -> list[dict[str, Any]]:
+        """Return every non-deleted run of `run_type` whose `metadata_json[key] == value`, newest first.
+
+        `as_string()` renders the JSON scalar as text so the comparison works identically
+        on SQLite (tests) and Postgres. Ordered on `created_at` with `id` as a tiebreaker
+        (uuid7 ids are time-ordered), so two runs created in the same instant still sort
+        deterministically.
+        """
+        stmt = (
+            select(AgentRun)
+            .where(
+                AgentRun.run_type == run_type,
+                AgentRun.metadata_json[key].as_string() == value,
+                AgentRun.deleted_at.is_(None),
+            )
+            .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
+        )
+        rows = self._session.scalars(stmt).all()
+        return [_agent_run_to_dict(r) for r in rows]
 
 
 class AgentTraceRepository:

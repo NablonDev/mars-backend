@@ -294,61 +294,51 @@ agreement's prose into reviewed `penalty_rule` rows: upload the agreement,
 run extraction, review each candidate clause, publish the approved ones.
 See `docs/architecture/penalty-rule-extraction.md` for the full design.
 
+Only an endpoint that runs an agent/LLM stays in mars-backend, plus `publish`
+(the deterministic rule compiler, an engine-work exception to that split).
+Every other rule-extraction endpoint -- retailer agreement create/list/get,
+extraction status, extraction runs, extracted-rule reads, review, and
+revision listing -- moved to mars-bff, under the same
+`/penalties/retailer-agreements/...` paths.
+
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/api/v1/penalties/retailer-agreements` (body: `retailer_id`, `contract_code`, `title`, `markdown_text`, `source_uri?`, `effective_date?`, `expiration_date?`) | Create a retailer agreement (`201`), or return the existing one (`200`) if its content already matches one on file by `document_sha256` |
-| GET | `/api/v1/penalties/retailer-agreements` | List every retailer agreement, newest first. No `status` filter yet: `retailer_agreement` has no `status` column today (see note below) |
-| GET | `/api/v1/penalties/retailer-agreements/{retailer_agreement_id}` | Single retailer agreement read (`404 RETAILER_AGREEMENT_NOT_FOUND`) |
-| POST | `/api/v1/penalties/retailer-agreements/{retailer_agreement_id}/extract` | Start the extraction graph for the retailer agreement (`202`), returning `agent_run_id` and `workflow_thread_id` (`null` when nothing in the agreement needed review) |
-| GET | `/api/v1/penalties/retailer-agreements/{retailer_agreement_id}/extraction` | The most recent extraction run's status: the reviewer-facing thread's stage when one exists, a synthesized `completed` status for a touchless run, or `NOT_STARTED` |
-| GET | `/api/v1/penalties/retailer-agreements/{retailer_agreement_id}/extracted-rules?status=` | List a retailer agreement's extracted rules and their attributes, optionally narrowed to `PENDING_REVIEW`\|`APPROVED`\|`REJECTED` |
-| GET | `/api/v1/penalties/retailer-agreements/{retailer_agreement_id}/extracted-rules/{extracted_rule_id}` | Single extracted rule read, with its attributes (`404 EXTRACTED_RULE_NOT_FOUND`) |
-| POST | `/api/v1/penalties/retailer-agreements/{retailer_agreement_id}/extracted-rules/{extracted_rule_id}/review` (body: `status`, `review_notes?`) | Record a reviewer's `APPROVED` or `REJECTED` decision on one extracted rule (graph-unaware; does not resume the run) |
-| POST | `/api/v1/penalties/retailer-agreements/{retailer_agreement_id}/publish` | Run the publisher over the retailer agreement's approved extracted rules, inserting live `penalty_rule` rows and a `rule_publication` audit row for every outcome |
-| GET | `/api/v1/penalties/retailer-agreements/{retailer_agreement_id}/publications` | Every recorded publication outcome for the retailer agreement, plus a `rejection_reason_histogram` keyed by `reason_code` |
+| POST | `/api/v1/penalties/retailer-agreements/{retailer_agreement_id}/extract` | Run the extraction graph to completion for the retailer agreement (`202`), returning `agent_run_id` and `staged_count`. No interrupt: the graph ends at `stage_rules`, and the run is `completed` or `failed` before this call returns |
+| POST | `/api/v1/penalties/retailer-agreements/{retailer_agreement_id}/extracted-rules/{extracted_rule_id}/revisions` (body: `instruction`, `requested_by?`) | Queue a reviewer's re-extraction instruction for one staged rule (`202`); runs in the background, replaces the rule's facts, and resets it to `PENDING_REVIEW` |
+| POST | `/api/v1/penalties/retailer-agreements/{retailer_agreement_id}/publish` | Run the publisher over the retailer agreement's approved extracted rules from the latest completed run, inserting live `penalty_rule` rows and a `rule_publication` audit row for every outcome |
 
-`document_sha256` is computed server-side, a sha256 over `markdown_text`;
-the client never supplies it. `RetailerAgreementResponse` carries the full row
-(`id`, `retailer_id`, `contract_code`, `title`, `document_sha256`,
-`source_uri`, `effective_date`, `expiration_date`).
+Retailer agreement create/list/get (`document_sha256`-deduped upload) and the
+`?status=` note about `retailer_agreement` having no status column live with
+mars-bff's endpoint reference now.
 
-`retailer_agreement` has no `status` column, so the list endpoint has no
-`?status=` filter yet. Adding one is a schema decision, not an API-layer
-one: whether it would track a document lifecycle (`DRAFT`/`ACTIVE`/`ARCHIVED`)
-or be derived from extraction/publication progress needs deciding before a
-migration adds it.
+The extraction graph carries no interrupt: `POST .../extract` runs it through
+to `stage_rules -> END` and only returns once the run is `completed` or
+`failed`. Review (mars-bff) is a plain database status change, not a graph
+resume -- there is no `/workflow-threads/{thread_id}/decisions` call in this
+flow. Which run is "the latest" (for extraction-run listing, review, and
+publish alike) is always the newest `process.agent_run` row tagged with this
+retailer agreement whose `status = completed`; the same definition is
+duplicated in mars-bff (see `docs/architecture/penalty-rule-extraction.md`
+section 3.1.1).
 
-There is no reviewer-decision audit trail for individual rule reviews:
-`POST .../extracted-rules/{id}/review` overwrites `extracted_penalty_rule.status`
-and `review_notes` in place, with no history table recording who decided what
-and when. A `GET .../extracted-rules/{id}/reviews` endpoint needs that data
-model built first.
-
-The extraction graph interrupts at `human_review` while any staged rule stays
-`PENDING_REVIEW`. Once every rule a reviewer cares about has been decided via
-`POST .../review`, resume the run through the shared workflow-threads surface:
-`POST /api/v1/workflow-threads/{workflow_thread_id}/decisions` with
-`decision_type: "RULE_REVIEW_RESUME"` (body: `actor`, `expected_updated_at`,
-no verdicts -- decisions are re-read from the database). See "Workflow
-threads" below for the shared contract and its common errors.
-
-`GET .../extracted-rules` returns each `ExtractedPenaltyRuleResponse` with
-its nested `attributes` array (`ExtractedPenaltyRuleAttributeResponse`:
-`branch_no`, `attribute_role`, `metric_code`, `operator`, `value`/
-`value_max`, `value_unit`, `value_status`, `currency_code`, `basis_type`,
-`applies_per`, `tier_application`, `cap_scope`, `source_text`,
-`confidence`). `pricing_readiness` is one of `READY`,
-`NEEDS_EXTERNAL_FIGURE`, `AWAITING_DATA`, `UNSUPPORTED_SHAPE`,
-`NOT_A_CHARGE`; only a `READY` rule that a reviewer also marks `APPROVED`
-is eligible for publication.
+A reviewer who wants a clause re-read rather than approved/rejected as-is can
+request a revision instead: `POST .../extracted-rules/{id}/revisions` queues
+an `extracted_penalty_rule_revision` row and runs the re-extraction in the
+background, replacing the rule's facts and resetting it to
+`PENDING_REVIEW`. `RuleRevisionResponse.status` is one of `QUEUED`,
+`RUNNING`, `COMPLETED`, `FAILED` (a revision open longer than 10 minutes is
+marked `FAILED` with `error: "Revision timed out."` the next time anything
+checks it). mars-bff's review endpoint refuses while a revision is still
+open on the same rule (`409 RULE_REVISION_IN_PROGRESS`). Listing a rule's
+revision history also moved to mars-bff.
 
 `POST .../publish` returns `RulePublicationResultResponse`
 (`published_count`, `rejected_count`, `outcomes`), each `outcomes[]` entry
 an `extracted_rule_id`, `outcome` (`PUBLISHED`\|`REJECTED`),
 `penalty_rule_id` (set only when published), `reason_code` (set only when
-rejected, see `docs/RUNBOOK.md` for the full list), and `reason_detail`.
-`GET .../publications` returns the same outcome shape for every publication
-run ever recorded against the retailer agreement, not just the latest.
+rejected, see `docs/RUNBOOK.md` for the full list), and `reason_detail`. The
+publication audit read (every outcome ever recorded, plus a
+`rejection_reason_histogram`) moved to mars-bff.
 
 Every response above uses the standard envelope.
 
@@ -430,24 +420,22 @@ Routes in `app/api/v1/po_validation.py`.
 | POST | `/api/v1/po-validation/purchase-order-lines` | Ingest PO lines into the validation pipeline (runs CMIR-matching/material-master checks as a side effect); `202`. Each line also creates and inline-settles one `process.job_item` (`item_type=PO_VALIDATION`) under one `process.job_run` (`job_type=PO_VALIDATION_BATCH`) per call -- `batch_id` in the response *is* that `job_run_id`, queryable via `GET /api/v1/job-runs/{batch_id}` |
 | GET | `/api/v1/purchase-order-lines?purchase_order_id=&status=&limit=&cursor=` | The one `purchase_order_line` listing route, paginated on `updated_at` (replaces what used to be this flat route plus a separate nested `GET /purchase-orders/{purchase_order_id}/lines`). Both `purchase_order_id`/`status` omitted defaults to the "ready" set (`READY_FOR_SO_CREATION`/`READY_FOR_SO_CREATION_PARTIAL`) across every PO; `purchase_order_id` given with `status` omitted returns that PO's lines regardless of status; an explicit `status` filters on that exact `line_status` value, optionally also scoped to one PO |
 
-## Workflow threads (shared: `cmir` + `po_validation` + penalty rule extraction)
+## Workflow threads (shared: `cmir` + `po_validation`)
 
 Routes in `app/api/v1/workflow_threads.py`. `workflow_thread` is a shared
-`process`-schema resource used by all three, not owned by any one router. A
-penalty rule-extraction thread's subject is `workflow_thread_subject.subject_id`
-with `subject_type='RETAILER_AGREEMENT'` (neither `EMAIL_EVENT` nor
-`PURCHASE_ORDER_LINE` fits a retailer-agreement-scoped review); the
-`domain=cmir`/`domain=po_validation` filter below only recognizes those
-other two, so a rule-extraction thread is absent from either filtered view
-but still listed unfiltered.
+`process`-schema resource used by both, not owned by either router. Penalty
+rule extraction does not use it: the extraction graph has no interrupt to
+pause on, review is a plain `extracted_penalty_rule.status` update (see
+"Retailer agreements and rule extraction" above), and
+`workflow_thread_subject` has no `RETAILER_AGREEMENT` subject type.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/v1/workflow-threads?domain=&status=&stage=&limit=&cursor=` | List workflow threads (`domain` is `cmir`\|`po_validation`; rule-extraction threads are unfiltered by `domain` but still listed) |
+| GET | `/api/v1/workflow-threads?domain=&status=&stage=&limit=&cursor=` | List workflow threads (`domain` is `cmir`\|`po_validation`) |
 | GET | `/api/v1/workflow-threads/{thread_id}?include=snapshot` | Thread stage (always) plus its domain-specific snapshot (opt-in via `include`) |
 | POST | `/api/v1/workflow-threads/{thread_id}/missing-fields` | Submit missing mandatory fields and resume the graph (CMIR-only in substance today) |
 | PATCH | `/api/v1/workflow-threads/{thread_id}/draft` | Save reviewer draft edits (CMIR-only in substance today) |
-| POST | `/api/v1/workflow-threads/{thread_id}/decisions` | Record a decision -- one generic endpoint, `decision_type` discriminator selects `CMIR_APPROVAL`, `QTY_MISMATCH`, `MANUAL_CMIR_ENTRY`, or `RULE_REVIEW_RESUME` (body: `actor`, `expected_updated_at`; resumes a penalty rule-extraction run paused at `human_review`, carrying no verdicts of its own) |
+| POST | `/api/v1/workflow-threads/{thread_id}/decisions` | Record a decision -- one generic endpoint, `decision_type` discriminator selects `CMIR_APPROVAL`, `QTY_MISMATCH`, or `MANUAL_CMIR_ENTRY` (body: `actor`, `expected_updated_at`) |
 
 Common errors: `THREAD_NOT_FOUND` (404, unknown `thread_id`), `THREAD_STALE`
 (409, `expected_updated_at` didn't match -- refetch and retry), `THREAD_NOT_WAITING`

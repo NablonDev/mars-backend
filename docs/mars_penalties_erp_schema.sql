@@ -767,6 +767,27 @@ CREATE TABLE penalties.actual_penalty (
     deleted_at                  timestamptz
 );
 
+CREATE TABLE penalties.extracted_penalty_rule_revision (
+    id                          uuid PRIMARY KEY,
+    extracted_rule_id           uuid NOT NULL REFERENCES penalties.extracted_penalty_rule(id) ON DELETE CASCADE,
+    revision_no                 integer NOT NULL,
+    instruction                 text NOT NULL,
+    requested_by                varchar(255),
+    status                      varchar(20) NOT NULL,  -- QUEUED / RUNNING / COMPLETED / FAILED
+    agent_reply                 text,
+    before_snapshot             jsonb NOT NULL,
+    after_snapshot              jsonb,
+    error                       text,
+    started_at                  timestamptz,
+    completed_at                timestamptz,
+    created_at                  timestamptz NOT NULL DEFAULT now(),
+    updated_at                  timestamptz NOT NULL DEFAULT now(),
+    deleted_at                  timestamptz,
+    UNIQUE (extracted_rule_id, revision_no)
+);
+CREATE INDEX ix_extracted_penalty_rule_revision_extracted_rule_id ON
+    penalties.extracted_penalty_rule_revision (extracted_rule_id);
+
 -- =============================================================================
 -- SCHEMA: langgraph -- empty, owned entirely by LangGraph's PostgresSaver
 -- =============================================================================

@@ -7,7 +7,7 @@ PRD-facing route, and so is kept separate from the public
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends
 
@@ -22,7 +22,7 @@ router = APIRouter(tags=["internal"])
 @router.post("/internal/process-email", response_model=Envelope[dict[str, Any]])
 def process_queued_email(
     body: ProcessQueuedEmailRequest,
-    run_service: CmirService = Depends(get_service),
+    run_service: Annotated[CmirService, Depends(get_service)],
 ) -> Envelope[dict[str, Any]]:
     """Process one queued CMIR email on behalf of the Service Bus consumer.
 

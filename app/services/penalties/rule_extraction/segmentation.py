@@ -83,6 +83,8 @@ def split_into_screening_units(markdown_text: str) -> list[ScreeningUnit]:
     """
     units: list[ScreeningUnit] = []
     for section in _parse_sections(markdown_text):
+        if section.level > 0 and not _section_has_body(section):
+            continue
         if len(section.text) <= _MAX_UNIT_CHARS:
             units.append(
                 ScreeningUnit(
@@ -174,6 +176,17 @@ def _parse_sections(text: str) -> list[_Section]:
         sections.append(_Section(level, heading, breadcrumb, text[start:end], start, end))
 
     return sections
+
+
+def _section_has_body(section: _Section) -> bool:
+    """Whether a headed section has text beyond its own heading line and `---` dividers.
+
+    Canonical agreement markdown promotes every clause into its own heading, so a
+    section that is nothing but a heading (an article title with no preamble sentence,
+    a divider before the next sub-clause) carries no screenable content of its own.
+    """
+    body_lines = section.text.splitlines()[1:]
+    return any(line.strip() and line.strip() != "---" for line in body_lines)
 
 
 def _split_into_blocks(text: str) -> list[str]:

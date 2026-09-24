@@ -1,16 +1,12 @@
 """API tests for `app/api/v1/workflow_threads.py` -- the shared
-`process.workflow_thread` surface used by `cmir`, `po_validation`, and penalty
-rule extraction (Phase 7b route redesign, approved plan §6).
+`process.workflow_thread` surface used by `cmir` and `po_validation`
+(Phase 7b route redesign, approved plan §6).
 
 Was split across the pre-restructure `test_cmir_api.py` (`/threads/{id}/stage`,
 `/snapshot`, `/missing-fields`, `/update`, `/decision`) and
 `test_po_validation_api.py` (`/threads/{id}/qty-mismatch-decision`,
 `/manual-cmir-entry`, and the snapshot-dispatch fallback tests) -- both now
-collapse onto this one router. `PenaltyRuleExtractionService` is faked via
-`app.dependency_overrides` (not a `cmir_service`/`po_validation_service`-style
-fixture): unlike those two, `get_penalty_rule_extraction_service` isn't part of the
-`app` fixture's own wiring, so every test here would otherwise hit the real
-Postgres-backed `Container.build()`.
+collapse onto this one router.
 """
 
 from __future__ import annotations
@@ -23,7 +19,6 @@ from app.core.exceptions import NotFoundError
 
 THREAD_CMIR = UUID("11111111-1111-1111-1111-111111111111")
 THREAD_PO = UUID("22222222-2222-2222-2222-222222222222")
-THREAD_RULE = UUID("33333333-3333-3333-3333-333333333333")
 THREAD_UNKNOWN = UUID("99999999-9999-9999-9999-999999999999")
 
 _UPDATED_AT = "2026-08-09T10:00:00+00:00"
@@ -138,26 +133,6 @@ class FakePoValidationService:
         return _po_stage_dict(stage="READY_FOR_SO_CREATION", status="ready_for_so_creation")
 
 
-class FakeRuleExtractionService:
-    def resume_review(self, thread_id, *, actor, expected_updated_at):
-        return {
-            "id": THREAD_RULE,
-            "job_item_id": None,
-            "status": "completed",
-            "stage": "RULE_REVIEW_COMPLETE",
-            "current_node": None,
-            "completed_at": None,
-            "error": None,
-            "metadata_json": {
-                "checkpoint_thread_id": "rule-extraction:abc",
-                "agent_run_id": str(THREAD_RULE),
-            },
-            "email_event_id": None,
-            "purchase_order_line_id": None,
-            "updated_at": _UPDATED_AT,
-        }
-
-
 @pytest.fixture
 def cmir_service():
     return FakeCmirService()
@@ -166,13 +141,6 @@ def cmir_service():
 @pytest.fixture
 def po_validation_service():
     return FakePoValidationService()
-
-
-@pytest.fixture(autouse=True)
-def _override_rule_extraction_service(app):
-    from app.api.dependencies import get_penalty_rule_extraction_service
-
-    app.dependency_overrides[get_penalty_rule_extraction_service] = lambda: FakeRuleExtractionService()
 
 
 def test_list_workflow_threads_returns_both_domains(client):
@@ -318,20 +286,6 @@ def test_submit_decision_manual_cmir_entry_dispatches_to_po_service(client):
 
     assert response.status_code == 200, response.text
     assert response.json()["data"]["stage"] == "READY_FOR_SO_CREATION"
-
-
-def test_submit_decision_rule_review_resume_dispatches_to_rule_extraction_service(client):
-    response = client.post(
-        f"/api/v1/workflow-threads/{THREAD_RULE}/decisions",
-        json={
-            "decision_type": "RULE_REVIEW_RESUME",
-            "actor": "reviewer@company.com",
-            "expected_updated_at": _UPDATED_AT,
-        },
-    )
-
-    assert response.status_code == 200, response.text
-    assert response.json()["data"]["stage"] == "RULE_REVIEW_COMPLETE"
 
 
 def test_submit_decision_rejects_unknown_decision_type(client):

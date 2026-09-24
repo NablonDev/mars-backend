@@ -8,7 +8,7 @@ coordinates with external services for tracing and checkpoint recovery.
 from __future__ import annotations
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from langgraph.graph import END, StateGraph
+from langgraph.graph import END, START, StateGraph
 
 from app.agents.po_validation.nodes import PoValidationNodes
 from app.agents.po_validation.state import POGraphState
@@ -48,7 +48,7 @@ def build_po_validation_graph(
     builder.add_node("mark_discontinued", node("mark_discontinued", nodes.mark_discontinued))
     builder.add_node("handle_error", node("handle_error", nodes.handle_error))
 
-    builder.set_entry_point("persist_po_line")
+    builder.add_edge(START, "persist_po_line")
 
     builder.add_conditional_edges(
         "persist_po_line",

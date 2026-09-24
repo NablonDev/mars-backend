@@ -95,6 +95,25 @@ def test_nested_headings_carry_a_breadcrumb():
     assert units[-1].section_path == "3. Delivery > 3.4 Penalties"
 
 
+def test_heading_only_sections_are_skipped_leaving_one_unit_per_sub_clause():
+    text = "# T\n\n## 4. PERF\n\n### 4.1 A\nbody a\n\n### 4.2 B\nbody b\n"
+
+    units = split_into_screening_units(text)
+
+    assert len(units) == 2
+    assert [u.section_path for u in units] == ["T > 4. PERF > 4.1 A", "T > 4. PERF > 4.2 B"]
+
+
+def test_a_section_with_its_own_body_text_still_yields_a_unit():
+    text = "# T\n\n## 4. PERF\nIntroductory paragraph for the article.\n\n### 4.1 A\nbody a\n"
+
+    units = split_into_screening_units(text)
+
+    paths = [u.section_path for u in units]
+    assert "T > 4. PERF" in paths
+    assert "T > 4. PERF > 4.1 A" in paths
+
+
 def test_oversized_section_splits_at_block_boundaries_into_multiple_units():
     paragraphs = [
         f"Paragraph {i} pads this clause out to a realistic length for testing." for i in range(100)

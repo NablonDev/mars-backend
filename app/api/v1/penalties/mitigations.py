@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Response, status
@@ -107,14 +108,14 @@ def _attach_summary(
 
 @router.get("/mitigations", response_model=Envelope[MitigationOptionsResponse])
 def list_penalty_mitigations(
-    projection_id: UUID | None = Query(default=None),
-    purchase_order_id: UUID | None = Query(default=None),
-    projection_date: date | None = Query(default=None),
-    projections: PenaltyProjectionRepository = Depends(get_penalty_projection_repository),
-    purchase_orders: PurchaseOrderRepository = Depends(get_purchase_order_repository),
-    mitigation_options: MitigationOptionRepository = Depends(get_mitigation_option_repository),
-    mitigation_summary_service: MitigationSummaryService = Depends(get_mitigation_summary_service),
-    include: set[str] = Depends(_INCLUDE_SUMMARY),
+    projections: Annotated[PenaltyProjectionRepository, Depends(get_penalty_projection_repository)],
+    purchase_orders: Annotated[PurchaseOrderRepository, Depends(get_purchase_order_repository)],
+    mitigation_options: Annotated[MitigationOptionRepository, Depends(get_mitigation_option_repository)],
+    mitigation_summary_service: Annotated[MitigationSummaryService, Depends(get_mitigation_summary_service)],
+    include: Annotated[set[str], Depends(_INCLUDE_SUMMARY)],
+    projection_id: Annotated[UUID | None, Query()] = None,
+    purchase_order_id: Annotated[UUID | None, Query()] = None,
+    projection_date: Annotated[date | None, Query()] = None,
 ) -> Envelope[MitigationOptionsResponse]:
     """List mitigation options for a projection by ID or (purchase_order_id, projection_date)."""
     resolved_purchase_order_id, resolved_projection_date = _resolve_purchase_order_and_date(
@@ -147,9 +148,9 @@ def list_penalty_mitigations(
 )
 def run_penalty_mitigations(
     body: PenaltyMitigationRunRequest,
-    projections: PenaltyProjectionRepository = Depends(get_penalty_projection_repository),
-    mitigation_options: MitigationOptionRepository = Depends(get_mitigation_option_repository),
-    mitigation_service: MitigationService = Depends(get_mitigation_service),
+    projections: Annotated[PenaltyProjectionRepository, Depends(get_penalty_projection_repository)],
+    mitigation_options: Annotated[MitigationOptionRepository, Depends(get_mitigation_option_repository)],
+    mitigation_service: Annotated[MitigationService, Depends(get_mitigation_service)],
 ) -> Envelope[MitigationOptionsResponse]:
     """Compute and persist mitigation options for a projection."""
     # `PenaltyMitigationRunRequest`'s own model validator already guarantees
@@ -186,7 +187,7 @@ def run_penalty_mitigations(
 def trigger_penalty_mitigation_summary(
     body: PenaltyMitigationSummaryRequest,
     response: Response,
-    mitigation_summary_service: MitigationSummaryService = Depends(get_mitigation_summary_service),
+    mitigation_summary_service: Annotated[MitigationSummaryService, Depends(get_mitigation_summary_service)],
 ) -> Envelope[PenaltyMitigationSummaryStatusResponse]:
     """Request or retrieve a summary of mitigation options, returning 202 if queued."""
     job = mitigation_summary_service.get_or_schedule(
@@ -220,9 +221,9 @@ def trigger_penalty_mitigation_summary(
     response_model=Envelope[PenaltyMitigationSummaryStatusResponse],
 )
 def get_penalty_mitigation_summary(
-    purchase_order_id: UUID = Query(...),
-    as_of_date: date | None = Query(default=None),
-    mitigation_summary_service: MitigationSummaryService = Depends(get_mitigation_summary_service),
+    purchase_order_id: Annotated[UUID, Query()],
+    mitigation_summary_service: Annotated[MitigationSummaryService, Depends(get_mitigation_summary_service)],
+    as_of_date: Annotated[date | None, Query()] = None,
 ) -> Envelope[PenaltyMitigationSummaryStatusResponse]:
     """Poll the status of a mitigation summary job without refetching options."""
     try:
@@ -262,9 +263,9 @@ def get_penalty_mitigation_summary(
 )
 def get_penalty_mitigation(
     mitigation_id: UUID,
-    mitigation_options: MitigationOptionRepository = Depends(get_mitigation_option_repository),
-    mitigation_summary_service: MitigationSummaryService = Depends(get_mitigation_summary_service),
-    include: set[str] = Depends(_INCLUDE_SUMMARY),
+    mitigation_options: Annotated[MitigationOptionRepository, Depends(get_mitigation_option_repository)],
+    mitigation_summary_service: Annotated[MitigationSummaryService, Depends(get_mitigation_summary_service)],
+    include: Annotated[set[str], Depends(_INCLUDE_SUMMARY)],
 ) -> Envelope[MitigationOptionDetailResponse]:
     """Return a mitigation option without triggering summary generation."""
     row = mitigation_options.get_by_id(mitigation_id)

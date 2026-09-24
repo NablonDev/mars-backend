@@ -1,7 +1,7 @@
 """Pins the fact-extraction prompt's stated `branch_no` convention to the value
 `PenaltyRulePublisher` actually looks up for a non-tiered (single-branch) rule.
 
-`prompts/v1.py` and `publisher.py` are edited independently (different agents,
+`prompts/v2.py` and `publisher.py` are edited independently (different agents,
 different files), so nothing else re-checks that they still agree. Before this fix the
 prompt told the model a single-branch rule uses `branch_no = 1` and called `0` a
 modeling error, while the publisher and the schema default both treat `branch_no = 0`
@@ -13,7 +13,8 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
-from app.agents.penalties.rule_extraction.prompts.v1 import (
+from app.agents.penalties.rule_extraction.prompts.v2 import (
+    PENALTY_CLASSIFICATION_SYSTEM_PROMPT,
     PENALTY_FACT_EXTRACTION_SYSTEM_PROMPT,
     PROMPT_VERSION,
 )
@@ -21,8 +22,18 @@ from app.services.penalties.rule_extraction.publisher import PenaltyRulePublishe
 from app.services.penalties.rule_extraction.types import PublishedRule, StagedFact, StagedRule
 
 
-def test_prompt_version_is_still_v1():
-    assert PROMPT_VERSION == "v1"
+def test_prompt_version_is_v2():
+    assert PROMPT_VERSION == "v2"
+
+
+def test_classification_prompt_has_plain_explanation_and_reviewer_instructions_headings():
+    assert "PLAIN EXPLANATION." in PENALTY_CLASSIFICATION_SYSTEM_PROMPT
+    assert "REVIEWER INSTRUCTIONS." in PENALTY_CLASSIFICATION_SYSTEM_PROMPT
+
+
+def test_fact_extraction_prompt_has_new_headings():
+    assert "AMOUNTS THAT ARE NOT CHARGES." in PENALTY_FACT_EXTRACTION_SYSTEM_PROMPT
+    assert "REVIEWER INSTRUCTIONS." in PENALTY_FACT_EXTRACTION_SYSTEM_PROMPT
 
 
 def test_fact_extraction_prompt_explains_what_previous_issues_means():

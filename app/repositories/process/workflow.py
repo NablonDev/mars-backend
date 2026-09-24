@@ -18,6 +18,7 @@ from app.models import (
     WorkflowThreadSubjectType,
 )
 from app.utils.pagination import next_cursor_from_page, parse_cursor
+from app.utils.sanitize import strip_nul_bytes
 
 
 def _thread_to_dict(thread: WorkflowThread, subject: WorkflowThreadSubject | None) -> dict:
@@ -123,7 +124,7 @@ class WorkflowThreadRepository:
             status=status,
             stage=stage,
             current_node=current_node,
-            metadata_json=metadata or {},
+            metadata_json=strip_nul_bytes(metadata) if metadata is not None else {},
         )
         self._session.add(thread)
         self._session.flush()
@@ -221,9 +222,9 @@ class WorkflowThreadRepository:
         elif current_node is not None:
             thread.current_node = current_node
         if metadata is not None:
-            thread.metadata_json = metadata
+            thread.metadata_json = strip_nul_bytes(metadata)
         if error is not None:
-            thread.error = error
+            thread.error = strip_nul_bytes(error)
         self._session.flush()
 
     def update_if_current(
@@ -238,14 +239,10 @@ class WorkflowThreadRepository:
         error: str | None = None,
         completed: bool = False,
     ) -> bool:
-        """Optimistic-concurrency update, guarded on `updated_at`.
+        """Update a workflow thread only if `updated_at` still matches the expected value.
 
-        The `UPDATE` only matches a row whose `updated_at` still equals
-        `expected_updated_at`; returns `True` if it hit exactly one row and
-        `False` if another writer already advanced the thread since the
-        caller last read it (or the thread doesn't exist). Callers that get
-        `False` back are expected to re-read and retry rather than assume
-        the update went through, unlike `update_status`, which always writes.
+        Returns `True` when exactly one row is updated and `False` when the thread does not
+        exist or another writer has updated it. Callers must re-read and retry after `False`.
         """
         values: dict[str, Any] = {"status": status, "stage": stage, "updated_at": func.now()}
         if completed:
@@ -254,9 +251,9 @@ class WorkflowThreadRepository:
         elif current_node is not None:
             values["current_node"] = current_node
         if metadata is not None:
-            values["metadata_json"] = metadata
+            values["metadata_json"] = strip_nul_bytes(metadata)
         if error is not None:
-            values["error"] = error
+            values["error"] = strip_nul_bytes(error)
 
         result = cast(
             CursorResult,
@@ -331,8 +328,8 @@ class HumanActionRepository:
             agent_run_id=agent_run_id,
             action_type=action_type,
             interrupt_type=interrupt_type,
-            request_payload=request_payload,
-            state_snapshot=state_snapshot,
+            request_payload=strip_nul_bytes(request_payload),
+            state_snapshot=strip_nul_bytes(state_snapshot) if state_snapshot is not None else None,
             status="open",
         )
         self._session.add(row)
@@ -356,9 +353,9 @@ class HumanActionRepository:
             return None
 
         row.status = "completed"
-        row.response_payload = response_payload
+        row.response_payload = strip_nul_bytes(response_payload)
         row.decision = decision
-        row.reason = reason
+        row.reason = strip_nul_bytes(reason) if reason is not None else None
         row.actor = actor
         row.responded_at = func.now()
         self._session.flush()
@@ -420,9 +417,9 @@ class HumanActionRepository:
                 )
                 .values(
                     status="completed",
-                    response_payload=response_payload,
+                    response_payload=strip_nul_bytes(response_payload),
                     decision=decision,
-                    reason=reason,
+                    reason=strip_nul_bytes(reason) if reason is not None else None,
                     actor=actor,
                     action_type=action_type,
                     responded_at=func.now(),
@@ -441,8 +438,10 @@ class HumanActionRepository:
             pending_row = HumanAction(
                 workflow_thread_id=workflow_thread_id,
                 interrupt_type=next_pending_interrupt_type,
-                request_payload=next_pending_request_payload,
-                state_snapshot=next_pending_state_snapshot,
+                request_payload=strip_nul_bytes(next_pending_request_payload),
+                state_snapshot=strip_nul_bytes(next_pending_state_snapshot)
+                if next_pending_state_snapshot is not None
+                else None,
                 status="open",
             )
             self._session.add(pending_row)

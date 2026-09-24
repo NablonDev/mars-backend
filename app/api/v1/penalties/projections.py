@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Protocol
+from typing import Annotated, Protocol
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Response, status
@@ -165,7 +165,7 @@ def _attach_mitigation_summary(
 )
 def run_penalty_projection(
     body: PenaltyProjectionRunRequest,
-    projection_service: ProjectionService = Depends(get_projection_service),
+    projection_service: Annotated[ProjectionService, Depends(get_projection_service)],
 ) -> Envelope[PenaltyProjectionResultResponse]:
     """Compute and persist a penalty projection for a purchase order."""
     result = projection_service.run_for_purchase_order(
@@ -180,17 +180,17 @@ def run_penalty_projection(
     response_model=Envelope[list[PenaltyProjectionDetailResponse]],
 )
 def list_penalty_projections(
-    purchase_order_id: UUID | None = Query(default=None),
-    status: str | None = Query(default=None),
-    projection_date: date | None = Query(default=None),
-    projection_date_from: date | None = Query(default=None),
-    projection_date_to: date | None = Query(default=None),
-    purchase_orders: PurchaseOrderRepository = Depends(get_purchase_order_repository),
-    projections: PenaltyProjectionRepository = Depends(get_penalty_projection_repository),
-    projection_summary_service: ProjectionSummaryService = Depends(get_projection_summary_service),
-    mitigation_options: MitigationOptionRepository = Depends(get_mitigation_option_repository),
-    mitigation_summary_service: MitigationSummaryService = Depends(get_mitigation_summary_service),
-    include: set[str] = Depends(_INCLUDE_PROJECTION),
+    purchase_orders: Annotated[PurchaseOrderRepository, Depends(get_purchase_order_repository)],
+    projections: Annotated[PenaltyProjectionRepository, Depends(get_penalty_projection_repository)],
+    projection_summary_service: Annotated[ProjectionSummaryService, Depends(get_projection_summary_service)],
+    mitigation_options: Annotated[MitigationOptionRepository, Depends(get_mitigation_option_repository)],
+    mitigation_summary_service: Annotated[MitigationSummaryService, Depends(get_mitigation_summary_service)],
+    include: Annotated[set[str], Depends(_INCLUDE_PROJECTION)],
+    purchase_order_id: Annotated[UUID | None, Query()] = None,
+    status: Annotated[str | None, Query()] = None,
+    projection_date: Annotated[date | None, Query()] = None,
+    projection_date_from: Annotated[date | None, Query()] = None,
+    projection_date_to: Annotated[date | None, Query()] = None,
 ) -> Envelope[list[PenaltyProjectionDetailResponse]]:
     """List penalty projections, filtered by purchase order, status, or projection date.
 
@@ -232,7 +232,7 @@ def list_penalty_projections(
 def trigger_penalty_projection_summary(
     body: PenaltyProjectionSummaryRequest,
     response: Response,
-    projection_summary_service: ProjectionSummaryService = Depends(get_projection_summary_service),
+    projection_summary_service: Annotated[ProjectionSummaryService, Depends(get_projection_summary_service)],
 ) -> Envelope[PenaltyProjectionSummaryStatusResponse]:
     """Request or retrieve a summary of a projection, returning 202 if queued."""
     job = projection_summary_service.get_or_schedule(
@@ -269,9 +269,9 @@ def trigger_penalty_projection_summary(
     response_model=Envelope[PenaltyProjectionSummaryStatusResponse],
 )
 def get_penalty_projection_summary(
-    purchase_order_id: UUID = Query(...),
-    as_of_date: date | None = Query(default=None),
-    projection_summary_service: ProjectionSummaryService = Depends(get_projection_summary_service),
+    purchase_order_id: Annotated[UUID, Query()],
+    projection_summary_service: Annotated[ProjectionSummaryService, Depends(get_projection_summary_service)],
+    as_of_date: Annotated[date | None, Query()] = None,
 ) -> Envelope[PenaltyProjectionSummaryStatusResponse]:
     """Poll a projection summary job without refetching its projection; never schedules one.
 
@@ -314,11 +314,11 @@ def get_penalty_projection_summary(
 )
 def get_penalty_projection(
     projection_id: UUID,
-    projections: PenaltyProjectionRepository = Depends(get_penalty_projection_repository),
-    projection_summary_service: ProjectionSummaryService = Depends(get_projection_summary_service),
-    mitigation_options: MitigationOptionRepository = Depends(get_mitigation_option_repository),
-    mitigation_summary_service: MitigationSummaryService = Depends(get_mitigation_summary_service),
-    include: set[str] = Depends(_INCLUDE_PROJECTION),
+    projections: Annotated[PenaltyProjectionRepository, Depends(get_penalty_projection_repository)],
+    projection_summary_service: Annotated[ProjectionSummaryService, Depends(get_projection_summary_service)],
+    mitigation_options: Annotated[MitigationOptionRepository, Depends(get_mitigation_option_repository)],
+    mitigation_summary_service: Annotated[MitigationSummaryService, Depends(get_mitigation_summary_service)],
+    include: Annotated[set[str], Depends(_INCLUDE_PROJECTION)],
 ) -> Envelope[PenaltyProjectionDetailResponse]:
     """Return a penalty projection without triggering summary generation."""
     row = projections.get_by_id(projection_id)
@@ -342,9 +342,9 @@ def get_penalty_projection(
     response_model=Envelope[PenaltyExposureResponse],
 )
 def get_penalty_exposure(
-    purchase_order_id: UUID = Query(...),
-    purchase_orders: PurchaseOrderRepository = Depends(get_purchase_order_repository),
-    projections: PenaltyProjectionRepository = Depends(get_penalty_projection_repository),
+    purchase_order_id: Annotated[UUID, Query()],
+    purchase_orders: Annotated[PurchaseOrderRepository, Depends(get_purchase_order_repository)],
+    projections: Annotated[PenaltyProjectionRepository, Depends(get_penalty_projection_repository)],
 ) -> Envelope[PenaltyExposureResponse]:
     """Retrieve the latest penalty exposure (the most recent projection) for a purchase order."""
     purchase_orders.require_purchase_order(purchase_order_id)

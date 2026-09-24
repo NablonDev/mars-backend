@@ -126,18 +126,7 @@ class ManualCmirEntryDecisionRequest(BaseModel):
     expected_updated_at: str
 
 
-class RuleReviewResumeRequest(BaseModel):
-    """Resume a penalty rule-extraction run paused for reviewer decisions. Carries no verdicts."""
-
-    decision_type: Literal["RULE_REVIEW_RESUME"] = "RULE_REVIEW_RESUME"
-    actor: str
-    expected_updated_at: str
-
-
 WorkflowThreadDecisionRequest = Annotated[
-    CmirApprovalDecisionRequest
-    | QtyMismatchDecisionRequest
-    | ManualCmirEntryDecisionRequest
-    | RuleReviewResumeRequest,
+    CmirApprovalDecisionRequest | QtyMismatchDecisionRequest | ManualCmirEntryDecisionRequest,
     Field(discriminator="decision_type"),
 ]

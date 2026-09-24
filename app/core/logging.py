@@ -18,7 +18,7 @@ _request_id: ContextVar[str] = ContextVar(
     default=UNKNOWN_REQUEST_ID,
 )
 
-_EXTRA_FIELDS = ("method", "path", "status", "duration_ms", "error_code")
+_EXTRA_FIELDS = ("method", "path", "status", "duration_ms", "response_badge", "error_code")
 
 _URL_CREDENTIALS = re.compile(r"([a-zA-Z][\w+.-]*://[^:/?#\s@]+:)[^@\s/]*(@)")
 
@@ -257,6 +257,16 @@ class PrettyFormatter(logging.Formatter):
         dur = self._c(f"{_ANSI_GRAY}{_ANSI_ITALIC}", dur_str)
         return f"{dash} {dur}"
 
+    def _format_badge(self, badge: str) -> str:
+        """Format response badge ([empty], [1 item], [N items]) with color."""
+        clean = badge.strip("[]")
+        text = f"[{clean}]"
+        if self.no_color:
+            return text
+        if clean == "empty":
+            return self._c(_ANSI_YELLOW, text)
+        return self._c(_ANSI_CYAN, text)
+
     def format(self, record: logging.LogRecord) -> str:
         """Render a log record with colors, source file, timestamp, and formatted HTTP access info."""
         ts_str = self._format_timestamp(getattr(record, "created", 0.0))
@@ -289,6 +299,10 @@ class PrettyFormatter(logging.Formatter):
             dur_str = self._format_duration(duration_ms)
             if dur_str:
                 parts.append(dur_str)
+
+            response_badge = getattr(record, "response_badge", None)
+            if response_badge:
+                parts.append(self._format_badge(str(response_badge)))
 
             error_code = getattr(record, "error_code", None)
             if error_code:

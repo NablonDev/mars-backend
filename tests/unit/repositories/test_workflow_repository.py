@@ -320,3 +320,37 @@ def test_processing_error_log_rolls_back_only_its_own_savepoint_on_a_write_failu
 
     logged = repos.processing_errors.log(error_type="LOOKUP_FAILURE", error_message="clean write")
     assert logged["error_message"] == "clean write"
+
+
+def test_human_action_and_thread_strips_nul_bytes(repos):
+    """NUL bytes in human action payloads, snapshots, or thread metadata must be sanitized."""
+    thread = repos.workflow_threads.create(
+        stage="AWAITING_APPROVAL",
+        subject_type=WorkflowThreadSubjectType.EMAIL_EVENT,
+        subject_id=_seed_email_event(repos),
+        metadata={"detail": "thread\x00data"},
+    )
+    assert thread["metadata_json"] == {"detail": "threaddata"}
+
+    action_id = repos.human_actions.create_open(
+        "approval_required",
+        {"prompt": "question\x00here"},
+        workflow_thread_id=thread["id"],
+        state_snapshot={"state\x00key": "val\x00ue"},
+    )
+
+    action = repos.human_actions.get_open_for_thread(thread["id"])
+    assert action is not None
+    assert action["id"] == action_id
+    assert action["request_payload"] == {"prompt": "questionhere"}
+    assert action["state_snapshot"] == {"statekey": "value"}
+
+    completed = repos.human_actions.complete(
+        action_id,
+        response_payload={"answer": "yes\x00please"},
+        reason="looks\x00good",
+        actor="reviewer",
+    )
+    assert completed is not None
+    assert completed["response_payload"] == {"answer": "yesplease"}
+    assert completed["reason"] == "looksgood"

@@ -1,11 +1,11 @@
 """Tests for `RuleExtractionNodes` (app.agents.penalties.rule_extraction.nodes).
 
 Pure nodes (`split_document`, `resolve_candidates`, `process_clause` and both routing
-functions) are exercised with a `FakeLLM` and no database at all. The three nodes that
-touch Postgres (`stage_rules`, `human_review`, `apply_decisions`) run against the shared
-in-memory SQLite `database` fixture, each opening its own scoped session exactly as
-production code does; setup writes are committed explicitly before the node under test
-opens its own session, mirroring `tests/unit/workers/test_worker_penalty_mitigation.py`.
+functions) are exercised with a `FakeLLM` and no database at all. The one node that
+touches Postgres (`stage_rules`) runs against the shared in-memory SQLite `database`
+fixture, opening its own scoped session exactly as production code does; setup writes
+are committed explicitly before the node under test opens its own session, mirroring
+`tests/unit/workers/test_worker_penalty_mitigation.py`.
 """
 
 from __future__ import annotations
@@ -248,6 +248,7 @@ def _classification(**overrides) -> PenaltyRuleExtraction:
         "po_shortage_flag": False,
         "po_delay_flag": False,
         "confidence": 0.9,
+        "plain_explanation": "Vendor short-ships; retailer charges a flat fee per case.",
     }
     fields.update(overrides)
     return PenaltyRuleExtraction(**fields)
@@ -303,7 +304,7 @@ def test_process_clause_builds_a_ready_draft_and_floors_the_po_scope_flags(datab
     assert draft["attributes"][0]["group_no"] == 0
 
 
-def test_process_clause_skips_fact_extraction_when_not_a_penalty_rule(database):
+def test_process_clause_drops_a_non_penalty_clause_and_returns_no_drafts(database):
     classification = _classification(
         is_penalty_rule=False,
         penalty_category="UNMAPPED",
@@ -318,9 +319,8 @@ def test_process_clause_skips_fact_extraction_when_not_a_penalty_rule(database):
 
     result = nodes.process_clause({"clause": {"clause_text": "Definitions.", "section_title": None}})
 
-    [draft] = result["drafts"]
-    assert draft["attributes"] == []
-    assert draft["pricing_readiness"] == "UNSUPPORTED_SHAPE"
+    assert "drafts" not in result
+    assert "extraction_errors" not in result
 
 
 def test_process_clause_classification_failure_is_recorded_as_an_extraction_error(database):
@@ -486,6 +486,7 @@ def test_stage_rules_persists_a_draft_with_branch_no_zero_and_flushes_extraction
             "po_delay_flag": False,
             "review_notes": None,
             "economic_effect_type": "CHARGEBACK",
+            "plain_explanation": "Vendor short-ships; retailer charges a flat fee per case.",
         },
         "attributes": [
             {
@@ -502,6 +503,11 @@ def test_stage_rules_persists_a_draft_with_branch_no_zero_and_flushes_extraction
         "issues": [],
         "readiness_notes": [],
         "pricing_readiness": "READY",
+        "computed_summary": {
+            "when": "As stated in the clause (no measurable trigger extracted)",
+            "charge": "50",
+            "how": None,
+        },
     }
     error = {
         "error_code": "RULE_EXTRACTION_SCREENING_FAILED",
@@ -530,6 +536,15 @@ def test_stage_rules_persists_a_draft_with_branch_no_zero_and_flushes_extraction
         [attribute] = session.scalars(select(ExtractedPenaltyRuleAttribute)).all()
         assert attribute.branch_no == 0
 
+        assert staged[0].extra["plain_explanation"] == (
+            "Vendor short-ships; retailer charges a flat fee per case."
+        )
+        assert staged[0].extra["computed_summary"] == {
+            "when": "As stated in the clause (no measurable trigger extracted)",
+            "charge": "50",
+            "how": None,
+        }
+
         errors = session.scalars(select(ProcessingError)).all()
         assert len(errors) == 1
         assert errors[0].error_type == "RULE_EXTRACTION_SCREENING_FAILED"
@@ -537,7 +552,7 @@ def test_stage_rules_persists_a_draft_with_branch_no_zero_and_flushes_extraction
 
 def test_stage_rules_folds_unresolved_consistency_issues_into_review_notes(database, db_session):
     # A candidate that exhausted its retry budget still reaches stage_rules as a normal
-    # draft (see _classify_and_extract), carrying its unresolved issues; stage_rules must
+    # draft (see pipeline.classify_and_extract), carrying its unresolved issues; stage_rules must
     # persist it as PENDING_REVIEW with those issues visible in review_notes, not drop it.
     retailer_id = _make_retailer(db_session)
     retailer_agreement_id = _make_retailer_agreement(db_session, retailer_id, "2" * 64)
@@ -609,74 +624,3 @@ def test_stage_rules_sanitizes_nul_bytes_in_extraction_errors_before_logging(dat
         [logged] = session.scalars(select(ProcessingError)).all()
         assert "\x00" not in logged.error_message
         assert "\x00" not in logged.raw_error_detail["excerpt"]
-
-
-# ---------------------------------------------------------------------------
-# human_review
-# ---------------------------------------------------------------------------
-
-
-def test_human_review_falls_through_without_interrupting_when_queue_is_empty(database, db_session):
-    retailer_id = _make_retailer(db_session)
-    retailer_agreement_id = _make_retailer_agreement(db_session, retailer_id, "2" * 64)
-    run_id = _make_agent_run(db_session)
-    db_session.commit()
-
-    nodes = _nodes(FakeLLM(), database)
-
-    result = nodes.human_review({"retailer_agreement_id": retailer_agreement_id, "run_id": run_id})
-
-    assert result == {}
-
-
-# ---------------------------------------------------------------------------
-# apply_decisions
-# ---------------------------------------------------------------------------
-
-
-def test_apply_decisions_ignores_rows_still_pending_review(database, db_session):
-    retailer_id = _make_retailer(db_session)
-    retailer_agreement_id = _make_retailer_agreement(db_session, retailer_id, "3" * 64)
-    run_id = _make_agent_run(db_session)
-    ExtractedPenaltyRuleRepository(db_session).add_extracted_rule(
-        retailer_agreement_id=retailer_agreement_id,
-        agent_run_id=run_id,
-        clause_text=RETAILER_AGREEMENT_TEXT,
-        clause_fingerprint="a" * 32,
-        penalty_category="SHORT_SHIP",
-        calc_type="PER_UNIT",
-        pricing_readiness="READY",
-        confidence=0.9,
-        po_shortage_flag=True,
-    )
-    db_session.commit()
-
-    nodes = _nodes(FakeLLM(), database)
-    result = nodes.apply_decisions({"retailer_agreement_id": retailer_agreement_id, "run_id": run_id})
-
-    assert result["applied_rule_ids"] == []
-
-
-def test_apply_decisions_returns_ids_of_rows_with_a_real_verdict(database, db_session):
-    retailer_id = _make_retailer(db_session)
-    retailer_agreement_id = _make_retailer_agreement(db_session, retailer_id, "4" * 64)
-    run_id = _make_agent_run(db_session)
-    repo = ExtractedPenaltyRuleRepository(db_session)
-    rule = repo.add_extracted_rule(
-        retailer_agreement_id=retailer_agreement_id,
-        agent_run_id=run_id,
-        clause_text=RETAILER_AGREEMENT_TEXT,
-        clause_fingerprint="b" * 32,
-        penalty_category="SHORT_SHIP",
-        calc_type="PER_UNIT",
-        pricing_readiness="READY",
-        confidence=0.9,
-        po_shortage_flag=True,
-    )
-    repo.set_review_decision(rule.id, "APPROVED")
-    db_session.commit()
-
-    nodes = _nodes(FakeLLM(), database)
-    result = nodes.apply_decisions({"retailer_agreement_id": retailer_agreement_id, "run_id": run_id})
-
-    assert result["applied_rule_ids"] == [str(rule.id)]

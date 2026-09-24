@@ -6,14 +6,28 @@ Rule 1 (pure-cap misfiling), Rule 4 (tier_application required beside a THRESHOL
 Rule 5 (tier bands must not gap or overlap, TIERED only), Rule 9 (a combinator group
 must not mix a selection with a tally), Rule 13 (trigger_logic must agree across a
 branch's THRESHOLD rows), Rule 14 (a fractional-period RATE needs a ROUNDING_RULE
-sibling). Numbers match the schema and data dictionary the extraction prompts are built
-against: the issue strings this module produces are persisted into review notes.
+sibling), Rule 15 (a RATE must not carry a time unit). Numbers match the schema and
+data dictionary the extraction prompts are built against: the issue strings this module
+produces are persisted into review notes.
 """
 
 import itertools
 from typing import Any
 
 from app.services.penalties.rule_extraction.vocabulary import DURATION_APPLIES_PER, tier_bands_are_contiguous
+
+# Mirrors `PenaltyFact.value_unit`'s time-duration literals: a duration is a THRESHOLD,
+# TIME_WINDOW, GRACE_PERIOD or CURE_PERIOD row's business, never a RATE's.
+_TIME_UNITS = (
+    "CALENDAR_DAYS",
+    "BUSINESS_DAYS",
+    "HOURS",
+    "MINUTES",
+    "WEEKS",
+    "MONTHS",
+    "QUARTERS",
+    "YEARS",
+)
 
 
 def consistency_issues(facts: list[dict[str, Any]], calc_type: str) -> list[str]:
@@ -44,6 +58,7 @@ def consistency_issues(facts: list[dict[str, Any]], calc_type: str) -> list[str]
     issues.extend(_check_trigger_logic_homogeneity(by_group))
     issues.extend(_check_fractional_rate_rounding(facts, by_group))
     issues.extend(_check_combinator_shapes(facts))
+    issues.extend(_check_time_unit_rates(facts))
     return issues
 
 
@@ -169,5 +184,25 @@ def _check_combinator_shapes(facts: list[dict[str, Any]]) -> list[str]:
         if not (is_tally or is_selection):
             issues.append(
                 f"Rule 9 (mixed combinator shapes): group_no/role {key} mixes a selection with a tally: {combos}."
+            )
+    return issues
+
+
+def _check_time_unit_rates(facts: list[dict[str, Any]]) -> list[str]:
+    """Rule 15: a RATE row must never carry a time-duration value_unit.
+
+    A time limit is a deadline, not a monetary rate: it belongs on a THRESHOLD,
+    TIME_WINDOW, GRACE_PERIOD or CURE_PERIOD row instead.
+    """
+    issues = []
+    for fact in facts:
+        if fact.get("attribute_role") != "RATE":
+            continue
+        unit = fact.get("value_unit")
+        if unit in _TIME_UNITS:
+            group_no = fact.get("group_no", 1)
+            issues.append(
+                f"Rule 15 (time value as rate): group_no={group_no} has a RATE with value_unit={unit}; "
+                "a time limit is a THRESHOLD, TIME_WINDOW, GRACE_PERIOD or CURE_PERIOD row, never a RATE."
             )
     return issues

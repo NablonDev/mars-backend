@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
@@ -26,7 +27,7 @@ router = APIRouter(tags=["po-validation"])
 )
 def ingest_purchase_order_lines(
     body: IngestPurchaseOrderLinesRequest,
-    po_service: PoValidationService = Depends(get_po_service),
+    po_service: Annotated[PoValidationService, Depends(get_po_service)],
 ) -> Envelope[IngestPurchaseOrderLinesResponse]:
     """Create purchase order lines and run the validation pipeline over them.
 
@@ -40,12 +41,12 @@ def ingest_purchase_order_lines(
 
 @router.get("/purchase-order-lines", response_model=Envelope[PurchaseOrderLinesListResponse])
 def list_purchase_order_lines(
-    purchase_order_id: UUID | None = Query(default=None),
-    status: str | None = Query(default=None),
-    limit: int = Query(default=50, ge=1, le=200),
+    purchase_orders: Annotated[PurchaseOrderRepository, Depends(get_purchase_order_repository)],
+    po_service: Annotated[PoValidationService, Depends(get_po_service)],
+    purchase_order_id: Annotated[UUID | None, Query()] = None,
+    status: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
     cursor: str | None = None,
-    purchase_orders: PurchaseOrderRepository = Depends(get_purchase_order_repository),
-    po_service: PoValidationService = Depends(get_po_service),
 ) -> Envelope[PurchaseOrderLinesListResponse]:
     """List purchase order lines, optionally narrowed by purchase order or status."""
     if purchase_order_id is not None:

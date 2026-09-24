@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass
 from functools import partial
@@ -14,8 +15,10 @@ from langgraph.graph.state import CompiledStateGraph
 from app.agents.cmir.graph import build_graph
 from app.agents.cmir.nodes import WorkflowNodes
 from app.agents.penalties.rule_extraction import adapter as rule_extraction_adapter
+from app.agents.penalties.rule_extraction.context import ClauseClassificationContext, RuleFactContext
 from app.agents.penalties.rule_extraction.graph import build_graph as build_rule_extraction_graph
 from app.agents.penalties.rule_extraction.nodes import RuleExtractionNodes
+from app.agents.penalties.rule_extraction.schema import PenaltyFactList, PenaltyRuleExtraction
 from app.agents.po_validation.graph import build_po_validation_graph
 from app.agents.po_validation.nodes import PoValidationNodes
 from app.agents.providers.azure_openai import AzureOpenAIChatClient
@@ -65,6 +68,8 @@ class Container:
     service_bus_queue: ServiceBusMailQueue
     po_validation_graph: CompiledStateGraph
     rule_extraction_graph: CompiledStateGraph
+    rule_extraction_classify: Callable[[ClauseClassificationContext], PenaltyRuleExtraction]
+    rule_extraction_extract_facts: Callable[[RuleFactContext], PenaltyFactList]
     purchase_orders: PurchaseOrderRepository
     master_data: MasterDataRepository
     processing_errors: ProcessingErrorRepository
@@ -93,12 +98,10 @@ class Container:
             max_overflow=config.database.max_overflow,
             pool_timeout=config.database.pool_timeout,
         )
-        # One process-lifetime session for this composition root's repositories.
-        # Container.build() is itself a long-lived singleton (see _instance below),
-        # not a per-request scope, so it owns and closes exactly one session here
-        # rather than the project's usual per-request Session (see
-        # postgres-conventions: "one session per request/use-case, provided via
-        # Depends").
+        # The container is process-scoped rather than request-scoped, so its
+        # repositories share one session for the lifetime of the container.
+        # This is intentionally different from the usual per-request session
+        # lifecycle used by application endpoints.
         session = database.new_session()
         resources.callback(session.close)
 
@@ -148,31 +151,33 @@ class Container:
             cmir_repository=cmir_repository,
             processing_error_repository=processing_error_repository,
         )
-        # Shares the same PostgresSaver checkpointer/connection as the CMIR graph;
-        # checkpoint thread_ids are namespaced ("thread_po_...") so the two graphs
-        # never collide in checkpoint storage.
+        # All graphs share the same checkpointer. Each workflow uses a distinct
+        # thread-id namespace so checkpoints from different workflows cannot
+        # overlap in the shared checkpoint store.
         po_validation_graph = build_po_validation_graph(
             po_validation_nodes, checkpointer, agent_trace_repository
         )
         logger.info("PO Validation graph compiled with PostgreSQL Checkpointer.")
 
-        # Shares the same checkpointer as the other two graphs; its thread ids are
-        # freshly minted per run (see `PenaltyRuleExtractionService._new_checkpoint_thread_id`),
-        # namespaced "thread_rule_extraction_..." so they cannot collide with the
-        # "thread_..."/"thread_po_..." keys those graphs use. Stays in the Container
-        # (unlike `PenaltyRuleExtractionService`, built per-request from
-        # `app/api/dependencies.py` instead) because it is expensive to compile and
-        # shares this one checkpointer; its nodes open their own scoped sessions
-        # against `database` rather than holding one, so they need no repositories
-        # built here.
+        # Rule extraction is compiled once with the container because graph
+        # compilation and the shared checkpointer are intentionally process-scoped.
+        # The graph's nodes create their own scoped database sessions at execution
+        # time instead of retaining the container's long-lived repository session.
         rule_extraction_client = AzureOpenAIChatClient(LLMConfig.from_settings(config))
+
+        # Keep these bound callables on the container because rule-revision jobs
+        # invoke the same adapters directly, outside the graph. Keeping the
+        # callables here ensures those jobs use the same client/database bindings
+        # as the graph nodes.
+        rule_extraction_classify = partial(rule_extraction_adapter.classify, rule_extraction_client, database)
+        rule_extraction_extract_facts = partial(
+            rule_extraction_adapter.extract_facts, rule_extraction_client, database
+        )
         rule_extraction_graph = build_rule_extraction_graph(
             RuleExtractionNodes(
                 screen=partial(rule_extraction_adapter.screen, rule_extraction_client, database),
-                classify=partial(rule_extraction_adapter.classify, rule_extraction_client, database),
-                extract_facts=partial(
-                    rule_extraction_adapter.extract_facts, rule_extraction_client, database
-                ),
+                classify=rule_extraction_classify,
+                extract_facts=rule_extraction_extract_facts,
                 database=database,
             ),
             checkpointer,
@@ -196,6 +201,8 @@ class Container:
             service_bus_queue=service_bus_queue,
             po_validation_graph=po_validation_graph,
             rule_extraction_graph=rule_extraction_graph,
+            rule_extraction_classify=rule_extraction_classify,
+            rule_extraction_extract_facts=rule_extraction_extract_facts,
             purchase_orders=purchase_order_repository,
             master_data=master_data_repository,
             processing_errors=processing_error_repository,

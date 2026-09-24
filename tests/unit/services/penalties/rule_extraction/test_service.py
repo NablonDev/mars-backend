@@ -1,25 +1,28 @@
 """Tests for `PenaltyRuleExtractionService`
 (app.services.penalties.rule_extraction.service).
 
-The graph is a fake with an `.invoke()` (`_FakeGraph`/`_FakeInterruptGraph` below); every
-repository is real, running against the shared in-memory SQLite session. No LLM call is
-ever reached.
+Only `start_extraction` and `publish` remain on this service -- extraction status,
+extraction runs, extracted-rule reads, and review moved to mars-bff (see `docs/API.md`).
+
+The graph is a fake with an `.invoke()` (`_FakeGraph` below); every repository is real,
+running against the shared in-memory SQLite session. No LLM call is ever reached.
 """
 
 from __future__ import annotations
 
-from datetime import date
-from types import SimpleNamespace
+from datetime import UTC, date, datetime, timedelta
+from itertools import count
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import pytest
-from langgraph.types import Command
 
-from app.core.exceptions import ConflictError, NotFoundError, ValidationError
+from app.core.exceptions import ConflictError, ValidationError
+from app.models import AgentRun
 from app.repositories.common.retailer_agreement import RetailerAgreementRepository
 from app.repositories.penalties.rule_extraction import (
     ExtractedPenaltyRuleRepository,
+    ExtractedPenaltyRuleRevisionRepository,
     RulePublicationRepository,
 )
 from app.repositories.process.agent_registry import AgentRegistryRepository, AgentRunRepository
@@ -44,11 +47,17 @@ def publications(db_session) -> RulePublicationRepository:
     return RulePublicationRepository(db_session)
 
 
+@pytest.fixture
+def revisions(db_session) -> ExtractedPenaltyRuleRevisionRepository:
+    return ExtractedPenaltyRuleRevisionRepository(db_session)
+
+
 class _FakeGraph:
     """Double for the LangGraph extraction graph: records every call, optionally raises.
 
-    Never interrupts: `invoke` echoes the state it's handed straight back, taking the
-    touchless "nothing needed review" path through `_handle_graph_state`.
+    `invoke` echoes the state it's handed straight back: the graph ends at `stage_rules`
+    and never interrupts, so `start_extraction` only reads the run's own status and the
+    staged rules from the database, never anything out of this return value.
     """
 
     def __init__(self, exc: Exception | None = None) -> None:
@@ -62,37 +71,8 @@ class _FakeGraph:
         return state
 
 
-class _FakeInterruptGraph:
-    """Double for the extraction graph: interrupts at `human_review` on the first
-    invoke, then completes on any `Command(resume=...)` invoke, regardless of payload.
-    """
-
-    def __init__(self, *, pending_count: int = 1) -> None:
-        self.pending_count = pending_count
-        self.invocations: list[dict[str, Any]] = []
-
-    def invoke(self, arg: Any, config: dict[str, Any]) -> dict[str, Any]:
-        self.invocations.append({"arg": arg, "config": config})
-        if isinstance(arg, Command):
-            return {"applied_rule_ids": []}
-        return {
-            "__interrupt__": [
-                SimpleNamespace(
-                    value={
-                        "reason": "rule_review_required",
-                        "run_id": str(arg["run_id"]),
-                        "retailer_agreement_id": str(arg["retailer_agreement_id"]),
-                        "pending_count": self.pending_count,
-                        "extracted_rule_ids": [],
-                        "instructions": "Review then resume.",
-                    }
-                )
-            ]
-        }
-
-
 @pytest.fixture
-def service_factory(repos, retailer_agreements, extracted_rules, publications, db_session):
+def service_factory(repos, retailer_agreements, extracted_rules, publications, revisions, db_session):
     """Build a `PenaltyRuleExtractionService` sharing the test session's repositories."""
 
     def _build(graph: Any = None) -> PenaltyRuleExtractionService:
@@ -104,8 +84,7 @@ def service_factory(repos, retailer_agreements, extracted_rules, publications, d
             agent_registry=repos.agent_registry,
             agent_runs=repos.agent_runs,
             master_data=repos.master_data,
-            workflow_threads=repos.workflow_threads,
-            human_actions=repos.human_actions,
+            revisions=revisions,
             session=db_session,
             graph=graph,
         )
@@ -132,48 +111,42 @@ def _make_retailer_agreement(
     return retailer_agreements.add_retailer_agreement(**fields)
 
 
-def _make_agent_run(db_session) -> UUID:
-    """Register the extractor agent and open one run against it, bypassing the service."""
+# Monotonically increasing `created_at` stamps for `_make_agent_run` below. SQLite's
+# `CURRENT_TIMESTAMP` server default has only second resolution, so runs created
+# back-to-back within one test otherwise tie on `created_at` and make "newest run"
+# ordering (`list_by_metadata`, `_latest_completed_run_id`) non-deterministic.
+_run_created_at_seq = count()
+
+
+def _make_agent_run(
+    db_session, retailer_agreement_id: UUID, *, status: str = "completed", prompt_version: str = "v1"
+) -> UUID:
+    """Register the extractor agent and open one completed, metadata-tagged run, bypassing the service.
+
+    `_latest_completed_run_id` keys off the run's `metadata_json["retailer_agreement_id"]`
+    and `status`, so a run built without them is invisible to the "latest run" lookup
+    `publish` uses.
+    """
     agent_id = AgentRegistryRepository(db_session).ensure_registered(
         agent_code="penalty_rule_extractor",
-        prompt_version="v1",
+        prompt_version=prompt_version,
         system_prompt="Extract penalty clauses from retailer agreement markdown.",
         agent_name="Penalty Rule Extractor",
         domain="penalties",
     )
-    return AgentRunRepository(db_session).start(agent_id=agent_id, run_type="PENALTY_RULE_EXTRACTION")
-
-
-# ---------------------------------------------------------------------------
-# create_retailer_agreement
-# ---------------------------------------------------------------------------
-
-
-def test_create_retailer_agreement_idempotent_returns_existing_row_for_same_markdown_text(
-    repos, service_factory
-):
-    service = service_factory()
-    retailer_id = _make_retailer(repos)
-
-    first = service.create_retailer_agreement(retailer_id, "CONTRACT-1", "Title", RETAILER_AGREEMENT_TEXT)
-    second = service.create_retailer_agreement(
-        retailer_id, "CONTRACT-1-DUPLICATE", "Title", RETAILER_AGREEMENT_TEXT
+    agent_runs = AgentRunRepository(db_session)
+    run_id = agent_runs.start(
+        agent_id=agent_id,
+        run_type="PENALTY_RULE_EXTRACTION",
+        metadata={"retailer_agreement_id": str(retailer_agreement_id), "prompt_version": prompt_version},
     )
-
-    assert second["id"] == first["id"]
-    assert second["contract_code"] == "CONTRACT-1"
-
-
-def test_create_retailer_agreement_creates_a_new_row_for_different_markdown_text(repos, service_factory):
-    service = service_factory()
-    retailer_id = _make_retailer(repos)
-
-    first = service.create_retailer_agreement(retailer_id, "CONTRACT-1", "Title", RETAILER_AGREEMENT_TEXT)
-    second = service.create_retailer_agreement(
-        retailer_id, "CONTRACT-2", "Title", RETAILER_AGREEMENT_TEXT + " Amended."
+    if status != "running":
+        agent_runs.update_status(run_id, status, completed=status in ("completed", "failed"))
+    db_session.get(AgentRun, run_id).created_at = datetime(2020, 1, 1, tzinfo=UTC) + timedelta(
+        seconds=next(_run_created_at_seq)
     )
-
-    assert second["id"] != first["id"]
+    db_session.flush()
+    return run_id
 
 
 # ---------------------------------------------------------------------------
@@ -243,321 +216,67 @@ def test_start_extraction_mints_a_fresh_checkpoint_thread_id_per_run(
     assert first_thread_id != second_thread_id
 
 
-def test_start_extraction_creates_a_review_thread_when_the_graph_interrupts(
+def test_start_extraction_marks_the_agent_run_completed_and_returns_the_staged_count(
     repos, retailer_agreements, service_factory
 ):
-    service = service_factory(graph=_FakeInterruptGraph())
+    service = service_factory(graph=_FakeGraph())
     retailer_id = _make_retailer(repos)
     retailer_agreement = _make_retailer_agreement(retailer_agreements, retailer_id, "a" * 64)
 
     result = service.start_extraction(retailer_agreement["id"])
 
-    assert result.thread_id is not None
-    stage = repos.workflow_threads.get_stage(result.thread_id)
-    assert stage["status"] == "waiting_rule_review"
-    assert stage["stage"] == "AWAITING_RULE_REVIEW"
-    assert stage["metadata_json"]["retailer_agreement_id"] == str(retailer_agreement["id"])
-    assert stage["metadata_json"]["agent_run_id"] == str(result.agent_run_id)
-
-    pending = repos.human_actions.get_open_for_thread(result.thread_id)
-    assert pending is not None
-    assert pending["interrupt_type"] == "rule_review_required"
+    run = repos.agent_runs.get(result.agent_run_id)
+    assert run["status"] == "completed"
+    assert run["completed_at"] is not None
+    assert result.staged_count == 0
 
 
-# ---------------------------------------------------------------------------
-# resume_review
-# ---------------------------------------------------------------------------
-
-
-def _start_awaiting_review(repos, retailer_agreements, service_factory, sha256: str):
-    """Start extraction against a fresh retailer_agreement on a graph that always interrupts once."""
-    graph = _FakeInterruptGraph()
-    service = service_factory(graph=graph)
-    retailer_id = _make_retailer(repos)
-    retailer_agreement = _make_retailer_agreement(retailer_agreements, retailer_id, sha256)
-
-    result = service.start_extraction(retailer_agreement["id"])
-    stage = repos.workflow_threads.get_stage(result.thread_id)
-    return service, graph, retailer_agreement, result, stage
-
-
-def test_resume_review_with_verdicts_completes_and_reaches_end(
+def test_start_extraction_staged_count_reflects_rows_the_graph_staged(
     repos, retailer_agreements, extracted_rules, service_factory
 ):
-    service, graph, retailer_agreement, result, stage = _start_awaiting_review(
-        repos, retailer_agreements, service_factory, "b" * 64
-    )
-    staged = extracted_rules.add_extracted_rule(
-        retailer_agreement_id=retailer_agreement["id"],
-        agent_run_id=result.agent_run_id,
-        clause_text="Retailer may assess a $50 fee per short-shipped case.",
-        clause_fingerprint="d" * 32,
-        penalty_category="SHORT_SHIP",
-        calc_type="PER_UNIT",
-        pricing_readiness="READY",
-        confidence=0.9,
-    )
-    extracted_rules.set_review_decision(staged.id, "APPROVED")
+    """`_FakeGraph.invoke` never touches the database itself, so this stages a row directly
+    (mirroring what `stage_rules` would have done) before invoking, to prove
+    `start_extraction` counts it rather than trusting anything from the graph's return
+    value."""
+    graph = _FakeGraph()
+    service = service_factory(graph=graph)
+    retailer_id = _make_retailer(repos)
+    retailer_agreement = _make_retailer_agreement(retailer_agreements, retailer_id, "a1" * 32)
 
-    resumed = service.resume_review(
-        result.thread_id, actor="reviewer@example.com", expected_updated_at=stage["updated_at"].isoformat()
-    )
+    original_invoke = graph.invoke
 
-    assert resumed["status"] == "completed"
-    assert resumed["stage"] == "RULE_REVIEW_COMPLETE"
-    resume_call = graph.invocations[-1]["arg"]
-    assert isinstance(resume_call, Command)
-    assert resume_call.resume == {"decided_count": 1}
-
-
-def test_resume_review_with_zero_decidable_rows_still_completes_without_reraising(
-    repos, retailer_agreements, service_factory
-):
-    service, graph, _retailer_agreement, result, stage = _start_awaiting_review(
-        repos, retailer_agreements, service_factory, "c" * 64
-    )
-
-    resumed = service.resume_review(
-        result.thread_id, actor="reviewer@example.com", expected_updated_at=stage["updated_at"].isoformat()
-    )
-
-    assert resumed["status"] == "completed"
-    resume_call = graph.invocations[-1]["arg"]
-    assert isinstance(resume_call, Command)
-    # A falsy resume value makes LangGraph re-raise the interrupt forever; the resume
-    # payload must always be truthy, even with nothing decided.
-    assert resume_call.resume
-    assert resume_call.resume == {"__ack__": "NO_DECISIONS"}
-
-
-def test_resume_review_raises_conflict_when_expected_updated_at_is_stale(
-    repos, retailer_agreements, service_factory
-):
-    service, _graph, _retailer_agreement, result, _stage = _start_awaiting_review(
-        repos, retailer_agreements, service_factory, "e" * 64
-    )
-
-    with pytest.raises(ConflictError) as exc_info:
-        service.resume_review(result.thread_id, actor="reviewer@example.com", expected_updated_at="stale")
-    assert exc_info.value.code == "THREAD_STALE"
-
-
-def test_resume_review_raises_when_thread_has_no_open_pending_action(
-    repos, retailer_agreements, service_factory
-):
-    service, _graph, _retailer_agreement, result, stage = _start_awaiting_review(
-        repos, retailer_agreements, service_factory, "f" * 64
-    )
-    pending = repos.human_actions.get_open_for_thread(result.thread_id)
-    repos.human_actions.complete(pending["id"], response_payload={}, actor="someone-else")
-
-    with pytest.raises(ConflictError) as exc_info:
-        service.resume_review(
-            result.thread_id,
-            actor="reviewer@example.com",
-            expected_updated_at=stage["updated_at"].isoformat(),
+    def _invoke_and_stage(state, config):
+        extracted_rules.add_extracted_rule(
+            retailer_agreement_id=state["retailer_agreement_id"],
+            agent_run_id=state["run_id"],
+            clause_text="Retailer may assess a $50 fee per short-shipped case.",
+            clause_fingerprint="a1" * 16,
+            penalty_category="SHORT_SHIP",
+            calc_type="PER_UNIT",
+            pricing_readiness="READY",
+            confidence=0.9,
         )
-    assert exc_info.value.code == "THREAD_NOT_WAITING"
+        return original_invoke(state, config)
 
+    graph.invoke = _invoke_and_stage
 
-# ---------------------------------------------------------------------------
-# get_extraction_status
-# ---------------------------------------------------------------------------
-
-
-def test_get_extraction_status_returns_not_started_when_extraction_never_ran(
-    repos, retailer_agreements, service_factory
-):
-    service = service_factory()
-    retailer_id = _make_retailer(repos)
-    retailer_agreement = _make_retailer_agreement(retailer_agreements, retailer_id, "10" * 32)
-
-    status = service.get_extraction_status(retailer_agreement["id"])
-
-    assert status["status"] == "NOT_STARTED"
-    assert status["agent_run_id"] is None
-    assert status["workflow_thread_id"] is None
-
-
-def test_get_extraction_status_reflects_the_open_review_thread(repos, retailer_agreements, service_factory):
-    service = service_factory(graph=_FakeInterruptGraph())
-    retailer_id = _make_retailer(repos)
-    retailer_agreement = _make_retailer_agreement(retailer_agreements, retailer_id, "11" * 32)
     result = service.start_extraction(retailer_agreement["id"])
 
-    status = service.get_extraction_status(retailer_agreement["id"])
-
-    assert status["workflow_thread_id"] == result.thread_id
-    assert status["agent_run_id"] == result.agent_run_id
-    assert status["status"] == "waiting_rule_review"
-    assert status["stage"] == "AWAITING_RULE_REVIEW"
+    assert result.staged_count == 1
 
 
-def test_get_extraction_status_reports_completed_when_rules_are_staged_without_a_review_thread(
-    repos, retailer_agreements, extracted_rules, db_session, service_factory
-):
-    # `human_review` always interrupts once any rule is staged (nodes.py), so this state
-    # (staged rules, no thread ever created) isn't reachable through the real graph today.
-    # Exercises `get_extraction_status`'s defensive fallback directly, without going
-    # through `start_extraction`.
-    service = service_factory()
-    retailer_id = _make_retailer(repos)
-    retailer_agreement = _make_retailer_agreement(retailer_agreements, retailer_id, "12" * 32)
-    run_id = _make_agent_run(db_session)
-    extracted_rules.add_extracted_rule(
-        retailer_agreement_id=retailer_agreement["id"],
-        agent_run_id=run_id,
-        clause_text="Retailer may assess a $50 fee per short-shipped case.",
-        clause_fingerprint="12" * 16,
-        penalty_category="SHORT_SHIP",
-        calc_type="PER_UNIT",
-        pricing_readiness="READY",
-        confidence=0.9,
-    )
-
-    status = service.get_extraction_status(retailer_agreement["id"])
-
-    assert status["workflow_thread_id"] is None
-    assert status["agent_run_id"] == run_id
-    assert status["status"] == "completed"
-    assert status["stage"] == "RULE_REVIEW_COMPLETE"
-
-
-def test_get_extraction_status_raises_for_an_unknown_retailer_agreement(service_factory):
-    service = service_factory()
-
-    with pytest.raises(NotFoundError) as exc_info:
-        service.get_extraction_status(uuid4())
-    assert exc_info.value.code == "RETAILER_AGREEMENT_NOT_FOUND"
-
-
-# ---------------------------------------------------------------------------
-# get_extracted_rule
-# ---------------------------------------------------------------------------
-
-
-def test_get_extracted_rule_returns_the_rule_with_its_attributes(
-    repos, retailer_agreements, extracted_rules, db_session, service_factory
-):
-    service = service_factory()
-    retailer_id = _make_retailer(repos)
-    retailer_agreement = _make_retailer_agreement(retailer_agreements, retailer_id, "13" * 32)
-    run_id = _make_agent_run(db_session)
-    staged = extracted_rules.add_extracted_rule(
-        retailer_agreement_id=retailer_agreement["id"],
-        agent_run_id=run_id,
-        clause_text="Retailer may assess a $50 fee per short-shipped case.",
-        clause_fingerprint="e" * 32,
-        penalty_category="SHORT_SHIP",
-        calc_type="PER_UNIT",
-        pricing_readiness="READY",
-        confidence=0.9,
-        attributes=[
-            {
-                "branch_no": 0,
-                "attribute_role": "RATE",
-                "value": 50.0,
-                "value_unit": "USD",
-                "value_status": "PRESENT",
-                "basis_type": "UNIT_COST",
-                "currency_code": "USD",
-                "source_text": "$50 fee per short-shipped case.",
-                "confidence": 0.9,
-            }
-        ],
-    )
-
-    result = service.get_extracted_rule(retailer_agreement["id"], staged.id)
-
-    assert result["id"] == staged.id
-    assert len(result["attributes"]) == 1
-    assert result["attributes"][0].attribute_role == "RATE"
-
-
-def test_get_extracted_rule_raises_for_an_unknown_rule_id(repos, retailer_agreements, service_factory):
-    service = service_factory()
-    retailer_id = _make_retailer(repos)
-    retailer_agreement = _make_retailer_agreement(retailer_agreements, retailer_id, "14" * 32)
-
-    with pytest.raises(NotFoundError) as exc_info:
-        service.get_extracted_rule(retailer_agreement["id"], uuid4())
-    assert exc_info.value.code == "EXTRACTED_RULE_NOT_FOUND"
-
-
-def test_get_extracted_rule_raises_when_the_rule_belongs_to_a_different_retailer_agreement(
-    repos, retailer_agreements, extracted_rules, db_session, service_factory
-):
-    service = service_factory()
-    retailer_id = _make_retailer(repos)
-    retailer_agreement = _make_retailer_agreement(retailer_agreements, retailer_id, "15" * 32)
-    other_retailer_agreement = _make_retailer_agreement(retailer_agreements, retailer_id, "16" * 32)
-    run_id = _make_agent_run(db_session)
-    staged = extracted_rules.add_extracted_rule(
-        retailer_agreement_id=other_retailer_agreement["id"],
-        agent_run_id=run_id,
-        clause_text="Retailer may assess a $50 fee per short-shipped case.",
-        clause_fingerprint="f" * 32,
-        penalty_category="SHORT_SHIP",
-        calc_type="PER_UNIT",
-        pricing_readiness="READY",
-        confidence=0.9,
-    )
-
-    with pytest.raises(NotFoundError) as exc_info:
-        service.get_extracted_rule(retailer_agreement["id"], staged.id)
-    assert exc_info.value.code == "EXTRACTED_RULE_NOT_FOUND"
-
-
-# ---------------------------------------------------------------------------
-# submit_review
-# ---------------------------------------------------------------------------
-
-
-def test_submit_review_rejects_a_status_outside_approved_or_rejected(
+def test_start_extraction_stores_the_retailer_agreement_id_and_prompt_version_on_the_run(
     repos, retailer_agreements, service_factory
 ):
-    service = service_factory()
+    service = service_factory(graph=_FakeGraph())
     retailer_id = _make_retailer(repos)
-    retailer_agreement = _make_retailer_agreement(retailer_agreements, retailer_id, "5" * 64)
+    retailer_agreement = _make_retailer_agreement(retailer_agreements, retailer_id, "a1" * 32)
 
-    with pytest.raises(ValidationError):
-        service.submit_review(retailer_agreement["id"], uuid4(), "PENDING_REVIEW")
+    result = service.start_extraction(retailer_agreement["id"])
 
-
-def test_submit_review_returns_the_rule_with_its_attributes(
-    repos, retailer_agreements, extracted_rules, db_session, service_factory
-):
-    service = service_factory()
-    retailer_id = _make_retailer(repos)
-    retailer_agreement = _make_retailer_agreement(retailer_agreements, retailer_id, "6" * 64)
-    run_id = _make_agent_run(db_session)
-    staged = extracted_rules.add_extracted_rule(
-        retailer_agreement_id=retailer_agreement["id"],
-        agent_run_id=run_id,
-        clause_text="Retailer may assess a $50 fee per short-shipped case.",
-        clause_fingerprint="7" * 32,
-        penalty_category="SHORT_SHIP",
-        calc_type="PER_UNIT",
-        pricing_readiness="READY",
-        confidence=0.9,
-        attributes=[
-            {
-                "branch_no": 0,
-                "attribute_role": "RATE",
-                "value": 50.0,
-                "value_unit": "USD",
-                "value_status": "PRESENT",
-                "source_text": "$50 fee per short-shipped case.",
-                "confidence": 0.9,
-            }
-        ],
-    )
-
-    reviewed = service.submit_review(retailer_agreement["id"], staged.id, "APPROVED")
-
-    assert reviewed["status"] == "APPROVED"
-    assert len(reviewed["attributes"]) == 1
-    assert reviewed["attributes"][0].attribute_role == "RATE"
+    run = repos.agent_runs.get(result.agent_run_id)
+    assert run["metadata_json"]["retailer_agreement_id"] == str(retailer_agreement["id"])
+    assert run["metadata_json"]["prompt_version"]
 
 
 # ---------------------------------------------------------------------------
@@ -571,7 +290,7 @@ def test_publish_writes_a_penalty_rule_and_a_published_publication_for_an_accept
     service = service_factory()
     retailer_id = _make_retailer(repos)
     retailer_agreement = _make_retailer_agreement(retailer_agreements, retailer_id, "6" * 64)
-    run_id = _make_agent_run(db_session)
+    run_id = _make_agent_run(db_session, retailer_agreement["id"])
 
     staged = extracted_rules.add_extracted_rule(
         retailer_agreement_id=retailer_agreement["id"],
@@ -619,7 +338,7 @@ def test_publish_writes_only_a_rejected_publication_for_a_rule_the_publisher_rej
     service = service_factory()
     retailer_id = _make_retailer(repos)
     retailer_agreement = _make_retailer_agreement(retailer_agreements, retailer_id, "7" * 64)
-    run_id = _make_agent_run(db_session)
+    run_id = _make_agent_run(db_session, retailer_agreement["id"])
 
     # pricing_readiness=AWAITING_DATA fails the publisher's admission gate (NOT_READY),
     # so nothing should ever reach penalty_rule.
@@ -652,7 +371,7 @@ def test_publish_result_carries_the_run_id_it_published_from(
     service = service_factory()
     retailer_id = _make_retailer(repos)
     retailer_agreement = _make_retailer_agreement(retailer_agreements, retailer_id, "8" * 64)
-    run_id = _make_agent_run(db_session)
+    run_id = _make_agent_run(db_session, retailer_agreement["id"])
 
     staged = extracted_rules.add_extracted_rule(
         retailer_agreement_id=retailer_agreement["id"],
@@ -694,7 +413,7 @@ def test_publish_carries_basis_type_applies_per_and_currency_into_penalty_rule(
     service = service_factory()
     retailer_id = _make_retailer(repos)
     retailer_agreement = _make_retailer_agreement(retailer_agreements, retailer_id, "d1" * 32)
-    run_id = _make_agent_run(db_session)
+    run_id = _make_agent_run(db_session, retailer_agreement["id"])
 
     staged = extracted_rules.add_extracted_rule(
         retailer_agreement_id=retailer_agreement["id"],
@@ -742,7 +461,7 @@ def test_publish_rejects_a_republish_of_an_already_published_rule_instead_of_rai
     service = service_factory()
     retailer_id = _make_retailer(repos)
     retailer_agreement = _make_retailer_agreement(retailer_agreements, retailer_id, "d2" * 32)
-    run_id = _make_agent_run(db_session)
+    run_id = _make_agent_run(db_session, retailer_agreement["id"])
 
     staged = extracted_rules.add_extracted_rule(
         retailer_agreement_id=retailer_agreement["id"],

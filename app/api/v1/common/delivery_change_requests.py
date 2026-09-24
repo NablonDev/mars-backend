@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
@@ -26,7 +27,7 @@ router = APIRouter(tags=["po-delivery-change-requests"])
 )
 def create_delivery_change_request(
     body: DeliveryChangeRequestCreate,
-    service: PoDeliveryChangeRequestService = Depends(get_delivery_change_request_service),
+    service: Annotated[PoDeliveryChangeRequestService, Depends(get_delivery_change_request_service)],
 ) -> Envelope[DeliveryChangeRequestResponse]:
     """Submit a request to change a purchase order's delivery date."""
     created = service.create_request(
@@ -45,9 +46,9 @@ def create_delivery_change_request(
     response_model=Envelope[list[DeliveryChangeRequestResponse]],
 )
 def list_delivery_change_requests(
-    purchase_order_id: UUID | None = Query(default=None),
-    purchase_orders: PurchaseOrderRepository = Depends(get_purchase_order_repository),
-    service: PoDeliveryChangeRequestService = Depends(get_delivery_change_request_service),
+    purchase_orders: Annotated[PurchaseOrderRepository, Depends(get_purchase_order_repository)],
+    service: Annotated[PoDeliveryChangeRequestService, Depends(get_delivery_change_request_service)],
+    purchase_order_id: Annotated[UUID | None, Query()] = None,
 ) -> Envelope[list[DeliveryChangeRequestResponse]]:
     """List delivery-change requests, optionally narrowed to one purchase order.
 
@@ -71,7 +72,7 @@ def list_delivery_change_requests(
 )
 def get_delivery_change_request(
     delivery_change_request_id: UUID,
-    service: PoDeliveryChangeRequestService = Depends(get_delivery_change_request_service),
+    service: Annotated[PoDeliveryChangeRequestService, Depends(get_delivery_change_request_service)],
 ) -> Envelope[DeliveryChangeRequestResponse]:
     """Standalone fetch by the surrogate `id`."""
     row = service.get_by_id(delivery_change_request_id)
@@ -85,7 +86,7 @@ def get_delivery_change_request(
 def record_delivery_change_response(
     delivery_change_request_id: UUID,
     body: DeliveryChangeResponseRequest,
-    service: PoDeliveryChangeRequestService = Depends(get_delivery_change_request_service),
+    service: Annotated[PoDeliveryChangeRequestService, Depends(get_delivery_change_request_service)],
 ) -> Envelope[DeliveryChangeRequestResponse]:
     """Record a response (approval or counter-offer) to a delivery change request."""
     updated = service.record_response(

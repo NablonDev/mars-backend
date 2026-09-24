@@ -8,7 +8,7 @@ checkpoint recovery.
 from __future__ import annotations
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from langgraph.graph import END, StateGraph
+from langgraph.graph import END, START, StateGraph
 
 from app.agents.cmir.nodes import WorkflowNodes
 from app.agents.cmir.state import GraphState
@@ -48,7 +48,7 @@ def build_graph(
     )
     builder.add_node("mark_email_read", node("mark_email_read", nodes.mark_email_read))
 
-    builder.set_entry_point("persist_email")
+    builder.add_edge(START, "persist_email")
     builder.add_edge("persist_email", "extract_cmir")
     builder.add_edge("extract_cmir", "identify_existing_cmir")
     builder.add_edge("identify_existing_cmir", "prepare_diff")
