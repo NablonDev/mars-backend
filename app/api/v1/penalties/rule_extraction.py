@@ -9,7 +9,7 @@ rule compiler, an engine-work exception to that split).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, status
@@ -25,11 +25,8 @@ from app.schemas.penalties.rule_extraction import (
     RuleRevisionRequest,
     RuleRevisionResponse,
 )
-from app.services.penalties.rule_extraction.revision import run_rule_revision
-
-if TYPE_CHECKING:
-    from app.services.penalties.rule_extraction.revision import RuleRevisionService
-    from app.services.penalties.rule_extraction.service import PenaltyRuleExtractionService
+from app.services.penalties.rule_extraction.revision import RuleRevisionService, run_rule_revision
+from app.services.penalties.rule_extraction.service import PenaltyRuleExtractionService
 
 router = APIRouter(prefix="/penalties", tags=["penalty-rule-extraction"])
 
