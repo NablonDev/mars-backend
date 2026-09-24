@@ -1,13 +1,13 @@
-"""Assembles the message list for each of the three penalty rule extraction LLM calls.
+"""Build message lists for the penalty rule extraction LLM stages.
 
-Contract text is retrieved, untrusted content, never a system-level instruction. Every
-context payload here is serialized and wrapped in `<DATA>` tags before being handed to
-the model, matching the pattern in `app/services/cmir/extractor.py`. The system prompt
-itself is a caller-supplied string, read fresh from the agent registry at inference
-time by `app.agents.penalties.rule_extraction.adapter`, not a module constant.
+Retrieved contract content and reviewer feedback are serialized as data and
+wrapped in `<DATA>` tags rather than treated as instructions. System prompts
+are supplied by the caller.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel
@@ -23,23 +23,32 @@ class ScreeningUnitContext(BaseModel):
 
 
 class ClauseClassificationContext(BaseModel):
-    """One verified clause, ready to be classified into a penalty rule."""
+    """Verified clause and optional reviewer context for classification.
+
+    Reviewer fields are present only during a revision and are passed as data,
+    not as system-level instructions.
+    """
 
     section_title: str | None
     clause_text: str
+    reviewer_instruction: str | None = None
+    current_rule: dict[str, Any] | None = None
+    revision_history: list[dict[str, str]] | None = None
 
 
 class RuleFactContext(BaseModel):
-    """One classified rule handed to the fact stage; category/calc_type are pipeline decisions, not retrieved text.
+    """Classified rule and optional context for fact extraction.
 
-    `previous_issues` is set on a repair retry: the prior attempt's `consistency_issues`
-    findings, fed back in as corrective context, never as a system-level instruction.
+    `previous_issues` is populated during consistency retries. Reviewer fields
+    are populated during revisions. All are passed as data, not instructions.
     """
 
     clause_text: str
     penalty_category: str
     calc_type: str
     previous_issues: list[str] | None = None
+    reviewer_instruction: str | None = None
+    current_facts: list[dict[str, Any]] | None = None
 
 
 def build_screening_messages(system_prompt: str, context: ScreeningUnitContext) -> list[BaseMessage]:

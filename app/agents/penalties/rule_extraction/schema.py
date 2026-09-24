@@ -1,10 +1,8 @@
-"""Pydantic v2 response models for the three penalty rule extraction LLM stages.
+"""Pydantic response models for the penalty rule extraction LLM stages.
 
-Every constrained field is a `Literal` built from a `vocabulary` tuple, never a
-hand-copied list, so a vocabulary change cannot silently desync the schema from what the
-prompts promise and the database enforces. Validators fail closed: bad output either
-satisfies the model or raises, it is never silently repaired into something that only
-looks valid.
+Constrained fields derive from the shared vocabulary tuples so the schema stays
+aligned with the governed vocabulary. Validators reject invalid combinations
+instead of silently repairing model output.
 """
 
 from __future__ import annotations
@@ -43,9 +41,8 @@ from app.services.penalties.rule_extraction.vocabulary import (
     WINDOW_TYPES,
 )
 
-# Mirrors the `ck_attribute_currency_required` check on
-# `penalties.extracted_penalty_rule_attribute`: these are the VALUE_UNITS entries that
-# name a currency rather than a percentage, a time unit, or a count.
+# Mirrors the `ck_attribute_currency_required` constraint. These units represent
+# currencies rather than percentages, time units, or counts.
 _CURRENCY_VALUE_UNITS = ("USD", "EUR", "GBP", "OTHER_CURRENCY")
 
 
@@ -58,7 +55,7 @@ class CandidateClause(BaseModel):
 
 
 class CandidateClauseList(BaseModel):
-    """Every candidate clause found in one screening unit, in document order."""
+    """Candidate clauses identified in one screening unit, in document order."""
 
     clauses: list[CandidateClause] = Field(default_factory=list)
 
@@ -106,6 +103,23 @@ class PenaltyRuleExtraction(BaseModel):
     beneficiary_role: Literal[*PARTY_SIDE_ROLES] | None = None  # type: ignore[valid-type]
     confidence: float = Field(..., ge=0, le=1)
     review_notes: str | None = Field(None, description="Required whenever a governed escape value is used.")
+    plain_explanation: str = Field(
+        ...,
+        min_length=1,
+        max_length=600,
+        description=(
+            "Two or three plain-English sentences for a non-lawyer reviewer: trigger, "
+            "consequence, how the amount is worked out."
+        ),
+    )
+    reviewer_reply: str | None = Field(
+        None,
+        max_length=800,
+        description=(
+            "Only when the input carries a reviewer_instruction: what changed and why, "
+            "or why nothing changed."
+        ),
+    )
 
     @model_validator(mode="after")
     def _check_required_review_notes(self) -> PenaltyRuleExtraction:

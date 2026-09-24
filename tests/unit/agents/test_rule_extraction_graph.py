@@ -3,15 +3,14 @@
 
 Runs the full `Send` fan-out/fan-in topology end to end against the shared in-memory
 SQLite `database` fixture, with a `FakeLLM` standing in for the three provider calls.
-No live LLM call is ever reached.
+No live LLM call is ever reached. The graph ends after `stage_rules`: it never
+interrupts, so every test here asserts on the final state and the staged rows, not on
+a paused run.
 """
 
 from __future__ import annotations
 
-from uuid import UUID
-
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import Command
 
 from app.agents.penalties.rule_extraction.graph import build_graph
 from app.agents.penalties.rule_extraction.nodes import RuleExtractionNodes
@@ -26,8 +25,6 @@ from app.repositories.common.master_data import MasterDataRepository
 from app.repositories.common.retailer_agreement import RetailerAgreementRepository
 from app.repositories.penalties.rule_extraction import ExtractedPenaltyRuleRepository
 from app.repositories.process.agent_registry import AgentRegistryRepository, AgentRunRepository
-
-INTERRUPT_KEY = "__interrupt__"
 
 CLAUSE_TEXT = "Retailer may assess a $50 fee per short-shipped case."
 RETAILER_AGREEMENT_WITH_CLAUSE = f"## Shortages\n{CLAUSE_TEXT}\n"
@@ -67,6 +64,7 @@ class FakeLLM:
             calc_type="PER_UNIT",
             economic_effect_type="CHARGEBACK",
             confidence=0.9,
+            plain_explanation="Vendor short-ships; retailer charges a flat fee per case.",
         )
 
     def extract_facts(self, context):
@@ -123,7 +121,16 @@ def _config(thread_id: str) -> dict:
     return {"configurable": {"thread_id": thread_id}}
 
 
-def test_a_run_with_no_candidate_clauses_never_interrupts(database, db_session):
+def test_graph_ends_at_stage_rules_with_no_review_nodes(database):
+    graph = _build_graph(database, has_clause=True)
+    node_names = set(graph.get_graph().nodes)
+
+    assert "human_review" not in node_names
+    assert "apply_decisions" not in node_names
+    assert "stage_rules" in node_names
+
+
+def test_a_run_with_no_candidate_clauses_stages_nothing_and_completes(database, db_session):
     retailer_agreement = _make_retailer_agreement(db_session, "1" * 64, RETAILER_AGREEMENT_WITHOUT_CLAUSE)
     run_id = _make_agent_run(db_session, "penalty_rule_extractor_1")
     db_session.commit()
@@ -138,8 +145,7 @@ def test_a_run_with_no_candidate_clauses_never_interrupts(database, db_session):
         config=_config("empty-run"),
     )
 
-    assert INTERRUPT_KEY not in state
-    assert state["applied_rule_ids"] == []
+    assert state["staged_rule_ids"] == []
     with database.session() as session:
         assert (
             ExtractedPenaltyRuleRepository(session).list_for_retailer_agreement(retailer_agreement["id"])
@@ -147,62 +153,25 @@ def test_a_run_with_no_candidate_clauses_never_interrupts(database, db_session):
         )
 
 
-def test_a_staged_rule_pauses_for_review_and_approval_is_applied_after_resume(database, db_session):
+def test_a_candidate_clause_is_staged_as_pending_review_and_the_run_ends(database, db_session):
     retailer_agreement = _make_retailer_agreement(db_session, "2" * 64, RETAILER_AGREEMENT_WITH_CLAUSE)
     run_id = _make_agent_run(db_session, "penalty_rule_extractor_2")
     db_session.commit()
 
     graph = _build_graph(database, has_clause=True)
-    config = _config("approval-run")
     state = graph.invoke(
         {
             "retailer_agreement_id": retailer_agreement["id"],
             "run_id": run_id,
             "retailer_agreement_text": RETAILER_AGREEMENT_WITH_CLAUSE,
         },
-        config=config,
+        config=_config("staged-run"),
     )
 
-    assert INTERRUPT_KEY in state
-    payload = state[INTERRUPT_KEY][0].value
-    assert payload["reason"] == "rule_review_required"
-    assert payload["pending_count"] == 1
-    [rule_id] = payload["extracted_rule_ids"]
-
-    with database.session() as session:
-        ExtractedPenaltyRuleRepository(session).set_review_decision(UUID(rule_id), "APPROVED")
-
-    state = graph.invoke(Command(resume={"__ack__": "REVIEWED"}), config=config)
-
-    assert INTERRUPT_KEY not in state
-    assert state["applied_rule_ids"] == [rule_id]
-
-
-def test_a_zero_decision_resume_still_reaches_end(database, db_session):
-    retailer_agreement = _make_retailer_agreement(db_session, "3" * 64, RETAILER_AGREEMENT_WITH_CLAUSE)
-    run_id = _make_agent_run(db_session, "penalty_rule_extractor_3")
-    db_session.commit()
-
-    graph = _build_graph(database, has_clause=True)
-    config = _config("zero-decision-run")
-    state = graph.invoke(
-        {
-            "retailer_agreement_id": retailer_agreement["id"],
-            "run_id": run_id,
-            "retailer_agreement_text": RETAILER_AGREEMENT_WITH_CLAUSE,
-        },
-        config=config,
-    )
-    assert INTERRUPT_KEY in state
-
-    # Nothing was decided; resuming with a falsy value (None/{}) would make LangGraph
-    # re-raise the interrupt forever, so the sentinel must be truthy.
-    state = graph.invoke(Command(resume={"__ack__": "NO_DECISIONS"}), config=config)
-
-    assert INTERRUPT_KEY not in state
-    assert state["applied_rule_ids"] == []
+    [staged_rule_id] = state["staged_rule_ids"]
     with database.session() as session:
         [staged] = ExtractedPenaltyRuleRepository(session).list_for_retailer_agreement(
             retailer_agreement["id"]
         )
+        assert staged.id == staged_rule_id
         assert staged.status == "PENDING_REVIEW"
