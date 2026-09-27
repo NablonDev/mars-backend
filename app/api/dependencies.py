@@ -9,14 +9,19 @@ Two composition styles coexist (approved plan, Phase 7a):
   module was stale from before that restructure (importing repository/
   service classes that no longer exist) until this pass.
 - `cmir`/`po_validation`: the container-based composition in
-  `app/core/container.py` (a separate, already-fixed composition root --
-  left alone this phase). `build_service`/`build_po_validation_service`
-  below still have to adapt `Container`'s fields to
-  `CmirRunService`/`PoValidationService`'s constructors, and `Container`
-  does not itself build the `process.job_queue`/`cmir.cmir_job_*_context`
-  repositories `CmirRunService` needs -- flagged below, not silently
-  patched into `Container` (out of scope, container.py is read-only this
-  phase).
+  `app/core/container.py` -- a separate composition root, since the two
+  LangGraph graphs share one process-lifetime `PostgresSaver` checkpointer.
+  `build_service`/`build_po_validation_service` below just hand
+  `CmirRunService`/`PoValidationService` a reference to `Container`'s
+  `cmir_repos`/`cmir_unit_of_work` (resp. `po_validation_repos`/
+  `po_validation_unit_of_work`) factory methods -- neither service holds a
+  repository or compiled graph on `self` any more (session-lifecycle fix:
+  each public method opens its own fresh Session per invocation via one of
+  those factories, committed on success/rolled back on exception/closed
+  either way). `Container` now also builds the `process.job_queue`/
+  `cmir.cmir_job_*_context` repositories `CmirRunService` needs, as part of
+  `cmir_repos`, instead of this module opening a second, separate session
+  for them.
 """
 
 from __future__ import annotations
@@ -26,6 +31,7 @@ import secrets
 from collections.abc import Iterator
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
+from rdflib import Graph as RdfGraph
 from sqlalchemy.orm import Session
 
 from app.agents.providers.azure_openai import AzureOpenAIChatClient
@@ -34,7 +40,6 @@ from app.core.container import Container
 from app.core.exceptions import ValidationError
 from app.db.session import Database
 from app.queue.interfaces import JobDispatcher, JobSource
-from app.repositories.cmir.job_context import CmirJobItemContextRepository, CmirJobRunContextRepository
 from app.repositories.common.fulfillment import FulfillmentRepository
 from app.repositories.common.master_data import MasterDataRepository
 from app.repositories.common.purchase_order import PurchaseOrderRepository
@@ -50,6 +55,10 @@ from app.repositories.penalties.summary import PenaltySummaryRepository
 from app.repositories.process.agent_registry import AgentRegistryRepository
 from app.repositories.process.job_queue import JobQueueRepository
 from app.services.cmir.run_service import CmirRunService
+from app.services.ontology.context_service import OntologyContextService
+from app.services.ontology.graph_service import OntologyGraphService
+from app.services.ontology_insert.run_service import OntologyInsertRunService
+from app.services.ontology_update.run_service import OntologyUpdateRunService
 from app.services.penalties.delivery_change import PoDeliveryChangeRequestService
 from app.services.penalties.mitigation.service import MitigationService
 from app.services.penalties.mitigation.summary_service import MitigationSummaryService
@@ -394,53 +403,23 @@ def get_penalty_seeding_service(
 
 # --- CMIR / PO Validation --------------------------------------------------
 # Built from app.core.container.Container (a separate composition root, not
-# the Depends() chain above) since the CMIR/PO-validation graphs wire up a
-# shared LangGraph PostgresSaver checkpointer and long-lived resources that
-# don't fit a per-request Session lifecycle. See app/core/container.py.
-
-
-def _build_cmir_job_context_repositories(
-    container: Container,
-) -> tuple[JobQueueRepository, CmirJobRunContextRepository, CmirJobItemContextRepository]:
-    """`Container.build()` does not itself construct the `process.job_queue`
-    / `cmir.cmir_job_*_context` repositories `CmirRunService` needs (it
-    predates `start_email_ingest`/`process_queued_email` creating real
-    `process.job_run`/`job_item` rows) -- `container.py` is read-only this
-    phase, so this opens one small, dedicated session on the same database
-    URL rather than extending it. Flagged for the CMIR follow-up pass:
-    the real fix is for `Container` to own this session/these repositories
-    itself, alongside its other single-session repositories.
-    """
-    database = Database(
-        container.config.database.url,
-        pool_size=container.config.database.pool_size,
-        max_overflow=container.config.database.max_overflow,
-        pool_timeout=container.config.database.pool_timeout,
-    )
-    session = database.new_session()
-    return (
-        JobQueueRepository(session),
-        CmirJobRunContextRepository(session),
-        CmirJobItemContextRepository(session),
-    )
+# the Depends() chain above) since the CMIR/PO-validation graphs share a
+# process-lifetime LangGraph PostgresSaver checkpointer. Session-lifecycle
+# fix: `CmirRunService`/`PoValidationService` no longer hold any repository
+# or compiled graph on `self` -- each public method opens its own fresh
+# Session per invocation via `Container.cmir_repos`/`cmir_unit_of_work`
+# (resp. `po_validation_repos`/`po_validation_unit_of_work`), so what's
+# built here is just a reference to those factory methods, not pre-built
+# repositories. See app/core/container.py.
 
 
 def build_service() -> CmirRunService:
     """Build the production CMIR service from the project composition root."""
     container = Container.build()
-    job_queue, job_run_context, job_item_context = _build_cmir_job_context_repositories(container)
     return CmirRunService(
         email_reader=container.email_reader,
-        graph=container.graph,
-        agent_registry=container.agent_registry,
-        agent_runs=container.agent_runs,
-        workflow_threads=container.workflow_threads,
-        human_actions=container.human_actions,
-        cmir_records=container.cmir_repository,
-        job_queue=job_queue,
-        job_run_context=job_run_context,
-        job_item_context=job_item_context,
-        email_repository=container.email_repository,
+        repos_factory=container.cmir_repos,
+        unit_of_work_factory=container.cmir_unit_of_work,
     )
 
 
@@ -448,14 +427,8 @@ def build_po_validation_service() -> PoValidationService:
     """Build the production PO Validation service from the project composition root."""
     container = Container.build()
     return PoValidationService(
-        graph=container.po_validation_graph,
-        purchase_orders=container.purchase_orders,
-        master_data=container.master_data,
-        agent_registry=container.agent_registry,
-        agent_runs=container.agent_runs,
-        workflow_threads=container.workflow_threads,
-        human_actions=container.human_actions,
-        processing_errors=container.processing_errors,
+        repos_factory=container.po_validation_repos,
+        unit_of_work_factory=container.po_validation_unit_of_work,
     )
 
 
@@ -477,3 +450,63 @@ def get_po_service(request: Request) -> PoValidationService:
     if request.app.state.po_service is None:
         request.app.state.po_service = build_po_validation_service()
     return request.app.state.po_service
+
+
+def build_ontology_update_service() -> OntologyUpdateRunService:
+    """Build the ontology-update POC's run service from the project
+    composition root -- same shape as `build_service`/
+    `build_po_validation_service` above, sharing the same `Container`
+    (and, through it, the same process-lifetime `PostgresSaver`
+    checkpointer) rather than a separate composition root."""
+    container = Container.build()
+    return OntologyUpdateRunService(unit_of_work_factory=container.ontology_update_unit_of_work)
+
+
+def get_ontology_update_service(request: Request) -> OntologyUpdateRunService:
+    """FastAPI dependency returning the app-instance-lifetime ontology-update
+    run service. Memoized on `request.app.state`, exactly as
+    `get_service`/`get_po_service` are, so a test-created app carrying a
+    fake via `create_app(ontology_update_service=...)` is never silently
+    overwritten with the real, Postgres-backed one."""
+    if request.app.state.ontology_update_service is None:
+        request.app.state.ontology_update_service = build_ontology_update_service()
+    return request.app.state.ontology_update_service
+
+
+def build_ontology_insert_service() -> OntologyInsertRunService:
+    """Build the ontology-insert POC's run service from the project
+    composition root -- same shape as `build_ontology_update_service`
+    above, sharing the same `Container`/`PostgresSaver` checkpointer."""
+    container = Container.build()
+    return OntologyInsertRunService(unit_of_work_factory=container.ontology_insert_unit_of_work)
+
+
+def get_ontology_insert_service(request: Request) -> OntologyInsertRunService:
+    """FastAPI dependency returning the app-instance-lifetime ontology-insert
+    run service. Memoized on `request.app.state`, exactly as
+    `get_ontology_update_service` is."""
+    if request.app.state.ontology_insert_service is None:
+        request.app.state.ontology_insert_service = build_ontology_insert_service()
+    return request.app.state.ontology_insert_service
+
+
+# --- Ontology (CMIR <-> Material Master traceability, component B) --------
+# Not memoized on app.state like get_service/get_po_service above:
+# OntologyGraphService is a thin, stateless wrapper around whatever graph
+# Container currently holds (rebuilt on an interval by
+# app.services.ontology.materialize_job -- see app/main.py's lifespan), so
+# building a fresh one per request is cheap and, unlike memoizing it, never
+# risks handing a caller a graph reference that's gone stale after a rebuild.
+
+
+def get_ontology_graph_service() -> OntologyGraphService:
+    container = Container.build()
+    graph = container.get_ontology_graph()
+    return OntologyGraphService(graph=graph if graph is not None else RdfGraph())
+
+
+def get_ontology_context_service() -> OntologyContextService:
+    """Schema/relationship context -- unlike `get_ontology_graph_service`,
+    this never touches the live rebuilt graph or Postgres at all, only the
+    mapping module + a local `.ttl` parse, so it needs no `Container`."""
+    return OntologyContextService()

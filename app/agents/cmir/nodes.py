@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Literal
 
 from langgraph.types import interrupt
@@ -15,6 +16,8 @@ from app.services.cmir.validation import CmirValidator
 from app.services.email_reader import GmailImapReader
 
 ACTOR = "AI Agent"
+
+logger = logging.getLogger(__name__)
 
 
 class WorkflowNodes:
@@ -211,9 +214,26 @@ class WorkflowNodes:
         return {}
 
     def mark_email_read(self, state: GraphState) -> GraphState:
+        """Best-effort only: this runs last on every decision path (approve,
+        reject, and the version-conflict path), in the same DB transaction
+        as the approval/rejection that already committed in an earlier node
+        this same graph run. Marking the source email "read" in Gmail is a
+        courtesy side effect, not part of the CMIR decision itself -- an
+        IMAP failure here (mailbox state changed since ingest, message
+        deleted, transient network issue, ...) must never roll back a
+        reviewer's already-recorded decision, so it's caught and logged
+        rather than left to propagate and abort the whole transaction."""
         if not state["email"].get("mark_read", True):
             return {}
-        self._email_reader.mark_as_read(state["email"]["imap_id"])
+        try:
+            self._email_reader.mark_as_read(state["email"]["imap_id"])
+        except Exception:
+            logger.warning(
+                "Could not mark source email (imap_id=%s) as read in Gmail -- "
+                "continuing, since the CMIR decision itself already committed.",
+                state["email"].get("imap_id"),
+                exc_info=True,
+            )
         return {}
 
     # ---- routing functions ---- #

@@ -7,6 +7,7 @@ from langgraph.types import Command
 
 from app.agents.po_validation.graph import build_po_validation_graph
 from app.agents.po_validation.nodes import PoValidationNodes
+from app.schemas.po_validation.threads import CandidateInfo
 
 INTERRUPT_KEY = "__interrupt__"
 
@@ -33,6 +34,13 @@ class FakeMasterDataRepository:
 
     def find_material_master(self, sap_material_number, plant_id):
         return self.records.get((sap_material_number, plant_id))
+
+    def find_material_master_by_material_id(self, material_id, plant_id):
+        # This fake's test data doesn't distinguish a `common.material.id` from
+        # a `sap_material_number` (both are just the same string key, e.g.
+        # "MAT-SUB") -- same records dict, same lookup shape as the real
+        # MasterDataRepository.find_material_master_by_material_id.
+        return self.records.get((material_id, plant_id))
 
 
 class FakeCmirRepository:
@@ -62,9 +70,12 @@ def _po_line(**overrides):
     line = {
         "po_number": "PO-1",
         "po_line_number": "10",
-        "customer_id": "CUST-1",
-        "customer_material_code": "ACME-MAT-1",
-        "plant": "1000",
+        "retailer_code": "CUST-1",
+        "retailer_material_code": "ACME-MAT-1",
+        # Deliberately distinct from plant_id below -- a human-readable plant_code,
+        # not the plant row's UUID -- so a test asserting on candidate["plant"]
+        # can't pass by coincidental equality with plant_id (see A.3 fix).
+        "plant": "PLANT-CODE-1000",
         "plant_id": "1000",
         "order_quantity": 100,
         "uom": "EA",
@@ -73,12 +84,15 @@ def _po_line(**overrides):
     return line
 
 
-def _material_master(sap_material_number, plant_id, available_quantity, follow_up_material_id=None):
+def _material_master(
+    sap_material_number, plant_id, available_quantity, follow_up_material_id=None, material_code=None
+):
     return {
         "sap_material_number": sap_material_number,
         "plant_id": plant_id,
         "available_quantity": available_quantity,
         "follow_up_material_id": follow_up_material_id,
+        "material_code": material_code,
     }
 
 
@@ -121,7 +135,15 @@ class PoValidationWorkflowTests(unittest.TestCase):
         graph = self._build_graph(
             cmir_match={"material_identity": "MAT-1"},
             material_records={
-                ("MAT-1", "1000"): _material_master("MAT-1", "1000", 40, follow_up_material_id="MAT-SUB")
+                ("MAT-1", "1000"): _material_master("MAT-1", "1000", 40, follow_up_material_id="MAT-SUB"),
+                # The substitute must have its own master record at this same
+                # plant to be resolved to a real, submittable suggestion (see
+                # human_qty_mismatch_decision's find_material_master_by_material_id
+                # fix) -- a follow_up_material_id with no master record here is
+                # exactly the "no honest suggestion" case covered by the next test.
+                ("MAT-SUB", "1000"): _material_master(
+                    "MAT-SUB", "1000", 500, material_code="MAT-SUB-CODE"
+                ),
             },
         )
         state = graph.invoke(
@@ -138,12 +160,54 @@ class PoValidationWorkflowTests(unittest.TestCase):
         payload = state[INTERRUPT_KEY][0].value
         self.assertEqual(payload["reason"], "qty_mismatch_decision")
         self.assertEqual(payload["candidate"]["suggested_substitute_material_code"], "MAT-SUB")
+        self.assertEqual(payload["candidate"]["suggested_substitute_available_quantity"], 500)
+        self.assertEqual(
+            payload["candidate"]["suggested_substitute_business_material_code"], "MAT-SUB-CODE"
+        )
         self.assertEqual(payload["candidate"]["shortfall"], 60)
 
-        state = graph.invoke(Command(resume={"decision": "proceed_anyway"}), config=self._config("t2"))
+        # A.3 regression guard: the real node's candidate dict must carry a
+        # "plant" key holding the plant_code (not "plant_id"/a UUID), and it
+        # must validate against the real API schema -- exercising the ACTUAL
+        # node output, not a hand-built fixture that could mask the bug.
+        self.assertEqual(payload["candidate"]["plant"], "PLANT-CODE-1000")
+        self.assertNotIn("plant_id", payload["candidate"])
+
+    def test_qty_mismatch_with_no_master_record_for_the_substitute_offers_no_suggestion(self) -> None:
+        """follow_up_material_id points somewhere with no MaterialMaster row at
+        this plant -- must stay None, not fall back to the raw UUID/code
+        (that was the exact bug this fix closes: an unresolved suggestion is
+        not a valid sap_material_number and would fail _require_material)."""
+        graph = self._build_graph(
+            cmir_match={"material_identity": "MAT-1"},
+            material_records={
+                ("MAT-1", "1000"): _material_master(
+                    "MAT-1", "1000", 40, follow_up_material_id="MAT-SUB-UNKNOWN"
+                )
+                # No ("MAT-SUB-UNKNOWN", "1000") entry -- genuinely unresolvable.
+            },
+        )
+        state = graph.invoke(
+            {
+                "po_line_id": "line-2b",
+                "run_id": "00000000-0000-0000-0000-000000000001",
+                "batch_id": "batch-1",
+                "po_line": _po_line(),
+            },
+            config=self._config("t2b"),
+        )
+
+        payload = state[INTERRUPT_KEY][0].value
+        self.assertIsNone(payload["candidate"]["suggested_substitute_material_code"])
+        self.assertIsNone(payload["candidate"]["suggested_substitute_description"])
+        self.assertIsNone(payload["candidate"]["suggested_substitute_available_quantity"])
+        self.assertIsNone(payload["candidate"]["suggested_substitute_business_material_code"])
+        CandidateInfo.model_validate(payload["candidate"])
+
+        state = graph.invoke(Command(resume={"decision": "proceed_anyway"}), config=self._config("t2b"))
 
         self.assertNotIn(INTERRUPT_KEY, state)
-        self.assertEqual(self.purchase_orders.statuses["line-2"], "READY_FOR_SO_CREATION_PARTIAL")
+        self.assertEqual(self.purchase_orders.statuses["line-2b"], "READY_FOR_SO_CREATION_PARTIAL")
 
     def test_qty_mismatch_mark_stale(self) -> None:
         graph = self._build_graph(

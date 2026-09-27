@@ -29,6 +29,7 @@ call site.
 from __future__ import annotations
 
 import copy
+from contextlib import nullcontext
 from datetime import date
 from types import SimpleNamespace
 from typing import Any
@@ -63,8 +64,12 @@ class FakeGraph:
 
 
 def _build_service(repos, graph: FakeGraph) -> PoValidationService:
-    return PoValidationService(
-        graph=graph,
+    """Session-lifecycle fix note: see the identical helper in
+    tests/unit/services/test_cmir_run_service.py -- both factories hand back
+    the same repo bundle (already bound to the shared test `db_session`) via
+    `nullcontext`, since production's per-call fresh-Session behavior is
+    `Container`'s concern (app/core/container.py), not this service's."""
+    uow = SimpleNamespace(
         purchase_orders=repos.purchase_orders,
         master_data=repos.master_data,
         agent_registry=repos.agent_registry,
@@ -72,6 +77,12 @@ def _build_service(repos, graph: FakeGraph) -> PoValidationService:
         workflow_threads=repos.workflow_threads,
         human_actions=repos.human_actions,
         processing_errors=repos.processing_errors,
+        cmir_records=repos.cmir_records,
+        graph=graph,
+    )
+    return PoValidationService(
+        repos_factory=lambda: nullcontext(uow),
+        unit_of_work_factory=lambda: nullcontext(uow),
     )
 
 
@@ -79,8 +90,8 @@ def _line_payload(**overrides: Any) -> dict[str, Any]:
     payload = {
         "po_number": "PO-2026-0001",
         "po_line_number": "10",
-        "customer_id": "CUST-1",
-        "customer_material_code": "ACME-MAT-1",
+        "retailer_code": "CUST-1",
+        "retailer_material_code": "ACME-MAT-1",
         "plant": "1000",
         "order_quantity": 100,
     }
@@ -89,7 +100,7 @@ def _line_payload(**overrides: Any) -> dict[str, Any]:
 
 
 def _interrupt_result(reason: str, **extra: Any) -> dict:
-    payload = {"reason": reason, "po_number": "PO-2026-0001", "po_line_number": "10", "customer_id": "CUST-1"}
+    payload = {"reason": reason, "po_number": "PO-2026-0001", "po_line_number": "10", "retailer_code": "CUST-1"}
     payload.update(extra)
     return {INTERRUPT_KEY: [SimpleNamespace(value=payload)]}
 

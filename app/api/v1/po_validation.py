@@ -28,6 +28,7 @@ from app.schemas.common.purchase_orders import PurchaseOrderLineResponse
 from app.schemas.po_validation.purchase_order_lines import (
     IngestPurchaseOrderLinesRequest,
     IngestPurchaseOrderLinesResponse,
+    PoAuditTrailLineResponse,
     PurchaseOrderLinesListResponse,
 )
 from app.services.po_validation.service import PoValidationService
@@ -86,3 +87,26 @@ def list_purchase_order_lines_for_order(
     purchase_orders.require_purchase_order(purchase_order_id)
     rows = purchase_orders.list_lines(purchase_order_id)
     return success_envelope([PurchaseOrderLineResponse.model_validate(r) for r in rows])
+
+
+@router.get("/po-audit-trail", response_model=Envelope[list[PoAuditTrailLineResponse]])
+def get_po_audit_trail(
+    limit: int = Query(default=5, ge=1, le=50),
+    purchase_orders: PurchaseOrderRepository = Depends(get_purchase_order_repository),
+) -> Envelope[list[PoAuditTrailLineResponse]]:
+    """CMIR Intelligence Module's "PO Audit Trail" panel -- the most
+    recently created purchase_order_line rows across every PO. Direct
+    repository read (no PoValidationService round-trip), mirroring
+    `list_purchase_order_lines_for_order` above."""
+    rows = purchase_orders.list_recent_lines(limit=limit)
+    items = [
+        PoAuditTrailLineResponse(
+            po_number=r["purchase_order_number"],
+            retailer_material_code=r["retailer_material_code"],
+            quantity=r["ordered_quantity"],
+            status=r["line_status"],
+            delivery_date=r["delivery_date"].isoformat() if r["delivery_date"] else None,
+        )
+        for r in rows
+    ]
+    return success_envelope(items)

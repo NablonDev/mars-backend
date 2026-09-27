@@ -32,7 +32,18 @@ is placed top-level alongside `workflow_threads`/`processing_errors`.
 from fastapi import APIRouter, Depends
 
 from app.api.dependencies import require_internal_api_key
-from app.api.v1 import admin, cmir, health, job_runs, po_validation, processing_errors, workflow_threads
+from app.api.v1 import (
+    admin,
+    cmir,
+    health,
+    job_runs,
+    ontology,
+    ontology_insert,
+    ontology_update,
+    po_validation,
+    processing_errors,
+    workflow_threads,
+)
 from app.api.v1.common import master_data, purchase_orders
 from app.api.v1.penalties import delivery_change_requests, mitigations, projections, rules
 
@@ -51,6 +62,9 @@ protected_router.include_router(projections.router)
 protected_router.include_router(mitigations.router)
 protected_router.include_router(delivery_change_requests.router)
 protected_router.include_router(job_runs.router)
+protected_router.include_router(ontology.router)
+protected_router.include_router(ontology_update.router)
+protected_router.include_router(ontology_insert.router)
 protected_router.include_router(admin.router)
 
 router.include_router(protected_router)

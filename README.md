@@ -118,6 +118,7 @@ Start here:
 Reference:
 
 - [`docs/API.md`](docs/API.md) — every endpoint, request/response shapes, error codes
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — CMIR & PO-validation flows end to end: components, contracts, sequence diagrams
 - [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — setup, seeding, troubleshooting, in depth
 - [`docs/DATABASE.md`](docs/DATABASE.md) — schema, migrations, conventions
 - [`docs/DOCKER.md`](docs/DOCKER.md) — image internals

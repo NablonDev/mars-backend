@@ -23,6 +23,16 @@ class CandidateInfo(BaseModel):
     available_quantity: float
     shortfall: float
     suggested_substitute_material_code: str | None = None
+    # 2026-09-24: resolved via MasterDataRepository.find_material_master_by_material_id
+    # (app/agents/po_validation/nodes.py::human_qty_mismatch_decision) so the UI can
+    # show a real substitute name/quantity instead of just a bare code. Both None
+    # whenever suggested_substitute_material_code is None -- never fabricated.
+    suggested_substitute_description: str | None = None
+    suggested_substitute_available_quantity: float | None = None
+    # 2026-09-25: common.material.material_code -- distinct from
+    # suggested_substitute_material_code above (which is the real, submittable
+    # sap_material_number). Display-only, never used for resubmission.
+    suggested_substitute_business_material_code: str | None = None
 
 
 class PoValidationThreadSnapshotResponse(BaseModel):
@@ -36,7 +46,11 @@ class PoValidationThreadSnapshotResponse(BaseModel):
     po_line_id: str
     po_number: str | None = None
     po_line_number: str
-    customer_material_code: str
+    # Was `customer_material_code` (final naming refactor, matches
+    # common.purchase_order_line.retailer_material_code) -- breaking response
+    # change; the frontend/BFF must be updated to consume this new name (see
+    # final report).
+    retailer_material_code: str
     order_quantity: float
     stage: str
     candidate: CandidateInfo | None = None

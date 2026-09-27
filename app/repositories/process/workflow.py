@@ -33,7 +33,16 @@ from sqlalchemy import and_, func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
-from app.models import HumanAction, ProcessingError, WorkflowThread, WorkflowThreadSubject
+from app.core.exceptions import ConflictError
+from app.models import (
+    HumanAction,
+    ProcessingError,
+    PurchaseOrder,
+    PurchaseOrderLine,
+    Retailer,
+    WorkflowThread,
+    WorkflowThreadSubject,
+)
 from app.utils.pagination import parse_cursor
 
 
@@ -176,6 +185,40 @@ class WorkflowThreadRepository:
         thread = self._session.get(WorkflowThread, row.workflow_thread_id)
         return _thread_to_dict(thread, row) if thread is not None else None
 
+    def _po_line_business_summaries(self, po_line_ids: list[UUID]) -> dict[UUID, dict[str, Any]]:
+        """Batch-fetch PO-line/PO/retailer business fields for a list-view page —
+        one extra query for the whole page (`WHERE id IN (...)`), not one per row.
+        Used only by `list_threads` to give queue rows real business context
+        (PO number, material code, quantity, retailer name) that `WorkflowThread`
+        itself does not carry (see this module's docstring — that data was
+        deliberately normalized out onto `WorkflowThreadSubject`'s FK, not stored
+        redundantly on the thread)."""
+        if not po_line_ids:
+            return {}
+        rows = self._session.execute(
+            select(
+                PurchaseOrderLine.id,
+                PurchaseOrder.purchase_order_number,
+                PurchaseOrderLine.line_number,
+                PurchaseOrderLine.retailer_material_code,
+                PurchaseOrderLine.ordered_quantity,
+                Retailer.retailer_name,
+            )
+            .join(PurchaseOrder, PurchaseOrderLine.purchase_order_id == PurchaseOrder.id)
+            .join(Retailer, PurchaseOrder.retailer_id == Retailer.id)
+            .where(PurchaseOrderLine.id.in_(po_line_ids))
+        ).all()
+        return {
+            row.id: {
+                "po_number": row.purchase_order_number,
+                "po_line_number": row.line_number,
+                "retailer_material_code": row.retailer_material_code,
+                "order_quantity": float(row.ordered_quantity) if row.ordered_quantity is not None else None,
+                "retailer_name": row.retailer_name,
+            }
+            for row in rows
+        }
+
     def list_threads(
         self,
         *,
@@ -194,7 +237,39 @@ class WorkflowThreadRepository:
         stmt = stmt.order_by(WorkflowThread.updated_at.desc(), WorkflowThread.id.desc()).limit(limit)
 
         rows = self._session.scalars(stmt).all()
-        items = [_thread_to_dict(r, self._get_subject(r.id)) for r in rows]
+        subjects = {r.id: self._get_subject(r.id) for r in rows}
+        po_line_ids = [s.purchase_order_line_id for s in subjects.values() if s is not None and s.purchase_order_line_id is not None]
+        po_summaries = self._po_line_business_summaries(po_line_ids)
+
+        items = []
+        for r in rows:
+            item = _thread_to_dict(r, subjects[r.id])
+            # Always present (even when genuinely unavailable) so callers/
+            # the response schema never have to special-case a missing key.
+            item.update(
+                {
+                    "po_number": None,
+                    "po_line_number": None,
+                    "retailer_material_code": None,
+                    "order_quantity": None,
+                    "retailer_name": None,
+                    "customer_identity": None,
+                    "material_identity": None,
+                }
+            )
+            po_line_id = item["purchase_order_line_id"]
+            if po_line_id is not None and po_line_id in po_summaries:
+                item.update(po_summaries[po_line_id])
+            elif item["email_event_id"] is not None:
+                # CMIR domain: business fields are already captured on the
+                # thread itself at every interrupt (see app/services/cmir/
+                # run_service.py's `latest_snapshot.cmir`) — no extra query
+                # needed, just read what's already there.
+                cmir = ((r.metadata_json or {}).get("latest_snapshot") or {}).get("cmir") or {}
+                item["customer_identity"] = cmir.get("customer_identity") or None
+                item["material_identity"] = cmir.get("material_identity") or None
+            items.append(item)
+
         next_cursor = items[-1]["updated_at"].isoformat() if len(items) == limit and items else None
         return items, next_cursor
 
@@ -414,8 +489,19 @@ class HumanActionRepository:
             ),
         )
         if result.rowcount != 1:
-            raise ValueError(
-                f"Open human action {pending_action_id} not found for thread {workflow_thread_id}"
+            # B fix (narrow scope): a concurrent caller already resolved this
+            # exact pending action first (`status="open"` no longer matches) --
+            # this is an expected optimistic-concurrency conflict, not an
+            # unexpected failure, so it must surface as the same clean
+            # THREAD_STALE ConflictError/409 reviewers already handle for any
+            # other "thread moved since you last saw it" case, not a generic
+            # 5xx. Previously raised a bare ValueError here, which every
+            # caller's `except Exception: raise _resume_failed(...)` wrapping
+            # converted into ExternalServiceError/WORKFLOW_RESUME_FAILED.
+            raise ConflictError(
+                code="THREAD_STALE",
+                message="Thread was updated by another reviewer. Refresh snapshot and retry.",
+                details={"thread_id": str(workflow_thread_id), "pending_action_id": str(pending_action_id)},
             )
 
         new_pending_action_id: UUID | None = None

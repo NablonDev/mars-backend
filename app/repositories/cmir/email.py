@@ -169,6 +169,19 @@ class EmailRepository:
         )
         self._session.flush()
 
+    def list_pending(self, limit: int = 50) -> list[dict[str, Any]]:
+        """Rows not yet fully processed -- for a UI "email queue" panel that
+        lets a reviewer manually process/"unqueue" one instead of waiting on
+        the real Service Bus consumer. Covers every pre-`processed`/`failed`
+        state (`new`, `enqueueing`, `queued`, `processing`), oldest first."""
+        rows = self._session.scalars(
+            select(EmailEvent)
+            .where(EmailEvent.queue_status.in_(["new", "enqueueing", "queued", "processing"]))
+            .order_by(EmailEvent.created_at.asc())
+            .limit(limit)
+        ).all()
+        return [_to_dict(row) for row in rows]
+
     def get_queue_state(self, email_id: UUID) -> dict[str, Any] | None:
         row = self._session.get(EmailEvent, email_id)
         if row is None:

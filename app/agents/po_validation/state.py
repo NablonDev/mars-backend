@@ -6,7 +6,12 @@ from uuid import UUID
 
 class POGraphState(TypedDict, total=False):
     po_line_id: UUID  # common.purchase_order_line.id
-    po_line: dict[str, Any]  # PoLine, as a dict (po_number, customer_id, plant, order_quantity, ...)
+    po_line: dict[str, Any]  # PoLine, as a dict (po_number, retailer_code, plant, order_quantity, ...)
+    # `retailer_code`/`retailer_material_code` (renamed from customer_id/
+    # customer_material_code) are populated directly from the ingest payload
+    # in PoValidationService._run_po_line -- new checkpoints only ever
+    # contain these names; app/agents/po_validation/nodes.py::_normalize_po_line
+    # is a back-compat shim for checkpoints written before this rename.
     batch_id: str
     run_id: UUID
     thread_id: str  # internal checkpoint key; only promoted to a reviewer-facing
