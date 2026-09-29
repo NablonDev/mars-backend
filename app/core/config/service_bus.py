@@ -1,9 +1,7 @@
 """Azure Service Bus settings for CMIR's inbound mail-processing queue.
 
-Read by app.queue.cmir_mail_producer.ServiceBusMailQueue via
-ServiceBusConfig.from_settings(). Independent of the batch job queue's own
-Service Bus backend -- see job_queue.py's service_bus_* fields, which
-point at a separate Azure Service Bus resource of the same type.
+These point at a different Azure Service Bus resource than the batch job
+queue's own `service_bus_*` fields in `job_queue.py`.
 """
 
 from __future__ import annotations
@@ -13,6 +11,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class ServiceBusSettings(BaseSettings):
+    """Namespace, queue, and connection settings for the CMIR mail-processing Service Bus queue."""
+
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore", populate_by_name=True
     )

@@ -1,30 +1,26 @@
 """
 Calls the LLM-powered penalty-projection-summary endpoint
-(`POST /purchase-orders/{purchase_order_id}/penalty-projections/summary`)
-for one or every purchase order and prints the free-text result -- the
-"why is this order's number what it is" companion to
-`demo_daily_simulation.py`'s "what is the number."
+(`POST /penalties/projections/summary`) for one or every purchase order and
+prints the free-text result -- the "why is this order's number what it is"
+companion to `demo_daily_simulation.py`'s "what is the number."
 
 Was `demo_fine_projection_summary.py` (`fine`/`fines` -> `penalty`/
 `penalties` rename; `/orders/{id}/projection-summary` ->
-`/purchase-orders/{id}/penalty-projections/summary`, per the approved
-plan §5). Every response now comes wrapped in the `{success, message,
-data, error}` envelope (`app/core/envelope.py`) -- every `resp.json()`
-below reads `["data"]`.
+`/purchase-orders/{id}/penalty-projections/summary` -> now flat,
+`/penalties/projections/summary` with `purchase_order_id` in the body).
+Every response now comes wrapped in the `{success, message, data, error}`
+envelope (`app/core/envelope.py`) -- every `resp.json()` below reads
+`["data"]`.
 
 Generation is a background job: a cache miss (or --force-regenerate) gets
-a `202` immediately, not a `200` with the summary already in it. Unlike
-the pre-restructure API, there is no per-(purchase_order, date)
-summary-poll endpoint any more -- `?include=summary` (a pure read, never
-schedules generation) is nested under the projection-history resource
-instead, so this script polls
-`GET /purchase-orders/{id}/penalty-projections?include=summary` for the
-row matching `as_of_date` until its `summary_status` leaves `PENDING`.
-That row only ever changes once a worker actually drains the queued
-regeneration job -- run `python scripts/ops/run_daily_batch.py
---drain-only` (or the full nightly batch) in another terminal alongside
-this script; before this pass no worker existed to do that at all (see
-`app.workers.penalty_projection`).
+a `202` immediately, not a `200` with the summary already in it. This
+script polls the dedicated `GET /penalties/projections/summary?
+purchase_order_id=&as_of_date=` read route (shared with
+`demo_penalty_mitigation_summary.py` via `_helpers._poll_until_ready`) until
+`status` leaves `PENDING`. That status only ever changes once a worker
+actually drains the queued regeneration job -- run
+`python scripts/ops/run_daily_batch.py --drain-only` (or the full nightly
+batch) in another terminal alongside this script.
 
 Requires real Azure OpenAI credentials in `.env`
 (AZURE_OPENAI_API_KEY/ENDPOINT/DEPLOYMENT_NAME) -- without them the
@@ -34,14 +30,13 @@ app/services/penalties/projection/summary_service.py), which this script
 prints per purchase order and moves on rather than treating as a script bug.
 
 For each purchase order this explicitly looks up its latest existing
-projection date via `GET /purchase-orders/{id}/penalty-projections` and
+projection date via `GET /penalties/projections?purchase_order_id=` and
 passes that as `as_of_date` -- it never omits `as_of_date` and relies on
 the server's "defaults to today" behaviour, since that only happens to
 produce a sensible answer while the mock scenario dates (Aug 2026) and the
 real calendar date coincide. Summarizing a purchase order with no
 projections yet is a clean skip, not a crash -- run
-`demo_daily_simulation.py` (or
-`POST /purchase-orders/{purchase_order_id}/penalty-projections`) first.
+`demo_daily_simulation.py` (or `POST /penalties/projections`) first.
 
 Usage:
     uvicorn app.main:app --reload &
@@ -56,11 +51,12 @@ Usage:
 
 import argparse
 import sys
-import time
 from datetime import UTC, datetime
 
 import httpx
-from _helpers import POLL_INTERVAL_SECONDS, POLL_TIMEOUT_SECONDS, _auth_headers, _error_message
+from _helpers import POLL_TIMEOUT_SECONDS, _auth_headers, _error_message, _poll_until_ready
+
+_SUMMARY_PATH = "penalties/projections/summary"
 
 
 def _latest_projection_date(base_url: str, purchase_order_id: str) -> str | None:
@@ -73,7 +69,8 @@ def _latest_projection_date(base_url: str, purchase_order_id: str) -> str | None
     extend past it. Taking a blind `max()` over all history picks a
     future date for those and 422s every time."""
     resp = httpx.get(
-        f"{base_url}/purchase-orders/{purchase_order_id}/penalty-projections",
+        f"{base_url}/penalties/projections",
+        params={"purchase_order_id": purchase_order_id},
         headers=_auth_headers(),
         timeout=30,
     )
@@ -84,25 +81,6 @@ def _latest_projection_date(base_url: str, purchase_order_id: str) -> str | None
     today = datetime.now(UTC).date().isoformat()
     not_future = [row["projection_date"] for row in history if row["projection_date"] <= today]
     return max(not_future) if not_future else None
-
-
-def _poll_until_ready(base_url: str, purchase_order_id: str, as_of_date: str) -> dict | None:
-    deadline = time.monotonic() + POLL_TIMEOUT_SECONDS
-    headers = _auth_headers()
-    while time.monotonic() < deadline:
-        resp = httpx.get(
-            f"{base_url}/purchase-orders/{purchase_order_id}/penalty-projections",
-            params={"include": "summary"},
-            headers=headers,
-            timeout=30,
-        )
-        resp.raise_for_status()
-        rows = resp.json()["data"]
-        row = next((r for r in rows if r["projection_date"] == as_of_date), None)
-        if row is not None and row["summary_status"] not in (None, "PENDING"):
-            return row
-        time.sleep(POLL_INTERVAL_SECONDS)
-    return None
 
 
 def _print_summary(purchase_order_id: str, body: dict) -> None:
@@ -121,8 +99,12 @@ def _summarize_one(base_url: str, purchase_order_id: str, force_regenerate: bool
         return
 
     resp = httpx.post(
-        f"{base_url}/purchase-orders/{purchase_order_id}/penalty-projections/summary",
-        json={"as_of_date": as_of_date, "force_regenerate": force_regenerate},
+        f"{base_url}/{_SUMMARY_PATH}",
+        json={
+            "purchase_order_id": purchase_order_id,
+            "as_of_date": as_of_date,
+            "force_regenerate": force_regenerate,
+        },
         headers=_auth_headers(),
         timeout=30,
     )
@@ -134,7 +116,7 @@ def _summarize_one(base_url: str, purchase_order_id: str, force_regenerate: bool
         print(f"  [failed] {purchase_order_id}: {resp.status_code} {_error_message(resp)}", file=sys.stderr)
         return
 
-    row = _poll_until_ready(base_url, purchase_order_id, as_of_date)
+    row = _poll_until_ready(base_url, _SUMMARY_PATH, purchase_order_id, as_of_date)
     if row is None:
         print(
             f"  [timeout] {purchase_order_id}: still PENDING after {POLL_TIMEOUT_SECONDS:.0f}s -- "
@@ -142,7 +124,7 @@ def _summarize_one(base_url: str, purchase_order_id: str, force_regenerate: bool
             file=sys.stderr,
         )
         return
-    if row["summary_status"] == "FAILED":
+    if row["status"] == "FAILED":
         print(f"  [failed] {purchase_order_id}: generation failed upstream", file=sys.stderr)
         return
     _print_summary(purchase_order_id, row["summary"])

@@ -10,20 +10,19 @@ from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 import app.models  # noqa: F401
-from app.db.base import CMIR_SCHEMA, COMMON_SCHEMA, PENALTIES_SCHEMA, PROCESS_SCHEMA, Base
+from app.db.base import CMIR_SCHEMA, PENALTIES_SCHEMA, PROCESS_SCHEMA, Base
+from app.utils.sanitize import strip_nul_bytes
 
 
 def apply_sqlite_schema_translation(engine: Engine) -> Engine:
-    """Translate the application schema away for SQLite.
+    """Redirect the application's Postgres schemas onto SQLite's single namespace.
 
-    LANGGRAPH_SCHEMA is deliberately not included here -- no ORM model is
-    bound to it (LangGraph's own PostgresSaver populates it at runtime),
-    so there is nothing on Base.metadata that would need translating.
+    LANGGRAPH_SCHEMA is absent by design: no ORM model binds to it, so nothing on
+    Base.metadata needs translating. LangGraph's PostgresSaver populates it at runtime.
     """
     if engine.dialect.name == "sqlite":
         return engine.execution_options(
             schema_translate_map={
-                COMMON_SCHEMA: None,
                 PROCESS_SCHEMA: None,
                 CMIR_SCHEMA: None,
                 PENALTIES_SCHEMA: None,
@@ -33,14 +32,11 @@ def apply_sqlite_schema_translation(engine: Engine) -> Engine:
 
 
 def checkpoint_dsn(database_url: str, schema: str) -> str:
-    """Convert a SQLAlchemy PostgreSQL URL to a psycopg DSN.
+    """Convert a SQLAlchemy PostgreSQL URL into a psycopg DSN for LangGraph's saver.
 
-    LangGraph's ``PostgresSaver`` connects with psycopg directly and doesn't
-    understand SQLAlchemy's ``+psycopg``/``+psycopg2`` driver suffix.
-
-    The PostgreSQL ``search_path`` is configured on the resulting DSN so
-    LangGraph's checkpoint tables are created in the specified schema
-    without changing the database-level configuration.
+    `PostgresSaver` connects with psycopg directly and rejects SQLAlchemy's
+    `+psycopg`/`+psycopg2` driver suffix. The DSN also pins `search_path` so
+    checkpoint tables land in the given schema without any database-level change.
     """
     parsed = urlsplit(database_url)
     scheme = parsed.scheme.replace("+psycopg2", "").replace("+psycopg", "")
@@ -51,6 +47,8 @@ def checkpoint_dsn(database_url: str, schema: str) -> str:
 
 
 class Database:
+    """Owns the application's SQLAlchemy engine and session factory."""
+
     def __init__(
         self,
         database_url: str,
@@ -60,14 +58,30 @@ class Database:
         pool_timeout: int | None = None,
         **engine_kwargs: Any,
     ) -> None:
-        engine_kwargs.setdefault("future", True)
+        # Validate pooled connections before handing them to the application.
+        # This is especially useful for long-idle connections that may have been
+        # closed by the network or database while still present in the pool.
         engine_kwargs.setdefault("pool_pre_ping", True)
-        # UUID primary keys (agent_runs.id, email_events.id, ...) flow into JSON/JSONB
-        # columns (agent_traces.input_snapshot, pending_human_actions.payload, ...) as
-        # raw graph state -- stock json.dumps can't encode a uuid.UUID, so fall back to
-        # str() for it (and anything else it can't natively encode) at the engine level,
-        # covering every JSON/JSONB column through this one Database instance.
-        engine_kwargs.setdefault("json_serializer", lambda obj: json.dumps(obj, default=str))
+        if database_url.startswith("postgresql"):
+            # Keep PostgreSQL connections active during idle periods. This helps
+            # prevent network infrastructure (notably WSL2/NAT) from silently
+            # expiring otherwise-idle TCP connections between database operations.
+            engine_kwargs.setdefault(
+                "connect_args",
+                {
+                    "keepalives": 1,
+                    "keepalives_idle": 2,
+                    "keepalives_interval": 2,
+                    "keepalives_count": 3,
+                },
+            )
+        # Serialize arbitrary application objects as JSON, falling back to str()
+        # for values such as UUIDs that the standard encoder does not handle.
+        # Remove embedded NUL bytes first because PostgreSQL JSON/JSONB rejects them.
+        engine_kwargs.setdefault(
+            "json_serializer",
+            lambda obj: json.dumps(strip_nul_bytes(obj), default=str),
+        )
 
         if pool_size is not None:
             engine_kwargs.setdefault("pool_size", pool_size)
@@ -87,6 +101,7 @@ class Database:
 
     @property
     def engine(self) -> Engine:
+        """Return the underlying SQLAlchemy engine."""
         return self._engine
 
     def create_all_tables(self) -> None:

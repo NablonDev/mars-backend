@@ -4,9 +4,9 @@ lifecycle (`PoDeliveryChangeRequestService`) directly against
 the configured database (DATABASE_URL / .env), without needing `uvicorn`
 running. Kept for ad-hoc/local use -- the API is the equivalent for
 anything that should go through HTTP:
-    POST   /purchase-orders/{purchase_order_id}/delivery-change-requests         <-> create
-    POST   /purchase-orders/{purchase_order_id}/delivery-change-requests/response <-> respond
-    GET    /purchase-orders/{purchase_order_id}/delivery-change-requests          <-> history
+    POST   /delivery-change-requests                                <-> create
+    POST   /delivery-change-requests/{delivery_change_request_id}/response <-> respond
+    GET    /delivery-change-requests?purchase_order_id=              <-> history
 
 There is no HTTP equivalent for `expire-sweep`: it only ever runs inside
 the nightly batch (`scripts/ops/run_daily_batch.py`, via
@@ -21,10 +21,17 @@ Phase 2/3 `common`/`penalties` repositories and services (the `fine`/
 `fines` -> `penalty`/`penalties` rename, and `Po*` -> `PurchaseOrder*`
 naming).
 
+The request's own business-key `request_id` (an `ext_...` string) still
+exists in the database (kept for a possible future external-system
+correlation), but is not exposed anywhere in the API or this CLI -- the
+surrogate `id: UUID` is the sole identifier end to end, so `respond`'s
+`--id` flag (was `--request-id`) takes and `create`/`history`/
+`expire-sweep` print a UUID, not an `ext_...` string.
+
 Examples:
     python scripts/ops/run_po_delivery_change_cli.py create --purchase-order-id <uuid> --reason-code SHORTAGE --proposed-delivery-date 2026-08-20
-    python scripts/ops/run_po_delivery_change_cli.py respond --request-id ext_xxxxxxxxxxxx --decision ACCEPTED
-    python scripts/ops/run_po_delivery_change_cli.py respond --request-id ext_xxxxxxxxxxxx --decision COUNTERED --countered-delivery-date 2026-08-18
+    python scripts/ops/run_po_delivery_change_cli.py respond --id <uuid> --decision ACCEPTED
+    python scripts/ops/run_po_delivery_change_cli.py respond --id <uuid> --decision COUNTERED --countered-delivery-date 2026-08-18
     python scripts/ops/run_po_delivery_change_cli.py history --purchase-order-id <uuid>
     python scripts/ops/run_po_delivery_change_cli.py expire-sweep
 
@@ -49,10 +56,10 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.exceptions import AppError
 from app.db.session import Database
+from app.repositories.common.delivery_change_request import PoDeliveryChangeRequestRepository
 from app.repositories.common.fulfillment import FulfillmentRepository
 from app.repositories.common.master_data import MasterDataRepository
 from app.repositories.common.purchase_order import PurchaseOrderRepository
-from app.repositories.penalties.delivery_change_request import PoDeliveryChangeRequestRepository
 from app.repositories.penalties.projection import PenaltyProjectionRepository
 from app.repositories.penalties.rule import PenaltyRuleRepository
 from app.services.penalties.delivery_change import PoDeliveryChangeRequestService
@@ -84,7 +91,7 @@ def _parse_date(value: str) -> date:
 
 def _format_request_line(row: dict) -> str:
     parts = [
-        f"{row['request_id']:<18} {row['reason_code']:<10} {row['status']:<10}",
+        f"{row['id']!s:<36} {row['reason_code']:<10} {row['status']:<10}",
         f"requested_at={row['requested_at']}",
         f"expires_at={row['expires_at']}",
         f"baseline={row['baseline_delivery_date']}",
@@ -106,9 +113,7 @@ def _run_create(service: PoDeliveryChangeRequestService, args: argparse.Namespac
         notes=args.notes,
         now=now,
     )
-    print(
-        f"Created {row['request_id']} for purchase_order {row['purchase_order_id']} (status={row['status']})"
-    )
+    print(f"Created {row['id']} for purchase_order {row['purchase_order_id']} (status={row['status']})")
     print(_format_request_line(row))
     return 0
 
@@ -119,18 +124,18 @@ def _run_respond(service: PoDeliveryChangeRequestService, args: argparse.Namespa
         _parse_date(args.countered_delivery_date) if args.countered_delivery_date else None
     )
     row = service.record_response(
-        args.request_id,
+        UUID(args.id),
         args.decision,
         countered_delivery_date=countered_delivery_date,
         now=now,
     )
-    print(f"Recorded {args.decision} for {row['request_id']} (purchase_order {row['purchase_order_id']})")
+    print(f"Recorded {args.decision} for {row['id']} (purchase_order {row['purchase_order_id']})")
     print(_format_request_line(row))
     return 0
 
 
 def _run_history(service: PoDeliveryChangeRequestService, args: argparse.Namespace) -> int:
-    # Mirrors GET /purchase-orders/{purchase_order_id}/delivery-change-requests,
+    # Mirrors GET /delivery-change-requests?purchase_order_id=,
     # which 404s via require_purchase_order before calling list_history --
     # list_history itself does no existence check (a purchase order with no
     # requests and a nonexistent one both return []).
@@ -151,7 +156,7 @@ def _run_expire_sweep(service: PoDeliveryChangeRequestService, args: argparse.Na
     expired = service.expire_stale(as_of)
     print(f"Expired {len(expired)} stale PO delivery-change request(s).")
     for row in expired:
-        print(f"  {row['request_id']}  purchase_order_id={row['purchase_order_id']}")
+        print(f"  {row['id']}  purchase_order_id={row['purchase_order_id']}")
     return 0
 
 
@@ -169,7 +174,9 @@ def main() -> int:
     create_parser.add_argument("--now", help="ISO datetime override (default: wall-clock)")
 
     respond_parser = subparsers.add_parser("respond", help="Record a retailer's response to a request")
-    respond_parser.add_argument("--request-id", required=True)
+    respond_parser.add_argument(
+        "--id", required=True, help="delivery-change request's surrogate UUID id (was --request-id)"
+    )
     respond_parser.add_argument("--decision", required=True, choices=["ACCEPTED", "COUNTERED", "REJECTED"])
     respond_parser.add_argument(
         "--countered-delivery-date", help="YYYY-MM-DD, required iff --decision COUNTERED"

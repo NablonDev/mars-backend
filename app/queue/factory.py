@@ -31,5 +31,5 @@ def build_job_queue(
 
     raise ValidationError(
         code="UNKNOWN_JOB_QUEUE_BACKEND",
-        message=f"Unknown job_queue.backend={backend!r}; expected one of {tuple(JobQueueBackend)}.",
+        message=f"Unknown job_queue.backend={backend}; expected one of {tuple(JobQueueBackend)}.",
     )

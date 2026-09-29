@@ -1,27 +1,4 @@
-"""Penalty-projection-exclusive seed data (penalty rules, worked-example
-purchase orders) and the day-by-day scenario replay that exercises
-`ProjectionService`.
-
-Was `app/services/seeding/fine_projection.py`. Rewritten against the
-ERP-normalized `common`/`penalties` schema (Phase 3 -- services move/
-folder-split):
-
-- `penalty_rule.retailer_id` and `purchase_order.retailer_id`/
-  `purchase_order_line.material_id`/`plant_id` are UUID FKs now, not
-  business-code strings -- every seed dict below keeps its old business
-  code (`RET-WMT`, `MAT-100234`, `LOC-COL`, ...) and this module resolves
-  it to a surrogate id via `MasterDataRepository` at `seed()` time, not at
-  module-import time (there is no DB connection available at import time).
-- A purchase order's `unit_price` moved from the header to the line (see
-  `app.models.common.purchase_order.PurchaseOrderLine`'s docstring); every
-  worked example is single-line, so this is a straight move, not an
-  aggregation.
-- Each day's fact write is now header+line (`order_confirmation`/
-  `order_confirmation_line`) or header+per-day-shipment
-  (`delivery`/`shipment`, one `delivery` row created once per PO, then one
-  `shipment` row per day) instead of one flat row -- see
-  `simulate_daily_run`.
-"""
+"""Penalty-projection seed data and scenario replay."""
 
 from __future__ import annotations
 
@@ -33,10 +10,12 @@ from app.core.exceptions import NotFoundError
 from app.repositories.common.fulfillment import FulfillmentRepository
 from app.repositories.common.master_data import MasterDataRepository
 from app.repositories.common.purchase_order import PurchaseOrderRepository
+from app.repositories.common.retailer_agreement import RetailerAgreementRepository
 from app.repositories.penalties.rule import PenaltyRuleRepository
 from app.services.penalties.delivery_change import PoDeliveryChangeRequestService
 from app.services.penalties.projection import DELAY_VIOLATION_TYPES, SHORTAGE_VIOLATION_TYPES, PenaltyRule
 from app.services.penalties.projection.service import ProjectionService
+from app.services.seeding.master_data import ensure_placeholder_retailer_agreement
 from app.services.seeding.scenario_data_projection import (
     AMZ_RULES,
     WMT_RULES,
@@ -46,26 +25,36 @@ from app.services.seeding.scenario_data_projection import (
     wmt_days,
 )
 
-# Source-doc references aren't part of the pure PenaltyRule dataclass
-# (deliberately -- that dataclass stays minimal/pure), so they're kept
-# here as the one piece of seed-only metadata layered on top of it.
+# Source-doc references stay out of the PenaltyRule dataclass, which is
+# deliberately minimal, so they live here as seed-only metadata.
 _SOURCE_DOC_REFERENCE = {
     "RULE-WMT-SHORT": "Walmart Supplier Manual v2026.1 (mock)",
     "RULE-WMT-OTIF": "Walmart Supplier Manual v2026.1 (mock)",
     "RULE-AMZ-FILL": "Amazon Vendor Central Chargeback Policy (mock)",
     "RULE-AMZ-OTIF": "Amazon Vendor Central Chargeback Policy (mock)",
 }
+# penalty_rule.penalty_category is NOT NULL; these worked-example rules were hand-authored
+# before extraction existed and carry no genuine extracted category, so each is mapped onto
+# the governed category matching its violation_type.
+_PENALTY_CATEGORY_BY_VIOLATION_TYPE = {
+    "SHORT_SHIP": "SHORT_SHIP",
+    "FILL_RATE": "SHORT_SHIP",
+    "OTIF_LATE": "OTIF_LATE",
+    "ASN_LATE": "OTIF_LATE",
+}
 
 
 def _rule_to_seed_dict(rule: PenaltyRule, retailer_code: str) -> dict[str, Any]:
-    """Converts a canonical WMT_RULES/AMZ_RULES PenaltyRule (the same objects
-    the pure-engine tests use) into `PenaltyRuleRepository.add_rule`
-    kwargs (minus `retailer_id`, resolved at `seed()` time), so seed data
-    and validated test numbers can't drift apart."""
+    """Convert a canonical `WMT_RULES`/`AMZ_RULES` rule into `add_rule` kwargs.
+
+    Reusing the objects the pure-engine tests assert against keeps seed data and
+    validated test numbers in step. `retailer_agreement_id` is resolved at `seed()` time.
+    """
     return {
         "rule_code": rule.rule_id,
         "retailer_code": retailer_code,
         "violation_type": rule.violation_type,
+        "penalty_category": _PENALTY_CATEGORY_BY_VIOLATION_TYPE[rule.violation_type],
         "calc_type": rule.calc_type.value,
         "rate": rule.rate,
         "threshold_pct": rule.threshold_pct,
@@ -80,35 +69,24 @@ _RULES = [_rule_to_seed_dict(r, "RET-WMT") for r in WMT_RULES] + [
 
 
 def _day_before_first(days) -> date:
-    """order_date convention in every worked example: one day before the
-    first tracked projection day (SAP order placed the day before the
-    first daily snapshot we have facts for)."""
+    """Order-date convention: one day before the scenario's first tracked projection day."""
     return days[0][0].projection_date - timedelta(days=1)
 
 
-# Earliest date across all four scenarios in scenario_data_projection.py
-# (WMT-100234's order_date, one day before its first tracked day). `seed()`
-# shifts every literal Aug-2026 date in `_ORDERS` by `calendar_offset()` so
-# a fresh seed run re-anchors the whole fixed calendar around real "today"
-# instead of drifting into the past as wall-clock time passes it -- see
-# CLAUDE.local.md/PROGRESS.local.md for the incident this fixes.
+# Earliest date across all four scenarios. `seed()` shifts every literal
+# Aug-2026 date in `_ORDERS` by `calendar_offset()`, so a fresh seed run
+# re-anchors the fixed calendar around today instead of drifting into the past.
 CALENDAR_BASE_DATE = date(2026, 8, 1)
 
 
 def calendar_offset() -> timedelta:
-    """The offset `seed()` applies to every `_ORDERS` date. Exposed so
-    tests exercising the real seed()/simulate_daily_run() path can convert
-    their literal Aug-2026 assertions without duplicating this formula.
-
-    `simulate_daily_run()` does NOT call this directly -- it derives its
-    per-order offset from the order's already-persisted `order_date`
-    instead (see its docstring), so that a seed() and a later
-    simulate_daily_run() call landing on different real days still agree
-    on the offset actually baked into that order."""
-    return date.today() - CALENDAR_BASE_DATE  # noqa: DTZ011 -- wall-clock anchor by design, see module docstring
+    """Offset `seed()` applies to every `_ORDERS` date; exposed for tests asserting literal dates."""
+    return date.today() - CALENDAR_BASE_DATE  # noqa: DTZ011 (wall-clock anchor by design)
 
 
 class _OrderSeed(TypedDict):
+    """One worked-example purchase order's seed fixture: header fields plus its single line."""
+
     purchase_order_number: str
     retailer_code: str
     material_code: str
@@ -183,19 +161,20 @@ _SCENARIOS = [
     ("AMZ-780112", amz2_days),
 ]
 
-# Original (unshifted) order_date per order, exactly what `_ORDERS` was
-# built from -- `simulate_daily_run()` diffs this against the order's
-# actually-persisted order_date to recover the per-order offset `seed()`
-# applied, without calling date.today() a second time.
+# Original (unshifted) order_date per order, exactly what `_ORDERS` was built
+# from. `simulate_daily_run()` diffs this against the persisted order_date to
+# recover the offset `seed()` applied, without calling date.today() again.
 _ORIGINAL_ORDER_DATE: dict[str, date] = {
     purchase_order_number: _day_before_first(days) for purchase_order_number, days in _SCENARIOS
 }
 
 
 class _NegotiationCreateSpec(TypedDict):
-    """When (day) and how a PO delivery-change request is fired during that
-    order's day-by-day replay -- `trigger_date` matches a `projection_date`
-    already present in that order's own scenario days above."""
+    """When and how a PO delivery-change request is fired during an order's replay.
+
+    `trigger_date` must match a `projection_date` already present in that order's
+    own scenario days.
+    """
 
     trigger_date: date
     reason_code: str
@@ -214,41 +193,40 @@ class _NegotiationRespondSpec(TypedDict):
 
 
 class _NegotiationScenario(TypedDict, total=False):
+    """One order's PO delivery-change-request outcome, as up to three optional beats.
+
+    Exactly one of `respond`/`expire_as_of` is set per scenario.
+    """
+
     create: _NegotiationCreateSpec
     respond: _NegotiationRespondSpec
-    # Fired once the order's day-loop has finished, instead of on a
-    # specific day -- the AMZ-780112 request is deliberately never
-    # responded to, so it must be swept for a timeout instead.
+    # Fired once the order's day-loop has finished rather than on a specific day:
+    # AMZ-780112 is deliberately never responded to, so it must be swept instead.
     expire_as_of: datetime
 
 
-# One outcome per order, demonstrating all four PO delivery-change-request
-# retailer-response paths against the four existing worked-example
-# scenarios/orders -- see docs/redesign-schema.md and
-# app/services/penalties/delivery_change.py's module docstring for the
-# feature itself. Every `now`/`as_of` is anchored inside this scenario's
-# fictional Aug-2026 calendar (never wall-clock) so timestamps stay
-# chronologically correct relative to the day-by-day replay.
+# One outcome per order, covering all four retailer-response paths. Every
+# `now`/`as_of` is anchored inside the fictional Aug-2026 calendar, never
+# wall-clock, so timestamps stay chronologically correct against the replay.
 _NEGOTIATION_SCENARIOS: dict[str, _NegotiationScenario] = {
     # ACCEPTED: SAP confirms the real production cut (1,850/2,000) on Aug 5;
     # Walmart accepts a 3-day extension the next day. current_delivery_date
-    # shifts Aug 11 -> Aug 14, current_required_ship_date Aug 9 -> Aug 12 by
-    # the same delta -- so the Aug 9 appointment-miss day, once the day-loop
-    # reaches it, is re-projected against the new required ship date instead
-    # of the original one.
+    # shifts Aug 11 -> Aug 14, current_required_ship_date Aug 9 -> Aug 12 by the
+    # same delta, so the Aug 9 appointment-miss day is re-projected against the
+    # new required ship date rather than the original one.
     "WMT-100234": {
         "create": {
             "trigger_date": date(2026, 8, 5),
             "reason_code": "SHORTAGE",
             "proposed_delivery_date": date(2026, 8, 14),
             "notes": "SAP confirms a real cut to 1,850/2,000; requesting 3 extra days.",
-            "now": datetime(2026, 8, 5, 9, 0),  # noqa: DTZ001 -- naive by design
+            "now": datetime(2026, 8, 5, 9, 0),  # noqa: DTZ001 (naive by design)
         },
         "respond": {
             "trigger_date": date(2026, 8, 6),
             "decision": "ACCEPTED",
             "countered_delivery_date": None,
-            "now": datetime(2026, 8, 6, 9, 0),  # noqa: DTZ001 -- naive by design
+            "now": datetime(2026, 8, 6, 9, 0),  # noqa: DTZ001 (naive by design)
         },
     },
     # COUNTERED: DC reschedules the dock appointment a day later on Aug 8;
@@ -260,18 +238,18 @@ _NEGOTIATION_SCENARIOS: dict[str, _NegotiationScenario] = {
             "reason_code": "DELAY",
             "proposed_delivery_date": date(2026, 8, 19),
             "notes": "Dock appointment rescheduled a day later; requesting buffer.",
-            "now": datetime(2026, 8, 8, 9, 0),  # noqa: DTZ001 -- naive by design
+            "now": datetime(2026, 8, 8, 9, 0),  # noqa: DTZ001 (naive by design)
         },
         "respond": {
             "trigger_date": date(2026, 8, 9),
             "decision": "COUNTERED",
             "countered_delivery_date": date(2026, 8, 17),
-            "now": datetime(2026, 8, 9, 9, 0),  # noqa: DTZ001 -- naive by design
+            "now": datetime(2026, 8, 9, 9, 0),  # noqa: DTZ001 (naive by design)
         },
     },
     # REJECTED: the confirmed cut worsens to 1,080/1,200 and production
     # escalates to BEHIND on Aug 7, with no recovery for the rest of the
-    # scenario; Amazon rejects the next day. No shadow tracking -- the daily
+    # scenario; Amazon rejects the next day. No shadow tracking: the daily
     # projection continues against the original (unchanged) date.
     "AMZ-778501": {
         "create": {
@@ -279,39 +257,39 @@ _NEGOTIATION_SCENARIOS: dict[str, _NegotiationScenario] = {
             "reason_code": "SHORTAGE",
             "proposed_delivery_date": date(2026, 8, 18),
             "notes": "Confirmed cut worsens to 1,080/1,200; production status BEHIND.",
-            "now": datetime(2026, 8, 7, 9, 0),  # noqa: DTZ001 -- naive by design
+            "now": datetime(2026, 8, 7, 9, 0),  # noqa: DTZ001 (naive by design)
         },
         "respond": {
             "trigger_date": date(2026, 8, 8),
             "decision": "REJECTED",
             "countered_delivery_date": None,
-            "now": datetime(2026, 8, 8, 9, 0),  # noqa: DTZ001 -- naive by design
+            "now": datetime(2026, 8, 8, 9, 0),  # noqa: DTZ001 (naive by design)
         },
     },
-    # EXPIRED/timeout: a QA hold is flagged on Aug 14, exactly 2 days before
-    # the Aug 16 required ship date -- right at the min_lead_days=2 boundary.
-    # reason_code=OTHER (a QA/quality hold is neither a quantity shortage
-    # nor a carrier/transit delay). Never responded to; Amazon's 24h SLA
-    # means it expires at Aug 15 09:00, well before the scenario's last day
-    # (Aug 17), so the recovery sweep is exercised at the end of the
-    # day-loop instead of a `respond` entry.
+    # EXPIRED/timeout: a QA hold is flagged on Aug 14, exactly 2 days before the
+    # Aug 16 required ship date, right at the min_lead_days=2 boundary.
+    # reason_code=OTHER, since a quality hold is neither a quantity shortage nor a
+    # transit delay. Never responded to; Amazon's 24h SLA expires it at Aug 15
+    # 09:00, so the recovery sweep runs at the end of the day-loop instead.
     "AMZ-780112": {
         "create": {
             "trigger_date": date(2026, 8, 14),
             "reason_code": "OTHER",
             "proposed_delivery_date": date(2026, 8, 21),
             "notes": "QA hold on finished batch; requesting buffer in case release slips",
-            "now": datetime(2026, 8, 14, 9, 0),  # noqa: DTZ001 -- naive by design
+            "now": datetime(2026, 8, 14, 9, 0),  # noqa: DTZ001 (naive by design)
         },
-        "expire_as_of": datetime(2026, 8, 17, 9, 0),  # noqa: DTZ001 -- naive by design
+        "expire_as_of": datetime(2026, 8, 17, 9, 0),  # noqa: DTZ001 (naive by design)
     },
 }
 
 
 def _carrier_by_code(master_data: MasterDataRepository, carrier_code: str) -> dict:
-    """`MasterDataRepository` has no `get_carrier_by_code` (only
-    `get_carrier(id)`/`list_carriers()`); this small demo-scale scan is
-    the seed data's own lookup, not a repository method."""
+    """Look up a carrier by code, scanning `list_carriers()`.
+
+    `MasterDataRepository` exposes no code-based getter, and this demo-scale scan
+    is the seed data's own concern rather than a repository method.
+    """
     carrier = next((c for c in master_data.list_carriers() if c["carrier_code"] == carrier_code), None)
     if carrier is None:
         raise ValueError(f"Unknown carrier_code={carrier_code!r}. Call seed_master_data() first.")
@@ -323,9 +301,9 @@ def seed(
     purchase_orders: PurchaseOrderRepository,
     fulfillment: FulfillmentRepository,
     master_data: MasterDataRepository,
+    retailer_agreements: RetailerAgreementRepository,
 ) -> dict[str, int]:
-    """Idempotent: safe to call repeatedly. Skips anything that already
-    exists rather than erroring on a duplicate key."""
+    """Seed rules and worked-example orders, skipping any that already exist."""
     counts = {"rules": 0, "orders": 0}
 
     existing_rules = {r["rule_code"] for r in rules.list_rules()}
@@ -336,8 +314,9 @@ def seed(
             assert retailer is not None, (
                 f"Unknown retailer_code={retailer_code!r}. Call seed_master_data() first."
             )
+            retailer_agreement_id = ensure_placeholder_retailer_agreement(retailer_agreements, retailer)
             fields = {k: v for k, v in rule_dict.items() if k != "retailer_code"}
-            rules.add_rule(retailer_id=retailer["id"], **fields)
+            rules.add_rule(retailer_agreement_id=retailer_agreement_id, **fields)
             counts["rules"] += 1
 
     offset = calendar_offset()
@@ -372,10 +351,9 @@ def seed(
             material_id=material["id"],
             plant_id=plant["id"],
         )
-        # One delivery header per PO -- every day's shipment update attaches
-        # to it (see simulate_daily_run). Kept minimal: no ship_from_plant_id/
-        # ship_to_location_id, neither of which the projection/mitigation
-        # engines read.
+        # One delivery header per PO; every day's shipment update attaches to it.
+        # Kept minimal: neither engine reads ship_from_plant_id or
+        # ship_to_location_id.
         fulfillment.add_delivery(
             delivery_number=f"DELIV-{o['purchase_order_number']}",
             purchase_order_id=purchase_order["id"],
@@ -392,18 +370,13 @@ def simulate_daily_run(
     projection_service: ProjectionService,
     delivery_change_service: PoDeliveryChangeRequestService,
 ) -> list[dict]:
-    """Walks all four scenarios day by day: writes each day's facts, runs
-    the projection, and marks the order DELIVERED after its final day.
+    """Walk all four scenarios day by day, writing facts and running projections.
 
-    Interleaved into each order's day-loop, at the calendar days fixed by
-    `_NEGOTIATION_SCENARIOS`, is exactly one PO delivery-change-request
-    negotiation outcome per order -- ACCEPTED/COUNTERED/REJECTED/EXPIRED,
-    one of each, so all four retailer-response paths are demonstrated end
-    to end against real day-by-day scenario replay. Each accept/counter/
-    reject/expire call re-triggers `ProjectionService.run_for_purchase_order`
-    internally (see `PoDeliveryChangeRequestService`), so no extra
-    projection call is made here -- the next day's own iteration already
-    reflects the outcome.
+    Marks each order DELIVERED after its final day. One delivery-change-request
+    outcome is interleaved per order, at the days fixed by
+    `_NEGOTIATION_SCENARIOS`, covering all four retailer-response paths. Each of
+    those calls re-triggers `ProjectionService.run_for_purchase_order` itself, so
+    no extra projection call is made here.
     """
     summaries = []
     for purchase_order_number, days in _SCENARIOS:
@@ -427,14 +400,13 @@ def simulate_daily_run(
         )
         carrier = _carrier_by_code(master_data, carrier_code)
 
-        # Derived from what's actually persisted, not a fresh date.today()
-        # call -- seed() and this call can land on different real days, and
-        # this must recover exactly the offset seed() baked into this order
-        # for the two to agree (see calendar_offset()'s docstring).
+        # Derived from what is persisted rather than a fresh date.today() call:
+        # seed() and this call can land on different real days, so the offset must
+        # be recovered from the order itself for the two to agree.
         offset = purchase_order["order_date"] - _ORIGINAL_ORDER_DATE[purchase_order_number]
 
         negotiation_scenario = _NEGOTIATION_SCENARIOS.get(purchase_order_number)
-        negotiation_request_id: str | None = None
+        negotiation_id: UUID | None = None
         negotiation_result: dict[str, Any] | None = None
         # Idempotent, same convention as seed(): a re-run must not
         # double-create a request or error retrying a terminal one. If this
@@ -451,11 +423,10 @@ def simulate_daily_run(
 
         daily_results = []
         for snapshot, note in days:
-            # Every date that flows from scenario_data_projection.py into a
-            # repository write call (or the projection call itself) is
-            # shifted here, at the point of use -- the negotiation
-            # trigger-date comparisons below deliberately keep comparing the
-            # original, unshifted snapshot.projection_date instead.
+            # Every date flowing from scenario_data_projection.py into a repository
+            # write or the projection call is shifted here, at the point of use.
+            # The negotiation trigger-date comparisons below deliberately keep
+            # comparing the original, unshifted snapshot.projection_date.
             shifted_date = snapshot.projection_date + offset
             confirmation = fulfillment.add_order_confirmation(
                 confirmation_number=f"CONF-{purchase_order_number}-{shifted_date.isoformat()}",
@@ -493,15 +464,10 @@ def simulate_daily_run(
             )
 
             result = projection_service.run_for_purchase_order(purchase_order_id, shifted_date)
-            # Per-model dollar breakdown, not just the combined total --
-            # summed across whichever violations happen to be shortage-
-            # vs. delay-priced for this retailer's rule set (usually one
-            # of each, but this doesn't assume that -- a retailer with
-            # two shortage-type rules active would sum both correctly).
-            # Both the raw (if-realized) and blended (probability-weighted)
-            # sums are reported -- a display surface must never show only
-            # the blended figure (see docs/DEMO.md and app/api/v1/penalties/
-            # projections.py's response-shape note).
+            # Per-model dollar breakdown, summed across however many shortage- or
+            # delay-priced violations this retailer's rule set produces. Both the
+            # raw (if-realized) and blended (probability-weighted) sums are
+            # reported: a display surface must never show only the blended figure.
             shortage_penalty_amount = sum(
                 v.penalty_amount for v in result.violations if v.violation_type in SHORTAGE_VIOLATION_TYPES
             )
@@ -536,7 +502,7 @@ def simulate_daily_run(
                 create_spec = negotiation_scenario.get("create")
                 if (
                     create_spec is not None
-                    and negotiation_request_id is None
+                    and negotiation_id is None
                     and snapshot.projection_date == create_spec["trigger_date"]
                 ):
                     created = delivery_change_service.create_request(
@@ -546,17 +512,17 @@ def simulate_daily_run(
                         notes=create_spec["notes"],
                         now=create_spec["now"] + offset,
                     )
-                    negotiation_request_id = created["request_id"]
+                    negotiation_id = created["id"]
 
                 respond_spec = negotiation_scenario.get("respond")
                 if (
                     respond_spec is not None
-                    and negotiation_request_id is not None
+                    and negotiation_id is not None
                     and negotiation_result is None
                     and snapshot.projection_date == respond_spec["trigger_date"]
                 ):
                     negotiation_result = delivery_change_service.record_response(
-                        request_id=negotiation_request_id,
+                        delivery_change_request_id=negotiation_id,
                         decision=respond_spec["decision"],
                         countered_delivery_date=(
                             respond_spec["countered_delivery_date"] + offset
@@ -569,9 +535,7 @@ def simulate_daily_run(
         expire_as_of = None if negotiation_scenario is None else negotiation_scenario.get("expire_as_of")
         if expire_as_of is not None:
             expired = delivery_change_service.expire_stale(as_of=expire_as_of + offset)
-            negotiation_result = next(
-                (row for row in expired if row["request_id"] == negotiation_request_id), None
-            )
+            negotiation_result = next((row for row in expired if row["id"] == negotiation_id), None)
 
         purchase_orders.set_order_status(purchase_order_id, "DELIVERED")
         summary: dict[str, Any] = {"purchase_order_id": str(purchase_order_id), "days": daily_results}

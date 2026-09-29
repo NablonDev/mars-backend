@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -e
+
+# Find staged Python files (Added, Copied, Modified)
+STAGED_PY_FILES=$(git diff --cached --name-only --diff-filter=ACM | grep '\.py$' || true)
+
+if [ -z "$STAGED_PY_FILES" ]; then
+    exit 0
+fi
+
+echo "🔍 [mars-backend] Running pre-commit validation on staged Python files..."
+
+# 1. Ruff Linter
+echo "  ⚡ Running ruff check..."
+if ! uv run ruff check $STAGED_PY_FILES; then
+    echo "❌ Ruff lint check failed. Fix errors above before committing."
+    exit 1
+fi
+
+# 2. Ruff Formatter Check
+echo "  🎨 Running ruff format --check..."
+if ! uv run ruff format --check $STAGED_PY_FILES; then
+    echo "❌ Ruff format check failed. Run 'uv run ruff format <file>' to reformat."
+    exit 1
+fi
+
+# 3. Mypy Type Checker
+echo "  🛡️  Running mypy type check..."
+if ! uv run mypy $STAGED_PY_FILES; then
+    echo "❌ Mypy type check failed. Fix type errors above before committing."
+    exit 1
+fi
+
+echo "✅ [mars-backend] All pre-commit checks passed!"
+exit 0

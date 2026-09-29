@@ -21,6 +21,9 @@ from datetime import date, timedelta
 import pytest
 
 from app.services.penalties.projection import (
+    APPLIES_PER_DAY,
+    BASIS_ORDER_VALUE,
+    BASIS_SHORTFALL_VALUE,
     SHORTAGE_LOCKED_IN_PROBABILITY,
     AppointmentStatus,
     CalcType,
@@ -259,6 +262,33 @@ class TestStackingModes:
             ProjectionEngine().project(snap, self._two_rules(), stacking_mode="AVERAGE")
 
 
+class TestUnpriceableFamilyIsSkippedNotRaised:
+    """A rule whose violation_type this engine cannot price is skipped and
+    recorded, never raised on, so one unpriceable rule cannot blow up an entire
+    retailer's projection run with an unhandled ValueError."""
+
+    def test_quality_and_shortage_rules_together_return_exactly_one_violation(self):
+        snap = make_snapshot(confirmed_qty=900)  # guarantees a nonzero shortage penalty
+        rules = [
+            PenaltyRule("R-QUALITY", "QUALITY_DEFECT", CalcType.PER_UNIT, rate=1.0),
+            PenaltyRule("R-SHORT", "SHORT_SHIP", CalcType.PER_UNIT, rate=2.0, threshold_pct=0.0),
+        ]
+        result = ProjectionEngine().project(snap, rules, stacking_mode="SUM")
+        assert len(result.violations) == 1
+        assert result.violations[0].rule_id == "R-SHORT"
+
+    def test_the_unpriceable_rule_is_recorded_as_skipped_with_a_reason(self):
+        snap = make_snapshot()
+        rules = [PenaltyRule("R-QUALITY", "QUALITY_DEFECT", CalcType.PER_UNIT, rate=1.0)]
+        result = ProjectionEngine().project(snap, rules, stacking_mode="SUM")
+        assert result.violations == []
+        assert len(result.skipped) == 1
+        assert result.skipped[0].rule_id == "R-QUALITY"
+        assert result.skipped[0].violation_type == "QUALITY_DEFECT"
+        assert result.skipped[0].skip_reason == "NOT_ENGINE_PRICEABLE"
+        assert result.total_expected_penalty_amount == 0.0
+
+
 # ---------------------------------------------------------------------------
 # The demand_exception finding: the review correctly noted it looked inert
 # in the mock data. That was a timing artifact (days_points was 0 that day),
@@ -446,13 +476,41 @@ class TestTieredCalcType:
         penalty = price_shortage_penalty(rule, order_qty=1000, unit_price=10.0, shortfall_units=500)
         assert penalty == 300.0
 
-    def test_tiered_not_yet_supported_for_delay_rules(self):
-        # Honest, explicit failure -- not yet built, and it says so.
+    def test_marginal_tiers_sum_per_band_portions(self):
+        # MARGINAL bands [0, 0.05) at 1%, [0.05, 0.10) at 2%, [0.10, None) at 3% of a
+        # $100,000 PO. A 12% shortfall crosses all three bands, so the penalty sums each
+        # band's own rate applied to the slice of the 12% falling inside it:
+        # 0.05*0.01 + 0.05*0.02 + 0.02*0.03 = 0.0021 of basis -> $50 + $100 + $60 = $210.
         rule = PenaltyRule(
-            "R1", "OTIF_LATE", CalcType.TIERED, threshold_pct=0.0, tiers=[PenaltyRuleTier(0, 1, 0.5)]
+            rule_id="R-MARGINAL",
+            violation_type="FILL_RATE",
+            calc_type=CalcType.TIERED,
+            threshold_pct=0.0,
+            tiers=[
+                PenaltyRuleTier(0.00, 0.05, 0.01, tier_application="MARGINAL"),
+                PenaltyRuleTier(0.05, 0.10, 0.02, tier_application="MARGINAL"),
+                PenaltyRuleTier(0.10, None, 0.03, tier_application="MARGINAL"),
+            ],
         )
-        with pytest.raises(NotImplementedError):
-            price_delay_penalty(rule, order_qty=1000, unit_price=10.0)
+        penalty = price_shortage_penalty(rule, order_qty=1000, unit_price=100.0, shortfall_units=120)
+        assert penalty == pytest.approx(210.0)
+
+    def test_tiered_delay_rule_bands_on_days_late_without_raising(self):
+        # Bands measure days_late directly (tier_basis=DAYS_LATE), CLIFF lookup:
+        # [0, 5) at 1%, [5, None) at 3% of order value. 10 days late lands in
+        # the open top band -> 0.03 x $10,000 = $300.
+        rule = PenaltyRule(
+            "R1",
+            "OTIF_LATE",
+            CalcType.TIERED,
+            threshold_pct=0.0,
+            tiers=[
+                PenaltyRuleTier(0, 5, 0.01, tier_basis="DAYS_LATE"),
+                PenaltyRuleTier(5, None, 0.03, tier_basis="DAYS_LATE"),
+            ],
+        )
+        penalty = price_delay_penalty(rule, order_qty=1000, unit_price=10.0, days_late=10)
+        assert penalty == pytest.approx(300.0)
 
 
 class TestAsnLateMapping:
@@ -462,3 +520,126 @@ class TestAsnLateMapping:
         result = ProjectionEngine().project(snap, [rule])
         assert result.violations[0].violation_type == "ASN_LATE"
         assert result.violations[0].probability == compute_delay_probability(snap)
+
+
+# ---------------------------------------------------------------------------
+# Real labelled-contract cases: per-day delay accrual with a cap on the
+# accrued total, and a SHORTFALL_VALUE-basis fill-rate rule.
+# ---------------------------------------------------------------------------
+
+
+class TestDelayPerDayAccrualWithCap:
+    """4% of COST_OF_GOODS per day late, capped at 20% of the same basis."""
+
+    def _rule(self) -> PenaltyRule:
+        return PenaltyRule(
+            rule_id="R-GT03",
+            violation_type="OTIF_LATE",
+            calc_type=CalcType.PERCENT_OF_PO,
+            rate=0.04,
+            basis_type=BASIS_ORDER_VALUE,
+            applies_per=APPLIES_PER_DAY,
+            cap_amount=7200.00,  # 20% of the $36,000.00 COGS basis
+        )
+
+    def test_cap_binds_on_the_accrued_total_not_per_day(self):
+        # COGS = 2000 x $18.00 = $36,000.00; 10 days x 4%/day = 40%
+        # uncapped, so the 20% cap binds at $7,200.00, not $14,400.00.
+        penalty = price_delay_penalty(self._rule(), order_qty=2000, unit_price=18.00, days_late=10)
+        assert penalty == 7200.00
+
+    def test_uncapped_below_the_cap(self):
+        # 3 days x 4%/day = 12% of $36,000.00 = $4,320.00, under the cap.
+        penalty = price_delay_penalty(self._rule(), order_qty=2000, unit_price=18.00, days_late=3)
+        assert penalty == 4320.00
+
+    def test_zero_days_late_prices_to_zero(self):
+        penalty = price_delay_penalty(self._rule(), order_qty=2000, unit_price=18.00, days_late=0)
+        assert penalty == 0.00
+
+    def test_no_accrual_without_applies_per_day(self):
+        # Same rate and cap, but applies_per unset: single flat application,
+        # not scaled by days_late.
+        rule = PenaltyRule(
+            rule_id="R-FLAT",
+            violation_type="OTIF_LATE",
+            calc_type=CalcType.PERCENT_OF_PO,
+            rate=0.04,
+            basis_type=BASIS_ORDER_VALUE,
+            cap_amount=7200.00,
+        )
+        penalty = price_delay_penalty(rule, order_qty=2000, unit_price=18.00, days_late=10)
+        assert penalty == 1440.00
+
+
+class TestDelayWeeklyAccrual:
+    """1%/week of COST_OF_GOODS, rounding_convention-driven period counts."""
+
+    def _rule(self, rounding_convention: str) -> PenaltyRule:
+        return PenaltyRule(
+            rule_id="R-WEEKLY",
+            violation_type="OTIF_LATE",
+            calc_type=CalcType.PERCENT_OF_PO,
+            rate=0.01,
+            basis_type=BASIS_ORDER_VALUE,
+            applies_per="WEEK",
+            rounding_convention=rounding_convention,
+        )
+
+    def test_round_up_to_period_charges_a_full_week_for_any_partial_one(self):
+        # 10 days late / 7-day week = 1.4286 weeks -> rounds up to 2 whole weeks,
+        # not 10: 2 x 1% x (1000 x $10.00) = $200.00.
+        penalty = price_delay_penalty(
+            self._rule("ROUND_UP_TO_PERIOD"), order_qty=1000, unit_price=10.0, days_late=10
+        )
+        assert penalty == pytest.approx(200.0)
+
+    def test_round_down_to_period_charges_only_completed_weeks(self):
+        # 10 days late -> 1 completed week: 1 x 1% x $10,000 = $100.00.
+        penalty = price_delay_penalty(
+            self._rule("ROUND_DOWN_TO_PERIOD"), order_qty=1000, unit_price=10.0, days_late=10
+        )
+        assert penalty == pytest.approx(100.0)
+
+    def test_prorate_exact_charges_the_exact_fractional_week(self):
+        # 10 days late -> 10/7 weeks exactly: (10 / 7) x 1% x $10,000 ~= $142.86.
+        penalty = price_delay_penalty(
+            self._rule("PRORATE_EXACT"), order_qty=1000, unit_price=10.0, days_late=10
+        )
+        assert penalty == pytest.approx(10 / 7 * 100.0, abs=0.01)
+
+
+class TestShortfallValueBasisThreshold:
+    """7% of SHORTFALL_VALUE, gated on a 95% required fill rate."""
+
+    def _rule(self, threshold_pct: float = 0.95) -> PenaltyRule:
+        return PenaltyRule(
+            rule_id="R-FILLRATE",
+            violation_type="FILL_RATE",
+            calc_type=CalcType.PERCENT_OF_PO,
+            rate=0.07,
+            basis_type=BASIS_SHORTFALL_VALUE,
+            threshold_pct=threshold_pct,
+        )
+
+    def test_below_threshold_fires_on_the_full_shortfall_value(self):
+        # 2000 - 1880 = 120 units short = $2,160.00 invoice value; a 94%
+        # fill rate is below the 95% floor, so 7% of $2,160.00 = $151.20.
+        penalty = price_shortage_penalty(self._rule(), order_qty=2000, unit_price=18.00, shortfall_units=120)
+        assert penalty == 151.20
+
+    def test_fill_rate_exactly_at_threshold_does_not_fire(self):
+        # 100 units short on a 2000-unit order is exactly a 95% fill rate:
+        # meeting the floor is compliant, not a breach (half-open bound).
+        penalty = price_shortage_penalty(self._rule(), order_qty=2000, unit_price=18.00, shortfall_units=100)
+        assert penalty == 0.0
+
+    def test_fill_rate_above_threshold_does_not_fire(self):
+        penalty = price_shortage_penalty(self._rule(), order_qty=2000, unit_price=18.00, shortfall_units=50)
+        assert penalty == 0.0
+
+    def test_shortfall_value_basis_still_respects_cap(self):
+        rule = self._rule()
+        rule.cap_amount = 100.00
+        penalty = price_shortage_penalty(rule, order_qty=2000, unit_price=18.00, shortfall_units=120)
+        assert penalty == 100.00

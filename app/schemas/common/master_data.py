@@ -1,11 +1,6 @@
-"""API schemas for `common`-schema master data: retailers, retailer-owned
-locations, SKUs, materials/material-masters, plants, and carriers.
+"""API schemas for master data: retailers, locations, SKUs, materials, plants, and carriers.
 
-Was `app/schemas/fine_master_data.py`, rewritten against the ERP-normalized
-`common` schema (Phase 2 models) -- every row now has a UUID surrogate `id`
-in addition to its natural business code, so request bodies carry the
-business code (`retailer_code`, `sku_code`, ...) and response bodies add the
-surrogate `id` on top.
+Request bodies carry the natural business code; response bodies add the surrogate `id`.
 """
 
 from __future__ import annotations
@@ -17,6 +12,8 @@ from pydantic import BaseModel, Field
 
 
 class RetailerRequest(BaseModel):
+    """Request body for creating/updating a retailer master-data record."""
+
     retailer_code: str
     retailer_name: str
     priority_tier: str | None = None
@@ -28,10 +25,14 @@ class RetailerRequest(BaseModel):
 
 
 class RetailerResponse(RetailerRequest):
+    """Response shape for a `retailer` row."""
+
     id: UUID
 
 
 class RetailerLocationRequest(BaseModel):
+    """Request body for creating or updating a retailer-owned location record."""
+
     location_code: str
     location_name: str | None = None
     location_type: str | None = Field(default=None, pattern="^(PLANT|DC|STORE|OTHER)$")
@@ -45,30 +46,42 @@ class RetailerLocationRequest(BaseModel):
 
 
 class RetailerLocationResponse(RetailerLocationRequest):
+    """Response shape for a `retailer_location` row."""
+
     id: UUID
     retailer_id: UUID
 
 
 class SkuRequest(BaseModel):
+    """Request body for creating/updating a SKU master-data record."""
+
     sku_code: str
     description: str | None = None
     material_id: UUID | None = None
 
 
 class SkuResponse(SkuRequest):
+    """Response shape for a `sku` row."""
+
     id: UUID
 
 
 class MaterialRequest(BaseModel):
+    """Request body for creating/updating a material master-data record."""
+
     material_code: str
     description: str | None = None
 
 
 class MaterialResponse(MaterialRequest):
+    """Response shape for a `material` row."""
+
     id: UUID
 
 
 class MaterialMasterRequest(BaseModel):
+    """Request body for creating or updating a plant-specific SAP material-master record."""
+
     material_id: UUID
     sap_material_number: str
     plant_id: UUID | None = None
@@ -83,24 +96,34 @@ class MaterialMasterRequest(BaseModel):
 
 
 class MaterialMasterResponse(MaterialMasterRequest):
+    """Response shape for a `material_master` row."""
+
     id: UUID
 
 
 class PlantRequest(BaseModel):
+    """Request body for creating/updating a plant master-data record."""
+
     plant_code: str
     plant_name: str | None = None
     country_code: str | None = None
 
 
 class PlantResponse(PlantRequest):
+    """Response shape for a `plant` row."""
+
     id: UUID
 
 
 class CarrierRequest(BaseModel):
+    """Request body for creating/updating a carrier master-data record."""
+
     carrier_code: str
     carrier_name: str
     historical_reliability_score: float = Field(default=90.0, ge=0, le=100)
 
 
 class CarrierResponse(CarrierRequest):
+    """Response shape for a `carrier` row."""
+
     id: UUID

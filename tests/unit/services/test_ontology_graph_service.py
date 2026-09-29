@@ -5,8 +5,8 @@ from uuid import uuid4
 
 from rdflib import Graph
 
-from app.models.cmir.cmir_record import CmirRecord
-from app.models.common.material import Material, MaterialMaster
+from app.models.cmir import CmirRecord
+from app.models.common import Material, MaterialMaster
 from app.services.ontology.graph_service import OntologyGraphService
 from app.services.ontology.ontology_builder import OntologyBuilder
 

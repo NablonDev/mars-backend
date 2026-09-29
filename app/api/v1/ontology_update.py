@@ -9,6 +9,8 @@ the only caller of `graph.invoke`/`Command(resume=...)` for this graph.
 
 from __future__ import annotations
 
+from typing import Annotated
+
 from fastapi import APIRouter, Depends
 
 from app.api.dependencies import get_ontology_update_service
@@ -30,7 +32,7 @@ router = APIRouter(tags=["ontology-update"])
 )
 def start_ontology_update(
     body: StartOntologyUpdateRequest,
-    service: OntologyUpdateRunService = Depends(get_ontology_update_service),
+    service: Annotated[OntologyUpdateRunService, Depends(get_ontology_update_service)],
 ) -> Envelope[OntologyUpdateResponse]:
     result = service.start(body.message)
     return success_envelope(result)
@@ -43,7 +45,7 @@ def start_ontology_update(
 def submit_ontology_update_decision(
     thread_id: str,
     body: OntologyUpdateDecisionRequest,
-    service: OntologyUpdateRunService = Depends(get_ontology_update_service),
+    service: Annotated[OntologyUpdateRunService, Depends(get_ontology_update_service)],
 ) -> Envelope[OntologyUpdateResponse]:
     result = service.submit_decision(thread_id, body.decision)
     return success_envelope(result)

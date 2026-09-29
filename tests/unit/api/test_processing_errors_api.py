@@ -23,6 +23,7 @@ class FakePoValidationService:
                     "id": "55555555-5555-5555-5555-555555555555",
                     "job_item_id": None,
                     "agent_run_id": "00000000-0000-0000-0000-000000001042",
+                    "purchase_order_line_id": str(_KNOWN_LINE_ID),
                     "error_type": "MATERIAL_NOT_FOUND",
                     "error_code": "MATERIAL_NOT_FOUND",
                     "error_message": "No material_master row.",

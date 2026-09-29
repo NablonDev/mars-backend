@@ -1,28 +1,15 @@
-"""Orchestrates master-data, penalty-projection, and penalty-mitigation
-seeding as one idempotent operation, and replays the four worked-example
-scenarios day by day.
-
-Was `app/services/seeding/service.py`'s `FineSeedingService` (renamed
-`PenaltySeedingService`). Rewritten against the Phase 2 `common`/
-`penalties`/`process` repositories.
-
-`_truncate_seeded_tables`'s FK-safe ordering is new, hand-derived work this
-phase had to do (Phase 2 didn't -- and couldn't -- resolve it, since two of
-the truncate methods it calls, `PenaltyProjectionRepository.truncate_all`/
-`ActualPenaltyRepository.truncate_all`, didn't exist until this phase added
-them). See `force-seeding-error.txt` at the repo root for the exact class
-of bug a wrong order here reproduces (a `job_item` row still referencing
-a row this deletes).
-"""
+"""Orchestrates idempotent seeding of master data, rules, and scenarios."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from app.repositories.common.delivery_change_request import PoDeliveryChangeRequestRepository
 from app.repositories.common.fulfillment import FulfillmentRepository
 from app.repositories.common.master_data import MasterDataRepository
 from app.repositories.common.purchase_order import PurchaseOrderRepository
-from app.repositories.penalties.delivery_change_request import PoDeliveryChangeRequestRepository
+from app.repositories.common.retailer_agreement import RetailerAgreementRepository
+from app.repositories.penalties.dispute import PenaltyDisputeRepository
 from app.repositories.penalties.job_context import (
     PenaltyJobItemContextRepository,
     PenaltyJobRunContextRepository,
@@ -34,6 +21,7 @@ from app.repositories.penalties.summary import PenaltySummaryRepository
 from app.repositories.process.job_queue import JobQueueRepository
 from app.services.penalties.delivery_change import PoDeliveryChangeRequestService
 from app.services.penalties.projection.service import ProjectionService
+from app.services.seeding import dispute as dispute_seed
 from app.services.seeding import master_data as master_data_seed
 from app.services.seeding import mitigation as mitigation_seed
 from app.services.seeding import projection as projection_seed
@@ -41,7 +29,10 @@ from app.services.seeding import projection as projection_seed
 
 @dataclass
 class PenaltySeedingService:
+    """Idempotent seeding and day-by-day scenario replay for the penalties domain."""
+
     master_data: MasterDataRepository
+    retailer_agreements: RetailerAgreementRepository
     rules: PenaltyRuleRepository
     purchase_orders: PurchaseOrderRepository
     fulfillment: FulfillmentRepository
@@ -52,44 +43,58 @@ class PenaltySeedingService:
     penalty_summaries: PenaltySummaryRepository
     penalty_projections: PenaltyProjectionRepository
     actual_penalties: ActualPenaltyRepository
+    disputes: PenaltyDisputeRepository
     job_queue: JobQueueRepository
     penalty_job_item_context: PenaltyJobItemContextRepository
     penalty_job_run_context: PenaltyJobRunContextRepository
 
     def seed_master_data(self, force: bool = False) -> dict:
-        """Idempotent by default: safe to call repeatedly, skips anything
-        that already exists rather than erroring on a duplicate key.
+        """Seed master data, rules, and worked-example fixtures, skipping what already exists.
 
-        force=True instead truncates every seeded table first and reseeds
-        from scratch -- a full reset, not a per-field upsert. Meant for a
-        demo/seed environment, not as a production data-safety feature."""
+        `force=True` truncates every seeded table first and reseeds from scratch (a full
+        reset, not a per-field upsert). Intended for demo/seed environments only.
+        """
         if force:
             self._truncate_seeded_tables()
 
         counts: dict[str, int] = {}
-        counts.update(master_data_seed.seed(self.master_data))
+        counts.update(master_data_seed.seed(self.master_data, self.retailer_agreements))
         counts.update(
-            projection_seed.seed(self.rules, self.purchase_orders, self.fulfillment, self.master_data)
+            projection_seed.seed(
+                self.rules,
+                self.purchase_orders,
+                self.fulfillment,
+                self.master_data,
+                self.retailer_agreements,
+            )
         )
         counts.update(mitigation_seed.seed(self.mitigation_inputs, self.purchase_orders))
+        counts.update(self.seed_disputes())
         return counts
 
-    def _truncate_seeded_tables(self) -> None:
-        """FK-safe truncate order: children before the parents they
-        reference.
+    def seed_disputes(self) -> dict[str, int]:
+        """Seed additive dispute fixtures, leaving the four worked-example POs untouched.
 
-        `penalty_summary`, `penalty_job_item_context`/
-        `penalty_job_run_context`, `mitigation_input`/`mitigation_option`,
-        `po_delivery_change_request`, `penalty_projection`,
-        `actual_penalty`, `job_item`/`job_run`, and every fulfillment fact
-        (`order_confirmation`, `production_schedule`, `shipment`,
-        `demand_exception`, ...) must be cleared before `purchase_order`
-        itself; `purchase_order` and `penalty_rule` must both be cleared
-        before the retailer/material/plant/carrier master data they
-        reference. See the individual repositories' `truncate_all()`
-        docstrings for exactly what each step covers."""
+        Idempotent, like every other `seed_*` step, and callable on its own for tests
+        that need only these fixtures.
+        """
+        return dispute_seed.seed(
+            self.rules,
+            self.purchase_orders,
+            self.fulfillment,
+            self.master_data,
+            self.actual_penalties,
+            self.retailer_agreements,
+        )
+
+    def _truncate_seeded_tables(self) -> None:
+        """Truncate every seeded table in FK-safe order: children before the parents they reference.
+
+        Call order is load-bearing; see `docs/DATABASE.md` for the FK graph.
+        """
         self.penalty_summaries.truncate_all()
         self.penalty_job_item_context.truncate_all()
+        self.disputes.truncate_all()
         self.penalty_job_run_context.truncate_all()
         self.mitigation_inputs.truncate_all()  # also clears mitigation_option
         self.delivery_change_requests.truncate_all()
@@ -97,16 +102,17 @@ class PenaltySeedingService:
         self.actual_penalties.truncate_all()
         self.job_queue.truncate_all()
         self.rules.truncate_all()
+        self.retailer_agreements.truncate_all()
         self.fulfillment.truncate_all()
         self.purchase_orders.truncate_all()
         self.master_data.truncate_all()
 
     def simulate_daily_run(self) -> list[dict]:
-        """Walks all four scenarios day by day: writes each day's facts,
-        runs the projection, and marks the order DELIVERED after its final
-        day. Also interleaves one PO delivery-change-request negotiation
-        outcome per order -- see `projection_seed.simulate_daily_run`'s
-        docstring."""
+        """Replay all four scenarios day by day, writing facts and running projections.
+
+        Marks each order DELIVERED after its final day, and interleaves one PO
+        delivery-change-request negotiation outcome per order.
+        """
         return projection_seed.simulate_daily_run(
             self.purchase_orders,
             self.fulfillment,

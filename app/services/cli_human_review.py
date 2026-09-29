@@ -1,13 +1,18 @@
+"""Console-based human-in-the-loop port for the legacy CLI CMIR ingest job."""
+
 from __future__ import annotations
 
 
 class CLIHumanReviewPort:
-    """Console-based human review used only by the legacy CLI ingest job
-    (scripts/ops/cmir_cli_ingest.py). The API path (app/api/v1) is the primary
-    reviewer surface and does not use this class.
-    """
+    """Console-based human review for the legacy CLI ingest job."""
 
     def request_missing_fields(self, payload: dict) -> dict[str, str]:
+        """Prompt the operator on stdin for each mandatory field the extractor left empty.
+
+        `payload` carries the in-progress CMIR dict under "cmir" and the list of
+        field names still missing under "missing_fields"; the returned mapping
+        feeds straight back into the CLI workflow as the field values to merge in.
+        """
         cmir = payload["cmir"]
         missing = payload["missing_fields"]
 
@@ -22,6 +27,12 @@ class CLIHumanReviewPort:
         return answers
 
     def request_approval(self, payload: dict) -> dict[str, str]:
+        """Print the full CMIR draft and prompt the operator to approve or reject it.
+
+        Loops on stdin until the operator answers 'y'/'yes' or 'n'/'no'; a
+        rejection also prompts for a free-text reason, returned alongside the
+        decision.
+        """
         cmir = payload["cmir"]
 
         print("\n--- Review CMIR before writing to the database ---")

@@ -23,12 +23,13 @@ import pytest
 from langchain_core.messages import ToolMessage
 
 from app.agents.penalties.projection import PenaltyProjectionSummaryOutput
-from app.agents.penalties.projection.prompts.v1 import PROMPT_VERSION
+from app.agents.penalties.projection.prompts.v2 import PROMPT_VERSION
 from app.core.exceptions import BusinessRuleError, ExternalServiceError, NotFoundError, ValidationError
 from app.models.enums import SummaryType
 from app.services.penalties.projection import ProjectionResult, ViolationProjection
 from app.services.penalties.projection.service import ProjectionService
 from app.services.penalties.projection.summary_service import ProjectionSummaryService
+from tests.conftest import make_retailer_agreement
 
 
 class _FakeAIMessage:
@@ -100,8 +101,9 @@ def _seed_flat_rule_order(repos, po_number: str = "ORD-EXP"):
     )
     rule = repos.penalty_rules.add_rule(
         rule_code=f"RULE-{po_number}-FLAT",
-        retailer_id=retailer["id"],
         violation_type="OTIF_LATE",
+        penalty_category="OTIF_LATE",
+        retailer_agreement_id=make_retailer_agreement(repos, retailer["id"]),
         calc_type="FLAT_FEE",
         rate=50.0,
     )
@@ -575,8 +577,9 @@ def test_get_tier_bands_for_rule_tool_cannot_be_pointed_at_a_different_retailers
     other_retailer = repos.master_data.add_retailer("RET-OTHER", "Retailer Other", None, "SUM")
     other_rule = repos.penalty_rules.add_rule(
         rule_code="RULE-OTHER-TIERED",
-        retailer_id=other_retailer["id"],
-        violation_type="SHORTAGE",
+        violation_type="SHORT_SHIP",
+        penalty_category="SHORT_SHIP",
+        retailer_agreement_id=make_retailer_agreement(repos, other_retailer["id"]),
         calc_type="TIERED",
         rate=0.0,
         threshold_pct=0.0,
@@ -705,13 +708,13 @@ def test_ready_output_reconstructed_from_the_rows_own_columns(repos):
 # ---------------------------------------------------------------------------
 
 
-def test_get_latest_ready_not_after_returns_the_prior_ready_row(repos):
+def test_get_latest_not_after_returns_the_prior_ready_row(repos):
     purchase_order_id, _, _ = _seed_flat_rule_order(repos)
     fake_llm = FakeChatClient()
     service = _build_service(repos, fake_llm)
     _schedule_and_run(service, purchase_order_id, as_of_date=date(2026, 8, 5))
 
-    found = repos.penalty_summaries.get_latest_ready_not_after(
+    found = repos.penalty_summaries.get_latest_not_after(
         purchase_order_id, SummaryType.PROJECTION, date(2026, 8, 6)
     )
 
@@ -720,29 +723,34 @@ def test_get_latest_ready_not_after_returns_the_prior_ready_row(repos):
     assert found["status"] == "READY"
 
 
-def test_get_latest_ready_not_after_returns_none_with_no_ready_row(repos):
+def test_get_latest_not_after_also_returns_a_still_pending_row(repos):
+    """Status-agnostic on purpose -- a PENDING row (never picked up by a
+    worker) dated before as_of_date must still be surfaced as PENDING, not
+    treated as if no job exists just because it never reached READY."""
     purchase_order_id, _, _ = _seed_flat_rule_order(repos)
     fake_llm = FakeChatClient()
     service = _build_service(repos, fake_llm)
     # PENDING only -- never generated, so nothing READY exists yet.
     service.get_or_schedule(purchase_order_id, as_of_date=date(2026, 8, 5))
 
-    found = repos.penalty_summaries.get_latest_ready_not_after(
+    found = repos.penalty_summaries.get_latest_not_after(
         purchase_order_id, SummaryType.PROJECTION, date(2026, 8, 6)
     )
 
-    assert found is None
+    assert found is not None
+    assert found["as_of_date"] == date(2026, 8, 5)
+    assert found["status"] == "PENDING"
 
 
-def test_get_latest_ready_not_after_never_looks_ahead(repos):
-    """A READY row dated after the requested date must never be returned --
-    this fallback is nearest-prior-date only, not nearest overall."""
+def test_get_latest_not_after_never_looks_ahead(repos):
+    """A row dated after the requested date must never be returned -- this
+    fallback is nearest-prior-date only, not nearest overall."""
     purchase_order_id, _, _ = _seed_flat_rule_order(repos)
     fake_llm = FakeChatClient()
     service = _build_service(repos, fake_llm)
     _schedule_and_run(service, purchase_order_id, as_of_date=date(2026, 8, 10))
 
-    found = repos.penalty_summaries.get_latest_ready_not_after(
+    found = repos.penalty_summaries.get_latest_not_after(
         purchase_order_id, SummaryType.PROJECTION, date(2026, 8, 5)
     )
 
@@ -781,9 +789,28 @@ def test_get_status_falls_back_to_the_nearest_prior_ready_summary(repos):
     assert job.output.as_of_date == date(2026, 8, 5)
 
 
-def test_get_status_still_raises_when_no_ready_row_exists_at_or_before(repos):
-    """A READY row exists, but only after the requested date -- the
-    fallback must not look ahead, so this is still a genuine 404."""
+def test_get_status_falls_back_to_a_still_pending_prior_job_not_just_ready(repos):
+    """Real bug this guards against: a job requested on an earlier day that
+    a worker never picked up (still PENDING) must still be found and
+    reported as PENDING when polled on a later day with no as_of_date
+    override -- not silently treated as "no job exists" just because it
+    never reached READY."""
+    purchase_order_id, _, _ = _seed_flat_rule_order(repos)
+    fake_llm = FakeChatClient()
+    service = _build_service(repos, fake_llm)
+    service.get_or_schedule(purchase_order_id, as_of_date=date(2026, 8, 5))  # left PENDING, never run
+
+    job = service.get_status(purchase_order_id, as_of_date=date(2026, 8, 6))
+
+    assert job.status == "PENDING"
+    assert job.as_of_date == date(2026, 8, 5)
+    assert job.output is None
+
+
+def test_get_status_still_raises_when_no_row_exists_at_or_before(repos):
+    """A row exists, but only after the requested date -- the fallback
+    must not look ahead, so this is still a genuine 404, regardless of
+    that later row's status."""
     purchase_order_id, _, _ = _seed_flat_rule_order(repos)
     fake_llm = FakeChatClient()
     service = _build_service(repos, fake_llm)
@@ -1123,16 +1150,16 @@ def test_v1_prompt_version_is_registered_on_first_use(repos):
     fake_llm = FakeChatClient()
     service = _build_service(repos, fake_llm)
 
-    assert PROMPT_VERSION == "v1"
+    assert PROMPT_VERSION == "v2"
 
     job = _schedule_and_run(service, purchase_order_id, as_of_date=date(2026, 8, 5))
 
     assert job.status == "READY"
-    assert job.output.prompt_version == "v1"
+    assert job.output.prompt_version == PROMPT_VERSION
 
     registered = repos.agent_registry.get_active("penalty_projection_summary")
     assert registered is not None
-    assert registered["prompt_version"] == "v1"
+    assert registered["prompt_version"] == PROMPT_VERSION
 
     persisted = repos.penalty_summaries.get_by_key(
         purchase_order_id, SummaryType.PROJECTION, date(2026, 8, 5)

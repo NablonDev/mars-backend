@@ -60,9 +60,10 @@ sweep), and `find_stranded_pending_projection_summaries` / `find_stranded_pendin
 | File | What it's responsible for |
 |---|---|
 | `loop.py` | `process_jobs` — the concurrent claim/execute/settle loop that powers the nightly batch (§4 walks through it end to end). Domain-agnostic: also `classify_failure`, `compute_backoff_seconds`, and `WorkerLoopSummary`. (`SweepResult`, the shared return type for both domains' sweep functions, lives in `app/queue/types.py` instead — putting it in `loop.py` would create an import cycle, since `loop.py` imports `dispatch.py`, which imports both domain modules.) |
-| `dispatch.py` | `execute_job` — the dispatch table for a single claimed item: routes `ORDER_RUN`/`PROJECTION_SUMMARY_REGEN` to `penalty_projection.py` and `MITIGATION_SUMMARY_REGEN` to `penalty_mitigation.py` (was `fine_projection.py`/`fine_mitigation.py`). `ClaimedJob.task_type` was renamed `item_type`, matching `process.job_item.item_type`. Everything in `loop.py` exists to call this safely and handle what it raises. |
+| `dispatch.py` | `execute_job` — the dispatch table for a single claimed item: routes `ORDER_RUN`/`PROJECTION_SUMMARY_REGEN` to `penalty_projection.py`, `MITIGATION_RUN`/`MITIGATION_SUMMARY_REGEN` to `penalty_mitigation.py` (was `fine_projection.py`/`fine_mitigation.py`), and `PENALTY_FULL_RUN` to `penalty_full_run.py`. `ClaimedJob.task_type` was renamed `item_type`, matching `process.job_item.item_type`. Everything in `loop.py` exists to call this safely and handle what it raises. |
 | `penalty_projection.py` | `run_projection`/`run_summary` (the actual per-item work for `ORDER_RUN`/`PROJECTION_SUMMARY_REGEN`), `enqueue_daily_run` (builds one `job_run` plus one `ORDER_RUN` `job_item` per OPEN purchase order), and `sweep_stranded_pending_projection_summaries` — a narrow recovery job for one specific durability gap (see §4.3), not a general retry mechanism. Also `sweep_expired_po_delivery_change_requests` (`docs/RUNBOOK.md` §10). |
-| `penalty_mitigation.py` | `run_mitigation_summary` and `sweep_stranded_pending_mitigation_summaries` — the mitigation-summary mirror of `penalty_projection.py`'s per-item work and sweep; mitigation has no nightly-enqueue equivalent (on-demand only). |
+| `penalty_mitigation.py` | `run_mitigation`/`run_mitigation_summary` and `sweep_stranded_pending_mitigation_summaries` — the mitigation-summary mirror of `penalty_projection.py`'s per-item work and sweep; mitigation has no nightly-enqueue equivalent (on-demand only). |
+| `penalty_full_run.py` | `run_full_run` — dispatched for `PENALTY_FULL_RUN` (from `job_type=PENALTY_FULL_RUN_BATCH`): reads the `steps` requested for one job item off `process.job_item.metadata` and calls only those of `run_projection`/`run_summary`/`run_mitigation`/`run_mitigation_summary`, always in that fixed dependency order. Adds no domain logic of its own — pure sequencing on top of the four functions above, mirroring `ORDER_RUN`'s existing `run_projection` → `run_summary` chain in `dispatch.py`. |
 
 ### `scripts/ops/run_daily_batch.py`
 
@@ -172,7 +173,7 @@ For `PROJECTION_SUMMARY_REGEN`, only the summary half runs (it assumes a project
 already exists). Both live in `app/workers/penalty_projection.py`; the mirror
 path for `MITIGATION_SUMMARY_REGEN` lives in `app/workers/penalty_mitigation.py`.
 
-### 4.2 On-demand summary — `POST /purchase-orders/{purchase_order_id}/penalty-projections/summary`
+### 4.2 On-demand summary — `POST /penalties/projections/summary`
 
 `app/api/v1/penalties/projections.py::trigger_penalty_projection_summary`,
 via `ProjectionSummaryService.get_or_schedule` (`app/services/penalties/_summary_base.py`,
@@ -205,7 +206,7 @@ but read by nothing) — removed rather than left sitting there once this
 was confirmed; `get_or_schedule` has no concurrency-bounded inline path to
 configure at all.
 
-`POST /purchase-orders/{purchase_order_id}/penalty-mitigations/summary`
+`POST /penalties/mitigations/summary`
 (`app/api/v1/penalties/mitigations.py`) does the same thing for its
 summary half, via `MitigationSummaryService.get_or_schedule`.
 
@@ -316,7 +317,7 @@ Reorganized, not changed in behavior:
 | Symptom | Look here |
 |---|---|
 | A nightly run didn't finish / didn't start | `scripts/ops/run_daily_batch.py` logs (advisory lock message, or an infra-failure exit); `GET /api/v1/job-runs/{job_run_id}` for counts; check whether the advisory lock (key `837_401_559`) is stuck held by a dead process. |
-| A PO's summary is stuck PENDING | `GET /purchase-orders/{purchase_order_id}/penalty-projections?include=summary` for the `penalty_summary` status; find its `job_item` via the matching `penalties.penalty_job_item_context` row — if there's no `job_item` at all, the next `run_daily_batch.py` sweep will recover it; if there's a stale RUNNING one, `reclaim_stale` recovers it after `JOB_QUEUE_VISIBILITY_TIMEOUT_SECONDS`. Remember (§4.2): nothing drains this on-demand `job_item` except a batch run today -- it will not resolve on its own from `BackgroundTasks`. |
+| A PO's summary is stuck PENDING | `GET /penalties/projections?purchase_order_id=&include=summary` (or the dedicated `GET /penalties/projections/summary?purchase_order_id=&as_of_date=`) for the `penalty_summary` status; find its `job_item` via the matching `penalties.penalty_job_item_context` row — if there's no `job_item` at all, the next `run_daily_batch.py` sweep will recover it; if there's a stale RUNNING one, `reclaim_stale` recovers it after `JOB_QUEUE_VISIBILITY_TIMEOUT_SECONDS`. Remember (§4.2): nothing drains this on-demand `job_item` except a batch run today -- it will not resolve on its own from `BackgroundTasks`. |
 | An item keeps failing and won't stop retrying | `GET /api/v1/job-runs/{job_run_id}/items?status=DEAD` for `last_error_code`; check `classify_failure` in `app/workers/loop.py` for whether that error type should actually be DEAD_LETTER instead of NACK. |
 | I want to add a new job type | Add a `JobTaskType` member (`app/models/enums.py` — needs a migration, since the CHECK constraint is derived from it), handle it in `dispatch.execute_job` (dispatching to `penalty_projection.py`/`penalty_mitigation.py` as appropriate), and decide whether `classify_failure` needs a new non-retryable `AppError` category for it. |
 | I want to change how many workers run concurrently | `settings.job_queue.worker_concurrency` (`JOB_QUEUE_WORKER_CONCURRENCY`) — but raising this without raising `settings.database.pool_size`/`max_overflow` causes a silent stall, not an error. |

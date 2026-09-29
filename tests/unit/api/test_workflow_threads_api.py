@@ -1,5 +1,5 @@
 """API tests for `app/api/v1/workflow_threads.py` -- the shared
-`process.workflow_thread` surface used by both `cmir` and `po_validation`
+`process.workflow_thread` surface used by `cmir` and `po_validation`
 (Phase 7b route redesign, approved plan §6).
 
 Was split across the pre-restructure `test_cmir_api.py` (`/threads/{id}/stage`,
@@ -59,7 +59,7 @@ def _po_stage_dict(
     }
 
 
-class FakeCmirRunService:
+class FakeCmirService:
     def get_stage(self, thread_id):
         if thread_id == THREAD_CMIR:
             return _cmir_stage_dict()
@@ -137,8 +137,8 @@ class FakePoValidationService:
 
 
 @pytest.fixture
-def cmir_run_service():
-    return FakeCmirRunService()
+def cmir_service():
+    return FakeCmirService()
 
 
 @pytest.fixture

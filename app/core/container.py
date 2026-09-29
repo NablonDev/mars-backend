@@ -1,10 +1,13 @@
+"""Composition root wiring config, repositories, agents, and LangGraph runtimes into a singleton Container."""
+
 from __future__ import annotations
 
 import logging
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
+from functools import partial
 from types import SimpleNamespace
 from typing import ClassVar
 
@@ -13,6 +16,7 @@ from typing import ClassVar
 # from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.graph.state import CompiledStateGraph
 from rdflib import Graph as RdfGraph
 
 from app.agents.cmir.graph import build_graph
@@ -21,8 +25,14 @@ from app.agents.ontology_insert.graph import build_ontology_insert_graph
 from app.agents.ontology_insert.nodes import OntologyInsertNodes
 from app.agents.ontology_update.graph import build_ontology_update_graph
 from app.agents.ontology_update.nodes import OntologyUpdateNodes
+from app.agents.penalties.rule_extraction import adapter as rule_extraction_adapter
+from app.agents.penalties.rule_extraction.context import ClauseClassificationContext, RuleFactContext
+from app.agents.penalties.rule_extraction.graph import build_graph as build_rule_extraction_graph
+from app.agents.penalties.rule_extraction.nodes import RuleExtractionNodes
+from app.agents.penalties.rule_extraction.schema import PenaltyFactList, PenaltyRuleExtraction
 from app.agents.po_validation.graph import build_po_validation_graph
 from app.agents.po_validation.nodes import PoValidationNodes
+from app.agents.providers.azure_openai import AzureOpenAIChatClient
 from app.core.config import EmailConfig, LLMConfig, ServiceBusConfig, Settings, get_settings
 from app.db.base import LANGGRAPH_SCHEMA
 from app.db.session import Database, checkpoint_dsn
@@ -94,6 +104,13 @@ class Container:
     human_review: CLIHumanReviewPort
     service_bus_queue: ServiceBusMailQueue
     checkpointer: BaseCheckpointSaver
+    # Penalty rule extraction's compiled graph is process-scoped by design
+    # (see `build()`'s comment at the point it's compiled) -- unlike
+    # CMIR/PO-validation/ontology-*, whose graphs/repositories are rebuilt
+    # fresh per call by the `*_repos`/`*_unit_of_work` factories below.
+    rule_extraction_graph: CompiledStateGraph
+    rule_extraction_classify: Callable[[ClauseClassificationContext], PenaltyRuleExtraction]
+    rule_extraction_extract_facts: Callable[[RuleFactContext], PenaltyFactList]
     _resource_stack: ExitStack
     _ontology_graph: RdfGraph | None = field(default=None, init=False, repr=False)
     _ontology_graph_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
@@ -102,6 +119,13 @@ class Container:
 
     @classmethod
     def build(cls) -> Container:
+        """Construct (or return the cached) process-wide Container.
+
+        Wires repositories, agent nodes, and both LangGraph graphs (CMIR
+        and PO validation) against one shared database session and one
+        shared PostgresSaver checkpointer, then caches the result on
+        `_instance` for subsequent calls.
+        """
         if cls._instance is not None:
             return cls._instance
 
@@ -121,13 +145,47 @@ class Container:
         service_bus_queue = ServiceBusMailQueue(ServiceBusConfig.from_settings(config))
 
         logger.info("Initializing LangGraph PostgreSQL Checkpointer...")
-        # Previous implementation using MemorySaver kept for easy rollback.
-        # checkpointer = MemorySaver()
         checkpointer = resources.enter_context(
             PostgresSaver.from_conn_string(checkpoint_dsn(config.database.url, LANGGRAPH_SCHEMA))
         )
         checkpointer.setup()
         logger.info("Checkpoint tables verified.")
+
+        # Penalty rule extraction's compiled graph is process-scoped by
+        # design (compiled once, not per call like CMIR/PO-validation/
+        # ontology-* below) -- its nodes take `database` itself and open
+        # their own fresh session per node execution for every actual
+        # business-data read/write, never a session held here. The one
+        # exception is the `traced()` wrapper's AgentTraceRepository, which
+        # needs a session at graph-compile time; it gets its own small
+        # dedicated session (closed at Container.close(), not shared with
+        # CMIR/PO-validation/ontology-*, which never hold a session at the
+        # Container level at all -- see class docstring).
+        rule_extraction_session = database.new_session()
+        resources.callback(rule_extraction_session.close)
+        rule_extraction_trace_repository = AgentTraceRepository(rule_extraction_session)
+
+        rule_extraction_client = AzureOpenAIChatClient(LLMConfig.from_settings(config))
+
+        # Keep these bound callables on the container because rule-revision jobs
+        # invoke the same adapters directly, outside the graph. Keeping the
+        # callables here ensures those jobs use the same client/database bindings
+        # as the graph nodes.
+        rule_extraction_classify = partial(rule_extraction_adapter.classify, rule_extraction_client, database)
+        rule_extraction_extract_facts = partial(
+            rule_extraction_adapter.extract_facts, rule_extraction_client, database
+        )
+        rule_extraction_graph = build_rule_extraction_graph(
+            RuleExtractionNodes(
+                screen=partial(rule_extraction_adapter.screen, rule_extraction_client, database),
+                classify=rule_extraction_classify,
+                extract_facts=rule_extraction_extract_facts,
+                database=database,
+            ),
+            checkpointer,
+            rule_extraction_trace_repository,
+        )
+        logger.info("Penalty rule extraction graph compiled with PostgreSQL Checkpointer.")
 
         cls._instance = cls(
             config=config,
@@ -137,12 +195,16 @@ class Container:
             human_review=human_review,
             service_bus_queue=service_bus_queue,
             checkpointer=checkpointer,
+            rule_extraction_graph=rule_extraction_graph,
+            rule_extraction_classify=rule_extraction_classify,
+            rule_extraction_extract_facts=rule_extraction_extract_facts,
             _resource_stack=resources,
         )
         return cls._instance
 
     @classmethod
     def close(cls) -> None:
+        """Tear down the cached Container's resources and clear the singleton so the next build() starts fresh."""
         if cls._instance is None:
             return
         cls._instance._resource_stack.close()
@@ -155,7 +217,7 @@ class Container:
 
     @contextmanager
     def cmir_repos(self) -> Iterator[SimpleNamespace]:
-        """Fresh repositories for `CmirRunService`'s read-only methods --
+        """Fresh repositories for `CmirService`'s read-only methods --
         one `Session`, committed on success / rolled back on exception /
         closed either way when the caller's `with` block exits (reuses
         `Database.session()`, already correct)."""
@@ -178,7 +240,7 @@ class Container:
     def cmir_unit_of_work(self) -> Iterator[SimpleNamespace]:
         """Same Session/repositories as `cmir_repos`, plus a freshly
         compiled graph wired around that Session's repositories -- for
-        `CmirRunService`'s graph-touching methods.
+        `CmirService`'s graph-touching methods.
 
         Reuses this Container's one process-lifetime `checkpointer`
         (`PostgresSaver`); only the graph's node closures are rebuilt per
@@ -220,6 +282,14 @@ class Container:
                 # CMIR mapping -- same repository class as the CMIR domain's,
                 # bound to this call's own fresh Session.
                 cmir_records=CmirRecordRepository(session),
+                # `ingest_po_lines` tracks every line's run through the shared
+                # job queue, same as CmirService.start_email_ingest -- reuses
+                # the CMIR-domain job-context repository/tables (see
+                # PoValidationService's module docstring, point 5) since no
+                # PO-validation-specific job-context table exists.
+                job_queue=JobQueueRepository(session),
+                job_run_context=CmirJobRunContextRepository(session),
+                job_item_context=CmirJobItemContextRepository(session),
             )
 
     @contextmanager

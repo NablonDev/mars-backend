@@ -48,8 +48,12 @@ docker-compose.*.yml
 
 # Local tooling / agent config
 .claude/
+.agents/
+.agent/
+AGENTS.local.md
 CLAUDE.local.md
 PROGRESS.local.md
+AGENTS.md
 CLAUDE.md
 PROGRESS.md
 .python-version

@@ -37,14 +37,8 @@ logger = logging.getLogger(__name__)
 _DEFAULT_STARTUP_JITTER_SECONDS = 2.0
 _DEFAULT_SHUTDOWN_GRACE_SECONDS = 30.0
 
-# Phase 6 collapsed the 14 leaf `AppError` subclasses this tuple used to
-# name individually (`OrderNotFoundError`, `NoActiveRulesError`,
-# `NoProjectionExistsError`, `InvalidAsOfDateError`, ...) into 6 high-level
-# categories parametrized by a `code:str` -- see app/core/exceptions.py's
-# module docstring. Every one of those old classes mapped to one of the
-# three categories below (404/422/409-business-rule); classification is now
-# by category, not by a bespoke leaf type, and doesn't need updating again
-# when a new `code=` value is added under an existing category.
+# Classification is by `AppError` category, not by leaf type, so adding a new `code=`
+# value under an existing category needs no change here.
 _NON_RETRYABLE_APP_ERRORS: tuple[type[AppError], ...] = (
     NotFoundError,
     ValidationError,
@@ -61,12 +55,18 @@ class _OwnershipLostError(Exception):
 
 
 class Classification(Enum):
+    """Outcome of `classify_failure`: whether a job failure is terminal or worth retrying."""
+
     DEAD_LETTER = "dead_letter"
     NACK = "nack"
 
 
 def classify_failure(exc: BaseException) -> Classification:
-    """Classify a job failure as terminal or retryable."""
+    """Classify a job failure as terminal or retryable.
+
+    Bad input can never succeed on a retry, so it dead-letters. Everything else,
+    unrecognized exceptions included, is NACK'd and retried up to `job.max_attempts`.
+    """
     if isinstance(exc, _NON_RETRYABLE_APP_ERRORS):
         return Classification.DEAD_LETTER
     if isinstance(exc, ValueError) and not isinstance(exc, AppError):
@@ -75,7 +75,11 @@ def classify_failure(exc: BaseException) -> Classification:
 
 
 def _is_recognized_retryable(exc: BaseException) -> bool:
-    """Identify known retryable failures for log severity only."""
+    """Identify known retryable failures for log severity only.
+
+    Retry and dead-letter behavior belong to `classify_failure`. This only picks
+    between a `warning` and an `error` with a traceback; both outcomes still NACK.
+    """
     return isinstance(
         exc,
         (
@@ -88,6 +92,7 @@ def _is_recognized_retryable(exc: BaseException) -> bool:
 
 
 def _error_code_for(exc: BaseException) -> str:
+    """Derive the `job_item.last_error_code` value to persist for a failure."""
     if isinstance(exc, AppError):
         return exc.code
     if isinstance(exc, _ItemDeadlineExceededError):
@@ -102,7 +107,10 @@ def compute_backoff_seconds(
     cap: int,
     jitter: int,
 ) -> int:
-    """Return capped exponential backoff with optional jitter."""
+    """Return capped exponential backoff with optional jitter.
+
+    Jitter keeps many workers retrying the same failure from all waking at once.
+    """
     exponent = max(attempt_count - 1, 0)
     backoff = min(cap, base * (2**exponent))
     jitter_amount = random.uniform(0, jitter) if jitter > 0 else 0.0
@@ -129,6 +137,8 @@ class WorkerLoopSummary:
 
 @dataclass
 class _HeartbeatState:
+    """Mutable flag a heartbeat closure uses to signal ownership loss to `_process_job`."""
+
     lost: bool = False
 
 
@@ -138,7 +148,15 @@ def _make_heartbeat(
     worker_id: str,
     state: _HeartbeatState,
 ) -> Callable[[], None]:
+    """Build the heartbeat callback threaded through to `execute_job_fn`.
+
+    Domain code calls it during long work (between LLM tool-calling rounds) to prove it
+    still owns the item. A missed heartbeat raises `_OwnershipLostError` and flips
+    `state.lost`, so `_process_job` abandons the job rather than nacking it.
+    """
+
     def _heartbeat() -> None:
+        """Renew ownership once, raising `_OwnershipLostError` if the renewal was rejected."""
         if not job_source.heartbeat(job, worker_id):
             state.lost = True
             raise _OwnershipLostError(f"job_item_id={job.job_item_id} lost ownership (worker_id={worker_id})")
@@ -165,6 +183,7 @@ def _run_with_deadline(
     outcome: dict[str, BaseException] = {}
 
     def _target() -> None:
+        """Run the job body on the daemon thread, capturing any exception for the caller to re-raise."""
         try:
             execute_job_fn(job, database, settings, llm, heartbeat)
         except BaseException as exc:  # noqa: BLE001
@@ -212,7 +231,15 @@ def _process_job(
     "dead_lettered",
     "abandoned",
 ]:
-    """Execute and settle one claimed job without raising."""
+    """Execute and settle one claimed job without raising.
+
+    Runs `execute_job_fn` under a wall-clock deadline, heartbeating to prove ownership.
+    Success acks; failure either dead-letters or nacks with backoff per
+    `classify_failure`, and a nack that exhausts `max_attempts` returns "nacked_dead"
+    so the summary counts it as both. Lost ownership settles nothing and returns
+    "abandoned", since another worker may already own the item. Every exit path returns
+    a status rather than raising, keeping a bug here from killing the worker loop.
+    """
     if startup_jitter_max_seconds > 0:
         time.sleep(random.uniform(0, startup_jitter_max_seconds))
 
@@ -319,6 +346,13 @@ def _record_result(
     future: Future,
     job: ClaimedJob,
 ) -> None:
+    """Tally a completed `_process_job` future's outcome into the run summary.
+
+    `_process_job` is designed never to raise, so an exception surfacing
+    here means it broke that contract; it is logged and swallowed rather
+    than propagated, since one bad future must not abort the whole batch
+    loop or leave the remaining futures unrecorded.
+    """
     try:
         outcome = future.result()
     except Exception:
@@ -342,6 +376,13 @@ def _record_result(
 
 
 def _check_pool_headroom(settings: Settings) -> None:
+    """Warn at startup if worker concurrency could exceed the DB connection pool's capacity.
+
+    Each concurrently executing job holds at least one DB session, so
+    `worker_concurrency` above `pool_size + max_overflow` means some workers
+    will block waiting for a connection rather than run in parallel; this
+    only logs the misconfiguration; it does not change the settings.
+    """
     pool_capacity = settings.database.pool_size + settings.database.max_overflow
     if settings.job_queue.worker_concurrency > pool_capacity:
         logger.warning(
@@ -357,12 +398,14 @@ def _install_sigterm_handler(flag: threading.Event) -> Callable[[], None]:
     previous = signal.getsignal(signal.SIGTERM)
 
     def _handler(signum: int, frame: object) -> None:
-        logger.warning("SIGTERM received -- no longer claiming new work; draining in-flight items")
+        """Set the shutdown flag; `process_jobs` reads it to stop claiming new work and start draining."""
+        logger.warning("SIGTERM received; no longer claiming new work, draining in-flight items")
         flag.set()
 
     signal.signal(signal.SIGTERM, _handler)
 
     def _restore() -> None:
+        """Reinstall the SIGTERM handler that was active before this call."""
         signal.signal(signal.SIGTERM, previous)
 
     return _restore
@@ -388,8 +431,8 @@ def process_jobs(
 ) -> WorkerLoopSummary:
     """Claim and execute jobs until the queue is drained or shutdown starts.
 
-    ``service`` mode keeps polling an empty queue; ``drain`` exits when
-    no work remains. ``execute_job_fn`` is injectable for tests.
+    `service` mode keeps polling an empty queue; `drain` exits when no work remains.
+    `execute_job_fn` is injectable for tests.
     """
     _check_pool_headroom(settings)
 

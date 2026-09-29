@@ -249,6 +249,34 @@ def test_get_inputs_returns_defaults_when_absent(db_session):
     assert inputs == MitigationInputs(order_id=str(missing_id))
 
 
+def test_feasibility_cutoff_carrier_infeasible():
+    """Cutoff: When remaining days to MABD delivery is strictly less than
+    express transit days (e.g. 1 day left to delivery but express transit requires 2 days),
+    FASTER_CARRIER is physically impossible and must be excluded."""
+    snapshot = OrderSnapshot(
+        order_id="WMT-100234",
+        projection_date=date(2026, 8, 10),
+        requested_delivery_date=date(2026, 8, 11),  # exactly 1 day to delivery
+        required_ship_date=date(2026, 8, 9),
+        order_qty=2000,
+        unit_price=18.0,
+        confirmed_qty=1900,
+        production_status=ProductionStatus.AT_RISK,
+    )
+    projection = ProjectionEngine().project(snapshot, WMT_RULES)
+    inputs = MitigationInputs(
+        order_id="WMT-100234",
+        express_carrier_cost=85.0,
+        express_carrier_transit_days=2,  # 2 days transit required, but only 1 day to delivery
+        express_carrier_data_confirmed=True,
+    )
+    options = MitigationEngine().evaluate(snapshot, WMT_RULES, projection, inputs)
+    actions = {o.action for o in options}
+    assert "FASTER_CARRIER" not in actions, (
+        "Carrier expedite must be excluded when transit exceeds days to delivery"
+    )
+
+
 def test_upsert_then_get_round_trips(repos, db_session):
     retailer = repos.master_data.add_retailer("RET-MIT", "Mitigation Test Co", None)
     material = repos.master_data.add_material("MAT-MIT", None)

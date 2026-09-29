@@ -1,10 +1,4 @@
-"""Azure OpenAI settings, shared by CMIR extraction and the penalties
-projection/mitigation summary agents.
-
-Read by app.agents.providers.azure_openai.AzureOpenAIChatClient and
-app.services.cmir.extractor.AzureOpenAICMIRExtractor via LLMConfig.from_settings(),
-and by app.workers.loop / app.api.dependencies for the shared 429 backoff gate.
-"""
+"""Azure OpenAI settings for LLM integrations."""
 
 from __future__ import annotations
 
@@ -13,21 +7,18 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class AzureOpenAISettings(BaseSettings):
+    """Azure OpenAI deployment, timeout, retry, and rate-limit-backoff settings."""
+
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore", populate_by_name=True
     )
 
-    # Historical flat names, restored (confirmed via git log pre-redesign) --
-    # AZURE_OPENAI_* predates the nested __ delimiter scheme. There is no
-    # AZURE_OPENAI_API_VERSION field: the v1 GA API dropped the dated
-    # api-version param entirely, so no field/alias exists for it here.
     api_key: str = Field(default="", validation_alias="AZURE_OPENAI_API_KEY")
     endpoint: str = Field(default="", validation_alias="AZURE_OPENAI_ENDPOINT")
     deployment: str = Field(default="", validation_alias="AZURE_OPENAI_DEPLOYMENT_NAME")
-
-    # No historical precedent for these -- AZURE_OPENAI_<FIELD_NAME> for consistency.
     timeout_seconds: float = Field(default=90.0, validation_alias="AZURE_OPENAI_TIMEOUT_SECONDS")
     max_attempts: int = Field(default=3, validation_alias="AZURE_OPENAI_MAX_ATTEMPTS")
+    max_retries: int = Field(default=3, validation_alias="AZURE_OPENAI_MAX_RETRIES")
     temperature: float = Field(default=0.0, validation_alias="AZURE_OPENAI_TEMPERATURE")
 
     # Shared rate-limit backoff across concurrent LLM calls. Per-call SDK retries

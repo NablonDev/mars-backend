@@ -6,4 +6,4 @@ from app.agents.penalties._summary_output import PenaltySummaryOutputBase
 
 
 class PenaltyProjectionSummaryOutput(PenaltySummaryOutputBase):
-    pass
+    """Output of projection-summary generation; no fields beyond the shared base."""

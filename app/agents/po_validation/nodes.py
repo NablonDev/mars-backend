@@ -1,3 +1,11 @@
+"""LangGraph node implementations for the PO validation workflow.
+
+Implements discrete steps in the CMIR lookup, material-master availability
+check, human-decision, and status-transition pipeline. Each method is a
+single, atomic workflow node that reads from and updates the shared
+POGraphState.
+"""
+
 from __future__ import annotations
 
 import functools
@@ -37,8 +45,11 @@ def _capture_errors(error_type: str):
     """
 
     def decorator(fn):
+        """Bind error_type to fn, returning the wrapped node that catches its exceptions."""
+
         @functools.wraps(fn)
         def wrapped(self, state: POGraphState) -> POGraphState:
+            """Run fn and convert any exception it raises into a state["error"] value."""
             try:
                 return fn(self, state)
             except Exception as exc:  # noqa: BLE001 - convert to routed state, not a raised exception
@@ -57,14 +68,12 @@ def _capture_errors(error_type: str):
 
 
 class PoValidationNodes:
-    """LangGraph node functions for the PO Validation Agent.
+    """LangGraph node functions for the PO Validation Agent, with collaborators injected.
 
-    Mirrors app/agents/cmir/nodes.py: every collaborator is injected, and nodes
-    only touch their own domain data (common.purchase_order_line,
-    common.material_master, cmir.cmir_record, process.processing_error).
-    process.agent_run / process.workflow_thread / process.human_action
-    transitions are handled by PoValidationService after each graph.invoke(),
-    exactly like CmirRunService._handle_graph_state.
+    Nodes touch only their own domain data: purchase_order_line, material_master,
+    cmir.cmir_record and process.processing_error. The process.agent_run,
+    workflow_thread and human_action transitions belong to PoValidationService,
+    which runs them after each graph.invoke().
     """
 
     def __init__(
@@ -84,19 +93,27 @@ class PoValidationNodes:
 
     @_capture_errors("SYSTEM_ERROR")
     def persist_po_line(self, state: POGraphState) -> POGraphState:
+        """Mark the line VALIDATING; a failure here is a SYSTEM_ERROR, not a lookup failure."""
         self._purchase_order_repository.update_line_status(state["po_line_id"], "VALIDATING")
         return {}
 
     @_capture_errors("LOOKUP_FAILURE")
     def validate_against_cmir(self, state: POGraphState) -> POGraphState:
-        # `retailer_code`/`retailer_material_code` are read from graph state (the
-        # application-level vocabulary, populated at ingest -- see
-        # PoValidationService._run_po_line), not from any purchase_order_line
-        # column directly -- the DB stores the same values under
-        # common.retailer.retailer_code / purchase_order_line.retailer_material_code
-        # instead. `_normalize_po_line` is a back-compat shim for threads whose
-        # checkpoint predates the customer_id/customer_material_code ->
-        # retailer_code/retailer_material_code rename.
+        """Look up an existing CMIR mapping for this PO line's customer and material.
+
+        Writes sap_material_number and cmir_match_found to state so
+        route_after_cmir_validation can send the graph to check_material_master
+        when a mapping was found, or to human_manual_cmir_entry when it wasn't.
+
+        `retailer_code`/`retailer_material_code` are read from graph state (the
+        application-level vocabulary, populated at ingest -- see
+        PoValidationService._run_po_line), not from any purchase_order_line
+        column directly -- the DB stores the same values under
+        common.retailer.retailer_code / purchase_order_line.retailer_material_code
+        instead. `_normalize_po_line` is a back-compat shim for threads whose
+        checkpoint predates the customer_id/customer_material_code ->
+        retailer_code/retailer_material_code rename.
+        """
         po_line = _normalize_po_line(state["po_line"])
         match = self._cmir_repository.find_latest_for_customer_material(
             po_line["retailer_code"], po_line["retailer_material_code"]
@@ -107,6 +124,14 @@ class PoValidationNodes:
 
     @_capture_errors("LOOKUP_FAILURE")
     def check_material_master(self, state: POGraphState) -> POGraphState:
+        """Check whether the resolved SAP material has enough available quantity at the plant.
+
+        Requires sap_material_number to already be set (by validate_against_cmir or
+        create_cmir_record); raises LookupError if it's missing or if
+        common.material_master has no matching row, which _capture_errors turns
+        into a routed LOOKUP_FAILURE. Writes material and quantity_sufficient to
+        state for route_after_material_check.
+        """
         po_line = state["po_line"]
         sap_material_number = state["sap_material_number"]
         if sap_material_number is None:
@@ -131,6 +156,11 @@ class PoValidationNodes:
     # ---- human-in-the-loop steps ---- #
 
     def human_manual_cmir_entry(self, state: POGraphState) -> POGraphState:
+        """Interrupt to collect a manual CMIR mapping from a human operator.
+
+        Reached when validate_against_cmir found no existing mapping. The resume value
+        supplies sap_material_number and an optional description for create_cmir_record.
+        """
         po_line = _normalize_po_line(state["po_line"])
         answer = interrupt(
             {
@@ -148,6 +178,12 @@ class PoValidationNodes:
         }
 
     def human_qty_mismatch_decision(self, state: POGraphState) -> POGraphState:
+        """Interrupt to collect a human decision on an available-quantity shortfall.
+
+        Reached when check_material_master found insufficient available_quantity. The
+        resume value supplies "use_substitute", "proceed_anyway" or "mark_stale" for
+        route_after_qty_mismatch, and replaces sap_material_number for a substitute.
+        """
         material = state["material"]
         po_line = state["po_line"]
         # material_master.follow_up_material_id is a FK to common.material.id (a
@@ -217,6 +253,11 @@ class PoValidationNodes:
 
     @_capture_errors("SYSTEM_ERROR")
     def create_cmir_record(self, state: POGraphState) -> POGraphState:
+        """Persist the operator-supplied manual CMIR mapping from human_manual_cmir_entry.
+
+        Requires sap_material_number; raises ValueError otherwise, which _capture_errors
+        turns into a routed SYSTEM_ERROR. The graph then re-runs check_material_master.
+        """
         po_line = _normalize_po_line(state["po_line"])
         sap_material_number = state["sap_material_number"]
         if sap_material_number is None:
@@ -233,29 +274,33 @@ class PoValidationNodes:
         return {}
 
     def mark_ready_for_so_creation(self, state: POGraphState) -> POGraphState:
+        """Mark the PO line READY_FOR_SO_CREATION, a terminal node for sufficient stock."""
         self._purchase_order_repository.update_line_status(state["po_line_id"], "READY_FOR_SO_CREATION")
         return {}
 
     def mark_ready_for_so_creation_partial(self, state: POGraphState) -> POGraphState:
+        """Mark the PO line READY_FOR_SO_CREATION_PARTIAL after a proceed_anyway decision."""
         self._purchase_order_repository.update_line_status(
             state["po_line_id"], "READY_FOR_SO_CREATION_PARTIAL"
         )
         return {}
 
     def mark_discontinued(self, state: POGraphState) -> POGraphState:
+        """Mark the PO line DISCONTINUED after a mark_stale decision."""
         self._purchase_order_repository.update_line_status(state["po_line_id"], "DISCONTINUED")
         return {}
 
     def handle_error(self, state: POGraphState) -> POGraphState:
+        """Log a captured error to process.processing_error and mark the PO line FAILED.
+
+        A terminal node reached from any routing function that found state["error"] set;
+        it reads only the error dict, never which node produced it.
+        """
         error = state.get("error") or {}
-        # process.processing_error (generalizing the old po_line_errors) has no
-        # purchase_order_line_id column -- only job_item_id/agent_run_id (see
-        # app.repositories.process.workflow.ProcessingErrorRepository and
-        # PoValidationService's own docstring, point 3, for the same documented gap).
-        # agent_run_id is the only thread this error row can be found by later.
         self._processing_error_repository.log(
             error.get("error_type", "SYSTEM_ERROR"),
             agent_run_id=state.get("run_id"),
+            purchase_order_line_id=state["po_line_id"],
             error_code=error.get("error_code"),
             error_message=error.get("error_message"),
             node_name=error.get("node_name", "unknown"),
@@ -267,9 +312,11 @@ class PoValidationNodes:
     # ---- routing functions ---- #
 
     def route_after_persist(self, state: POGraphState) -> Literal["error", "continue"]:
+        """Route a captured persist_po_line error to handle_error, else to CMIR validation."""
         return "error" if state.get("error") else "continue"
 
     def route_after_cmir_validation(self, state: POGraphState) -> Literal["error", "found", "not_found"]:
+        """Route a matched mapping to check_material_master, an unmatched one to a human."""
         if state.get("error"):
             return "error"
         return "found" if state.get("cmir_match_found") else "not_found"
@@ -277,16 +324,23 @@ class PoValidationNodes:
     def route_after_material_check(
         self, state: POGraphState
     ) -> Literal["error", "sufficient", "insufficient"]:
+        """Route sufficient stock to the ready node, a shortfall to a human decision."""
         if state.get("error"):
             return "error"
         return "sufficient" if state.get("quantity_sufficient") else "insufficient"
 
     def route_after_create_cmir_record(self, state: POGraphState) -> Literal["error", "continue"]:
+        """Route a captured create_cmir_record error to handle_error, else to a re-check."""
         return "error" if state.get("error") else "continue"
 
     def route_after_qty_mismatch(
         self, state: POGraphState
     ) -> Literal["use_substitute", "proceed_anyway", "mark_stale"]:
+        """Route to the outcome node matching the operator's quantity-mismatch decision.
+
+        Raises ValueError on a missing decision: routing functions sit outside
+        _capture_errors, so this guards a programming error, not a recoverable state.
+        """
         decision = state["decision"]
         if decision is None:
             raise ValueError("route_after_qty_mismatch reached with no decision recorded")

@@ -8,12 +8,16 @@ from pydantic import BaseModel, Field
 
 
 class TierBand(BaseModel):
+    """One rate tier of a tiered penalty rule, keyed by band boundaries. `band_max=None` means unbounded."""
+
     band_min: float
-    band_max: float
+    band_max: float | None
     rate: float
 
 
 class ActiveRule(BaseModel):
+    """A penalty rule matched by the deterministic engine for this order."""
+
     rule_id: str
     violation_type: str
     calc_type: str
@@ -24,6 +28,8 @@ class ActiveRule(BaseModel):
 
 
 class ViolationEntry(BaseModel):
+    """One rule violation the engine detected (or projected) on a given day."""
+
     violation_type: str
     rule_id: str
     probability: float
@@ -53,6 +59,8 @@ class DailyHistoryEntry(BaseModel):
 
 
 class OrderContext(BaseModel):
+    """Order-identifying and scheduling fields the projection was computed against."""
+
     order_id: str
     order_status: str
     retailer_name: str
@@ -74,6 +82,8 @@ class ActualOutcome(BaseModel):
 
 
 class PenaltyProjectionSummaryContext(BaseModel):
+    """Everything the model needs to narrate the engine's penalty projection."""
+
     order: OrderContext
     current_projection_date: date  # which daily_history entry is "today"
     stacking_mode: str

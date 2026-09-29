@@ -1,3 +1,11 @@
+"""Standalone Service Bus consumer that forwards inbound CMIR emails to the API.
+
+Runs as its own process (not through `app.workers.loop`'s claim/execute/settle
+job queue): it holds a session-scoped receiver open indefinitely and forwards
+each message directly to `PROCESS_EMAIL_PATH` over HTTP, retrying the whole
+receive loop on any error until SIGTERM/SIGINT is received.
+"""
+
 from __future__ import annotations
 
 import json
@@ -16,12 +24,14 @@ PROCESS_EMAIL_PATH = "/api/v1/internal/process-email"
 
 
 def _handle_shutdown(signum: int, frame: Any) -> None:
+    """Flip the module-level shutdown flag so `run`'s receive loop exits after the current message."""
     global shutdown_requested
     shutdown_requested = True
     LOGGER.info("Shutdown requested by signal %s", signum)
 
 
 def _message_body(message: Any) -> dict[str, Any]:
+    """Decode a Service Bus message body to its JSON payload, tolerating str/bytes/chunked bodies."""
     raw_body = getattr(message, "body", None)
     if raw_body is None:
         body = str(message)
@@ -35,6 +45,7 @@ def _message_body(message: Any) -> dict[str, Any]:
 
 
 def _process_email_payload(message: Any) -> dict[str, Any]:
+    """Translate a queue message's raw payload into the internal process-email request body."""
     payload = _message_body(message)
     email_id = payload["email_id"]
     queue_message_id = str(getattr(message, "message_id", None) or email_id)
@@ -56,15 +67,23 @@ def _process_email_payload(message: Any) -> dict[str, Any]:
 
 
 def _process_email_url(base_url: str) -> str:
+    """Join the configured agent API base URL with the process-email path."""
     return f"{base_url.rstrip('/')}{PROCESS_EMAIL_PATH}"
 
 
 def _forward_to_api(client: httpx.Client, process_email_url: str, payload: dict[str, Any]) -> None:
+    """POST the payload to the process-email endpoint, raising on a non-2xx response."""
     response = client.post(process_email_url, json=payload)
     response.raise_for_status()
 
 
 def _process_message(receiver: Any, message: Any, client: httpx.Client, process_email_url: str) -> None:
+    """Forward one message to the API and settle it: complete on success, abandon and re-raise on failure.
+
+    Abandoning (rather than dead-lettering) lets Service Bus redeliver the
+    message so a transient API outage self-heals once `run`'s outer retry
+    loop reconnects; there is no attempt limit at this layer.
+    """
     request_payload = _process_email_payload(message)
     email_id = request_payload["email_id"]
     queue_message_id = request_payload["queue_message_id"]
@@ -79,6 +98,15 @@ def _process_message(receiver: Any, message: Any, client: httpx.Client, process_
 
 
 def run() -> None:
+    """Run the consumer until SIGTERM/SIGINT: receive, forward, and settle messages forever.
+
+    Authenticates with a connection string if configured, otherwise
+    `DefaultAzureCredential`. Holds one session-scoped receiver with an
+    `AutoLockRenewer` open at a time and processes messages serially; unlike
+    `app.workers.loop` there is no concurrent claim/execute/settle pool. Any error
+    other than a shutdown request reopens the receiver after a 5-second pause, so a
+    dropped connection is retried indefinitely rather than crashing the process.
+    """
     from azure.identity import DefaultAzureCredential
     from azure.servicebus import AutoLockRenewer, ServiceBusClient
 

@@ -15,16 +15,16 @@ day's numbers.
 
 For every day where the projection carries exposure
 (total_expected_penalty_amount > 0), this script also calls
-`POST /api/v1/penalty-mitigations?projection_id=<id>` for that same
-projection_date and prints the best-ranked option alongside that day's
+`POST /api/v1/penalties/mitigations` (`projection_id` in the body) for that
+same projection_date and prints the best-ranked option alongside that day's
 projection line -- matching the real product flow's "if exposure
 remains, a second calculation engine proposes mitigation options" (see
-docs/DEMO.md SS3/SS4). The mitigations endpoint takes no request body --
-it resolves `(purchase_order_id, projection_date)` from one
-`penalty_projection` row's own surrogate id (see
-app/api/v1/penalties/mitigations.py::_resolve_projection), so this script
-first calls `GET .../penalty-projections` once per scenario to build a
-projection_date -> id map (multiple persisted rows share a date, one per
+docs/DEMO.md SS3/SS4). The mitigations endpoint resolves
+`(purchase_order_id, projection_date)` from one `penalty_projection` row's
+own surrogate id (see app/api/v1/penalties/mitigations.py::
+_resolve_projection), so this script first calls
+`GET /penalties/projections?purchase_order_id=` once per scenario to build
+a projection_date -> id map (multiple persisted rows share a date, one per
 violation type -- any one of them resolves the same pair).
 
 Unlike the projection replay, these are extra HTTP calls made from the
@@ -54,14 +54,16 @@ from _helpers import _auth_headers, _error_message
 
 def _fetch_projection_ids(base_url: str, purchase_order_id: str) -> dict[str, str]:
     """Maps each projection_date (ISO string) to one `penalty_projection`
-    row's own surrogate id for that date, via `GET .../penalty-projections`.
-    Multiple persisted rows share a date (one per violation type), but any
-    one of them resolves the same (purchase_order_id, projection_date) pair
-    once passed as `?projection_id=` to the mitigations endpoint (see
+    row's own surrogate id for that date, via
+    `GET /penalties/projections?purchase_order_id=`. Multiple persisted rows
+    share a date (one per violation type), but any one of them resolves the
+    same (purchase_order_id, projection_date) pair once passed as
+    `projection_id` in the mitigations endpoint's request body (see
     app/api/v1/penalties/mitigations.py::_resolve_projection) -- the first
     row seen per date is kept."""
     resp = httpx.get(
-        f"{base_url}/purchase-orders/{purchase_order_id}/penalty-projections",
+        f"{base_url}/penalties/projections",
+        params={"purchase_order_id": purchase_order_id},
         headers=_auth_headers(),
         timeout=30,
     )
@@ -83,8 +85,8 @@ def _run_mitigation(base_url: str, projection_id: str) -> list[dict] | None:
     printed and skipped rather than fatal, so one bad day doesn't stop the
     rest of the replay."""
     resp = httpx.post(
-        f"{base_url}/penalty-mitigations",
-        params={"projection_id": projection_id},
+        f"{base_url}/penalties/mitigations",
+        json={"projection_id": projection_id},
         headers=_auth_headers(),
         timeout=30,
     )

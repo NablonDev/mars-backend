@@ -1,14 +1,4 @@
-"""API schemas for `penalties.penalty_projection` requests/responses and the
-projection-summary trigger/poll contract.
-
-Was `app/schemas/fine_projection/projections.py` + `summaries.py`. Field
-names drop the stale `fine`/`order` vocabulary (`projected_fine_amount` ->
-`expected_penalty_amount`, matching `PenaltyProjectionRepository`'s own
-dict shape; `order_id` -> `purchase_order_id`); the pure-calc engine's
-dataclasses themselves ARE now renamed to match (see
-`app.services.penalties.projection.types`'s module docstring) -- both
-layers share `penalty_amount`/`expected_penalty_amount` field-for-field.
-"""
+"""API schemas for `penalties.penalty_projection` and its summary trigger/poll contract."""
 
 from __future__ import annotations
 
@@ -19,16 +9,24 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict
 
 from app.models.enums import SummaryStatus
+from app.schemas.penalties.mitigations import MitigationOptionResponse, PenaltyMitigationSummaryResponse
 
 
 class PenaltyProjectionRunRequest(BaseModel):
-    """Body for POST /purchase-orders/{purchase_order_id}/penalty-projections."""
+    """Body for `POST /penalties/projections`."""
 
+    purchase_order_id: UUID
     projection_date: date | None = None
     stacking_mode_override: Literal["SUM", "MAX"] | None = None
 
 
 class ViolationResponse(BaseModel):
+    """One violation produced by a `POST /penalties/projections` run."""
+
+    # One `penalties.penalty_projection` row is written per violation, so this is the id a client
+    # needs to reach this run's output without a separate list round-trip. Named to match the
+    # `projection_id` param on the routes that consume it, not the bare `id` used elsewhere.
+    projection_id: UUID
     violation_type: str
     rule_id: str
     probability: float
@@ -37,7 +35,10 @@ class ViolationResponse(BaseModel):
 
 
 class PenaltyProjectionResultResponse(BaseModel):
-    """One projection run's engine output -- POST response shape."""
+    """Response shape for one `POST /penalties/projections` run.
+
+    The optional `?include=` fields are read from cached state; a run never generates them.
+    """
 
     purchase_order_id: UUID
     projection_date: date
@@ -47,11 +48,15 @@ class PenaltyProjectionResultResponse(BaseModel):
     violations: list[ViolationResponse]
     total_expected_penalty_amount: float
     stacking_mode: str
+    summary_status: SummaryStatus | None = None
+    summary: PenaltyProjectionSummaryResponse | None = None
+    mitigations: list[MitigationOptionResponse] | None = None
+    mitigation_summary_status: SummaryStatus | None = None
+    mitigation_summary: PenaltyMitigationSummaryResponse | None = None
 
 
 class PenaltyProjectionHistoryRow(BaseModel):
-    """One persisted `penalty_projection` row -- GET history / cross-PO
-    open-list / single-projection-read shape."""
+    """One persisted `penalty_projection` row, as returned by every projection read route."""
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -65,9 +70,12 @@ class PenaltyProjectionHistoryRow(BaseModel):
     expected_penalty_amount: float
     days_to_delivery: int
     projection_status: str
+    skip_reason: str | None = None
 
 
 class PenaltyExposureResponse(BaseModel):
+    """A purchase order's total penalty exposure across its persisted projection violations."""
+
     purchase_order_id: UUID
     projection_date: date
     total_expected_penalty_amount: float
@@ -75,13 +83,16 @@ class PenaltyExposureResponse(BaseModel):
 
 
 class PenaltyProjectionSummaryRequest(BaseModel):
-    """Body for POST /purchase-orders/{purchase_order_id}/penalty-projections/summary."""
+    """Body for `POST /penalties/projections/summary`."""
 
+    purchase_order_id: UUID
     as_of_date: date | None = None
     force_regenerate: bool = False
 
 
 class PenaltyProjectionSummaryResponse(BaseModel):
+    """Response shape for a generated penalty-projection narrative summary."""
+
     model_config = ConfigDict(from_attributes=True)
 
     order_id: str
@@ -96,22 +107,23 @@ class PenaltyProjectionSummaryResponse(BaseModel):
 
 
 class PenaltyProjectionSummaryStatusResponse(BaseModel):
+    """Poll response for a projection summary; a null `status` means never requested, not a 404."""
+
     purchase_order_id: UUID
-    as_of_date: date
-    status: SummaryStatus
+    as_of_date: date | None
+    status: SummaryStatus | None
     summary: PenaltyProjectionSummaryResponse | None = None
     error_message: str | None = None
 
 
 class PenaltyProjectionDetailResponse(PenaltyProjectionHistoryRow):
-    """`?include=summary` shape -- pure read, never schedules generation
-    (approved plan §5). Used both for
-    `GET /penalty-projections/{projection_id}?include=summary` and the
-    nested `GET .../penalty-projections?include=summary` history view.
-    `summary_status` is always populated once `include=summary` is
-    requested (`READY`/`PENDING`/`FAILED`, from cached state only);
-    `summary` itself is populated only when `summary_status == READY`.
+    """One projection row plus its optional `?include=` fields, read from cached state only.
+
+    Every projection route shares the same `{summary, mitigations, mitigation_summary}` allow-list.
     """
 
     summary_status: SummaryStatus | None = None
     summary: PenaltyProjectionSummaryResponse | None = None
+    mitigations: list[MitigationOptionResponse] | None = None
+    mitigation_summary_status: SummaryStatus | None = None
+    mitigation_summary: PenaltyMitigationSummaryResponse | None = None

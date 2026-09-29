@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import unittest
 
-from app.models.cmir.cmir_record import CmirRecord
-from app.models.common.material import Material, MaterialMaster
+from app.models.cmir import CmirRecord
+from app.models.common import Material, MaterialMaster
 from app.ontology.config.db_mapping import (
     EntityMapping,
     PropertyMapping,

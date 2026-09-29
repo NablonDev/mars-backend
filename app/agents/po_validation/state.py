@@ -1,3 +1,10 @@
+"""Workflow execution state for the PO validation pipeline.
+
+Carries the purchase-order line, CMIR match, material-master check, and human
+decisions through the graph nodes. Updated by each node as it processes the
+purchase-order line.
+"""
+
 from __future__ import annotations
 
 from typing import Any, Literal, TypedDict
@@ -5,6 +12,14 @@ from uuid import UUID
 
 
 class POGraphState(TypedDict, total=False):
+    """Workflow execution state.
+
+    Holds all data flowing through the PO validation pipeline, from the initial
+    CMIR lookup through the material-master availability check, any human
+    decisions on a missing mapping or quantity shortfall, and the final
+    status transition.
+    """
+
     po_line_id: UUID  # common.purchase_order_line.id
     po_line: dict[str, Any]  # PoLine, as a dict (po_number, retailer_code, plant, order_quantity, ...)
     # `retailer_code`/`retailer_material_code` (renamed from customer_id/

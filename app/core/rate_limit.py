@@ -31,7 +31,7 @@ def looks_like_rate_limit(exc: BaseException) -> bool:
 
 
 class RateLimitGate:
-    """Thread-safe, process-local gate that pauses new LLM work after rate limits."""
+    """Blocks new LLM calls after a rate-limit error until the cooldown expires."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -39,6 +39,7 @@ class RateLimitGate:
         self.rate_limit_hits = 0
 
     def note_rate_limit_hit(self, backoff_seconds: float) -> None:
+        """Record a rate-limit hit and extend the pause window by backoff_seconds."""
         with self._lock:
             self.rate_limit_hits += 1
             self._paused_until = max(

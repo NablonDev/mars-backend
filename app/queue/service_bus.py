@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import Any
 from uuid import UUID
 
@@ -23,6 +23,7 @@ from app.models.enums import JobItemStatus
 from app.queue.interfaces import JobDispatcher, JobSource
 from app.queue.types import ClaimedJob, claimed_job_from_row
 from app.repositories.process.job_queue import JobQueueRepository
+from app.utils.clock import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,12 @@ _RECEIVE_MODE_PEEK_LOCK = "peeklock"
 
 
 def _message_body_str(message: Any) -> str:
-    """Return the message body as text for SDK and test messages."""
+    """Return the message body as text for SDK and test messages.
+
+    The real SDK exposes `body` as a generator of byte chunks (it streams
+    large messages), while test doubles typically pass a plain `str` or
+    `bytes`; all three shapes are normalized to one decoded string here.
+    """
     body = message.body
     if isinstance(body, str):
         return body
@@ -73,7 +79,15 @@ class ServiceBusJobQueue(JobDispatcher, JobSource):
 
     @staticmethod
     def _build_real_client(settings: Settings) -> tuple[Any, Callable[[str], Any]]:
-        """Build the authenticated Service Bus client."""
+        """Build the authenticated Service Bus client.
+
+        Always authenticates via `DefaultAzureCredential` (managed identity) --
+        unlike the CMIR mail producer, this backend has no connection-string
+        fallback. Raises `ValidationError` if the namespace is unconfigured or
+        the Azure SDK packages are not importable, so a misconfigured
+        `service_bus` backend fails fast at construction rather than at the
+        first dispatch.
+        """
         if not settings.job_queue.service_bus_namespace:
             raise ValidationError(
                 code="SERVICE_BUS_NAMESPACE_NOT_CONFIGURED",
@@ -93,7 +107,7 @@ class ServiceBusJobQueue(JobDispatcher, JobSource):
                     "JOB_QUEUE_BACKEND=service_bus requires the 'azure-servicebus' and "
                     "'azure-identity' packages, which are declared in "
                     "pyproject.toml/requirements.txt but are not importable in this "
-                    "environment -- reinstall dependencies (e.g. `uv sync`) before "
+                    "environment. Reinstall dependencies (e.g. `uv sync`) before "
                     "selecting this backend."
                 ),
             ) from exc
@@ -109,11 +123,18 @@ class ServiceBusJobQueue(JobDispatcher, JobSource):
     # ------------------------------------------------------------------
 
     def dispatch(self, job_item_id: UUID, *, delay_seconds: int = 0) -> None:
-        """Dispatch a notification for a durable job item."""
+        """Dispatch a notification for a durable job item.
+
+        The message carries only the job item id as its body; `job_item` in
+        Postgres remains the sole source of durable state. With
+        `delay_seconds > 0` the message is scheduled rather than sent
+        immediately, which is how nack's retry backoff is implemented on
+        this backend (Postgres has no poller for `available_at` here).
+        """
         message = self._message_factory(str(job_item_id))
 
         if delay_seconds > 0:
-            scheduled_time_utc = datetime.now(UTC) + timedelta(seconds=delay_seconds)
+            scheduled_time_utc = utc_now() + timedelta(seconds=delay_seconds)
             with self._lock:
                 self._sender.schedule_messages(message, scheduled_time_utc)
         else:
@@ -180,7 +201,15 @@ class ServiceBusJobQueue(JobDispatcher, JobSource):
         return claimed_jobs
 
     def heartbeat(self, job: ClaimedJob, worker_id: str) -> bool:
-        """Renew transport and durable ownership."""
+        """Renew transport and durable ownership.
+
+        Renews the Service Bus message lock first; if that fails, the
+        transport no longer guarantees exclusive delivery, so ownership is
+        treated as lost without touching the DB. Only on a successful lock
+        renewal does this also renew the `job_item` row's heartbeat, whose
+        own result (False if another worker has since reclaimed it) is
+        returned as the final answer.
+        """
         try:
             with self._lock:
                 self._receiver.renew_message_lock(job.receipt)
@@ -228,7 +257,14 @@ class ServiceBusJobQueue(JobDispatcher, JobSource):
         error_code: str,
         retry_in_seconds: int,
     ) -> None:
-        """Record a retryable failure and schedule the next attempt."""
+        """Record a retryable failure and schedule the next attempt.
+
+        The Service Bus message is always completed here whatever the DB outcome,
+        because this backend re-drives retries through a freshly scheduled `dispatch`
+        rather than message redelivery. That re-dispatch happens only while
+        `mark_failed` still reports the item PENDING: a lost claim or exhausted
+        attempts schedule no new message.
+        """
         with self._database.session() as session:
             result = JobQueueRepository(session).mark_failed(
                 job.job_item_id,
@@ -266,7 +302,14 @@ class ServiceBusJobQueue(JobDispatcher, JobSource):
         error: str,
         error_code: str,
     ) -> None:
-        """Mark the job DEAD and move its message to the native DLQ."""
+        """Mark the job DEAD and move its message to the native DLQ.
+
+        DB state is settled first so a crash between the two steps leaves
+        the job correctly DEAD even if the message never reaches the DLQ.
+        `error_code`/`error` are passed through as the DLQ reason/description,
+        so the native dead-letter queue carries the same failure detail as
+        the `job_item` row.
+        """
         with self._database.session() as session:
             result = JobQueueRepository(session).mark_dead(
                 job.job_item_id,
@@ -290,7 +333,12 @@ class ServiceBusJobQueue(JobDispatcher, JobSource):
             )
 
     def release(self, job: ClaimedJob, worker_id: str) -> None:
-        """Return a claimed job to PENDING during shutdown."""
+        """Return a claimed job to PENDING during shutdown.
+
+        Abandons the Service Bus message rather than completing it, so the
+        broker redelivers it immediately instead of waiting out the lock
+        duration; this release does not consume a retry attempt.
+        """
         with self._database.session() as session:
             result = JobQueueRepository(session).release(
                 job.job_item_id,
@@ -309,12 +357,17 @@ class ServiceBusJobQueue(JobDispatcher, JobSource):
             self._receiver.abandon_message(job.receipt)
 
     def reclaim_stale(self, visibility_timeout_seconds: int) -> int:
-        """Reset abandoned DB claims to PENDING."""
+        """Reset abandoned DB claims to PENDING; a reclaimed row needs `dispatch` again."""
         with self._database.session() as session:
             return JobQueueRepository(session).reclaim_stale(visibility_timeout_seconds)
 
     def close(self) -> None:
-        """Close Service Bus resources; safe to call more than once."""
+        """Close Service Bus resources; safe to call more than once.
+
+        Guarded by `self._closed` so repeated shutdown calls are harmless.
+        Each of sender/receiver/client is closed independently and a failure
+        closing one does not prevent the others from being attempted.
+        """
         if self._closed:
             return
 

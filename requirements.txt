@@ -1,4 +1,4 @@
-# Mars Petcare Backend -- CMIR Email Resolution, PO Validation, and Projected Penalties & Mitigation
+# Mars Petcare Backend -- CMIR Email Resolution, PO Validation, and Projected Penalties, Mitigation & Dispute Resolution
 # Source of truth is pyproject.toml/uv.lock (`uv sync`); this file is kept in
 # sync for the Azure Functions deployment path (azure_functions/), which
 # needs a flat requirements.txt.

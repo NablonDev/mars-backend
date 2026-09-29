@@ -30,7 +30,7 @@
 #   backend
 #   cmir-consumer
 #   migrate
-#   fines-projection-worker
+#   penalties-projection-worker
 
 x-app-database: &app-database
   DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-mars}:${POSTGRES_PASSWORD:-mars}@${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-mars}}
@@ -125,13 +125,13 @@ services:
 
   # Local stand-in for the Azure Container Apps Job.
   # Run:
-  #   docker compose --profile tools run --rm worker
-  fines-projection-worker:
+  #   docker compose --profile tools run --rm penalties-projection-worker
+  penalties-projection-worker:
     <<: *app-image
     command: python scripts/ops/run_daily_batch.py
     profiles:
       - tools
-    container_name: mars-fines-projection-worker
+    container_name: mars-penalties-projection-worker
     environment:
       <<: *app-database
       APP_ENVIRONMENT: ${APP_ENVIRONMENT:-development}

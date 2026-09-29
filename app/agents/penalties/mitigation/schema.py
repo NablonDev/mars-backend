@@ -6,4 +6,4 @@ from app.agents.penalties._summary_output import PenaltySummaryOutputBase
 
 
 class PenaltyMitigationSummaryOutput(PenaltySummaryOutputBase):
-    pass
+    """Output of mitigation-summary generation; no fields beyond the shared base."""

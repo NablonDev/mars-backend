@@ -1,18 +1,4 @@
-"""Penalty projection/mitigation summary settings.
-
-Covers stored-summary reuse and the recovery-sweep window
-(app.services.penalties._summary_base, app.workers.penalty_projection,
-app.workers.penalty_mitigation), and the daily batch cadence's business
-timezone.
-
-`on_demand_max_concurrent_summaries`/`on_demand_acquire_timeout_seconds`
-were removed here: `SummaryServiceBase.get_or_schedule` has no inline/
-synchronous generation path left to bound the concurrency of -- it only
-ever enqueues a `process.job_run`/`job_item` and returns PENDING (a
-worker generates the summary later, out of band). Settings fields nothing
-reads don't belong here; see the project's own `job_queue_max_attempts`
-dead-config precedent.
-"""
+"""Settings for penalty summary generation (reuse, recovery, batch cadence)."""
 
 from __future__ import annotations
 
@@ -21,6 +7,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class SummarySettings(BaseSettings):
+    """Settings for penalty-summary generation: reuse window, recovery sweep, and daily batch cadence."""
+
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore", populate_by_name=True
     )

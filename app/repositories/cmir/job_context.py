@@ -1,19 +1,4 @@
-"""Repository for `cmir.cmir_job_run_context`/`cmir_job_item_context` -- the
-CMIR-specific extension tables over the shared `process.job_run`/
-`process.job_item` queue (see `app.models.cmir.job_context` for why these
-stay domain-owned and why the table names are prefixed).
-
-`CmirJobItemContext` is shared by *both* the CMIR email-ingest pipeline
-(`email_event_id` set) and the PO-validation pipeline
-(`purchase_order_line_id` set) -- exactly one of the two, never both/neither
-(DB-enforced by raw migration DDL on Postgres only, see that model's
-docstring). This repository's `create()` guards the same invariant at the
-application level, the same posture `WorkflowThreadRepository.create()`
-already takes for its own two-nullable-FK pair.
-
-Deferred by Phase 2 to Phase 3 (this phase): these models existed from
-Phase 1 with no repository.
-"""
+"""Repository for cmir.cmir_job_run_context and cmir_job_item_context."""
 
 from __future__ import annotations
 
@@ -23,10 +8,11 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.cmir.job_context import CmirJobItemContext, CmirJobRunContext
+from app.models.cmir import CmirJobItemContext, CmirJobRunContext
 
 
 def _run_context_to_dict(row: CmirJobRunContext) -> dict:
+    """Project a `CmirJobRunContext` row onto the plain dict shape returned to callers."""
     return {
         "job_run_id": row.job_run_id,
         "source_type": row.source_type,
@@ -38,6 +24,7 @@ def _run_context_to_dict(row: CmirJobRunContext) -> dict:
 
 
 def _item_context_to_dict(row: CmirJobItemContext) -> dict:
+    """Project a `CmirJobItemContext` row onto the plain dict shape returned to callers."""
     return {
         "job_item_id": row.job_item_id,
         "email_event_id": row.email_event_id,
@@ -47,6 +34,8 @@ def _item_context_to_dict(row: CmirJobItemContext) -> dict:
 
 
 class CmirJobRunContextRepository:
+    """The CMIR-specific context (batch/topic origin) attached to a shared `process.job_run` row."""
+
     def __init__(self, session: Session) -> None:
         self._session = session
 
@@ -59,6 +48,7 @@ class CmirJobRunContextRepository:
         service_bus_subscription: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict:
+        """Attach CMIR run context to an already-created `job_run_id`."""
         row = CmirJobRunContext(
             job_run_id=job_run_id,
             source_type=source_type,
@@ -72,11 +62,14 @@ class CmirJobRunContextRepository:
         return _run_context_to_dict(row)
 
     def get(self, job_run_id: UUID) -> dict | None:
+        """Return the run context for `job_run_id`, or None if none was attached."""
         row = self._session.get(CmirJobRunContext, job_run_id)
         return _run_context_to_dict(row) if row is not None else None
 
 
 class CmirJobItemContextRepository:
+    """The CMIR-specific context (email or PO line) attached to a `process.job_item` row."""
+
     def __init__(self, session: Session) -> None:
         self._session = session
 
@@ -88,6 +81,11 @@ class CmirJobItemContextRepository:
         purchase_order_line_id: UUID | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict:
+        """Attach CMIR item context to an already-created `job_item_id`.
+
+        Exactly one of `email_event_id` or `purchase_order_line_id` must be set: a
+        job item concerns either an inbound email or a PO line, never both.
+        """
         if (email_event_id is None) == (purchase_order_line_id is None):
             raise ValueError(
                 "Exactly one of email_event_id/purchase_order_line_id must be set for a job item context."
@@ -104,10 +102,12 @@ class CmirJobItemContextRepository:
         return _item_context_to_dict(row)
 
     def get(self, job_item_id: UUID) -> dict | None:
+        """Return the item context for `job_item_id`, or None if none was attached."""
         row = self._session.get(CmirJobItemContext, job_item_id)
         return _item_context_to_dict(row) if row is not None else None
 
     def get_by_email_event(self, email_event_id: UUID) -> dict | None:
+        """Return the item context for the job item handling `email_event_id`, or None."""
         row = self._session.scalars(
             select(CmirJobItemContext).where(CmirJobItemContext.email_event_id == email_event_id)
         ).first()

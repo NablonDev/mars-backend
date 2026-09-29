@@ -1,11 +1,6 @@
-"""PO-validation-domain snapshot shape for
-`GET /api/v1/workflow-threads/{thread_id}?include=snapshot` (was
-`GET /threads/{id}/stage` + `GET /threads/{id}/snapshot`, PRD §11.3).
+"""PO-validation snapshot shape for `GET /api/v1/workflow-threads/{thread_id}?include=snapshot`.
 
-Imports `SnapshotHistoryItem` from `app.schemas.cmir.threads` -- the same
-cross-domain import the pre-Phase-7b `app/schemas/po_validation.py` already
-made (`human_action` is a shared `process`-schema table, so its history-row
-shape is not domain-specific).
+`SnapshotHistoryItem` is imported from the cmir package because `human_action` is shared.
 """
 
 from __future__ import annotations
@@ -18,6 +13,8 @@ from app.schemas.cmir.threads import IsoDatetime, SnapshotHistoryItem
 
 
 class CandidateInfo(BaseModel):
+    """Candidate substitute surfaced when a PO line's material is short or discontinued."""
+
     sap_material_number: str
     plant: str
     available_quantity: float
@@ -36,10 +33,7 @@ class CandidateInfo(BaseModel):
 
 
 class PoValidationThreadSnapshotResponse(BaseModel):
-    """`PoValidationService.get_snapshot`'s real return shape -- structurally
-    different from `app.schemas.cmir.threads.CmirThreadSnapshotResponse`
-    (PRD §10.4 vs §11.3); see `app/api/v1/workflow_threads.py` for the
-    domain-dispatch this forces."""
+    """PO-validation-domain snapshot shape, returned by `PoValidationService.get_snapshot`."""
 
     agent_run_id: UUID
     thread_id: str

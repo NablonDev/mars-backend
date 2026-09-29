@@ -1,12 +1,4 @@
-"""API schemas for the generic `process.job_run`/`job_item` batch
-trigger/status endpoints -- shared by `penalties` and, as of the CMIR
-follow-up pass (Phase 7b), `cmir`, per the approved plan §5/§6.
-
-Was `app/schemas/batches.py`, rewritten against the domain-agnostic
-`process.job_run`/`job_item` (Phase 1/2): no `order_id` column any more
-(replaced by a generic `dedupe_key`); `task_type` -> `item_type`
-(`JobItem.item_type` is the real discriminator -- see that model's
-docstring)."""
+"""API schemas for the `process.job_run`/`job_item` batch trigger and status endpoints."""
 
 from __future__ import annotations
 
@@ -14,63 +6,83 @@ from datetime import date, datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, BeforeValidator, Field
+from pydantic import BaseModel, BeforeValidator, Field, model_validator
 
 from app.models.enums import JobItemStatus
 
 
 class PenaltyProjectionBatchRequest(BaseModel):
-    """`job_type=PENALTY_PROJECTION_BATCH` -- runs a penalty projection for
-    every OPEN purchase order. Maps internally to `JobTaskType.ORDER_RUN` --
-    `app/models/enums.py` is out of scope for this phase, so the wire-level
-    vocabulary and the stored `process.job_item.item_type` value
-    intentionally differ; see `app/api/v1/job_runs.py`."""
+    """Request body for a `PENALTY_PROJECTION_BATCH` job run over every OPEN purchase order.
+
+    Maps to `JobTaskType.ORDER_RUN`.
+    """
 
     job_type: Literal["PENALTY_PROJECTION_BATCH"] = "PENALTY_PROJECTION_BATCH"
     projection_date: date | None = None
     stacking_mode_override: Literal["SUM", "MAX"] | None = None
 
 
-class CmirEmailIngestJobRunRequest(BaseModel):
-    """`job_type=CMIR_EMAIL_INGEST` -- Phase 7b addition (approved plan §6):
-    fetches unread CMIR emails and enqueues one `process.job_item` per
-    email. Maps internally to `JobTaskType.EMAIL_INGEST` (already existed
-    per the plan's `job_item` CHECK list; reused, not duplicated) --
-    dispatches to `CmirRunService.start_email_ingest`, which does its own
-    `process.job_run`/`job_item` bookkeeping directly (no `JobDispatcher`
-    wiring needed here, unlike the penalty-projection branch: the actual
-    email processing is picked up by the Service Bus consumer / `/internal/
-    process-email`, not a generic job-queue worker)."""
+class PenaltyMitigationBatchRequest(BaseModel):
+    """Request body for a `PENALTY_MITIGATION_BATCH` job run; maps to `JobTaskType.MITIGATION_RUN`."""
 
-    job_type: Literal["CMIR_EMAIL_INGEST"] = "CMIR_EMAIL_INGEST"
-    max_workers: int = Field(default=4, ge=1)
-    subject_contains: str | None = None
-    unread_only: bool = True
+    job_type: Literal["PENALTY_MITIGATION_BATCH"] = "PENALTY_MITIGATION_BATCH"
+
+
+class PenaltyFullRunScope(BaseModel):
+    """Which purchase orders a `PENALTY_FULL_RUN_BATCH` job run applies to.
+
+    Either a `purchase_order_status` filter or an explicit `purchase_order_ids` list, not both.
+    """
+
+    purchase_order_status: str | None = "OPEN"
+    purchase_order_ids: list[UUID] | None = None
+
+    @model_validator(mode="after")
+    def _validate_mutually_exclusive(self) -> PenaltyFullRunScope:
+        """Reject a request that explicitly sets both `purchase_order_status` and `purchase_order_ids`."""
+        if self.purchase_order_ids is not None and "purchase_order_status" in self.model_fields_set:
+            raise ValueError(
+                "Provide at most one of `purchase_order_status` or `purchase_order_ids`, not both."
+            )
+        return self
+
+
+class PenaltyFullRunBatchRequest(BaseModel):
+    """Request body for a `PENALTY_FULL_RUN_BATCH` job run.
+
+    `steps` names the subset to run; they always execute in dependency order. Maps to
+    `JobTaskType.PENALTY_FULL_RUN`.
+    """
+
+    job_type: Literal["PENALTY_FULL_RUN_BATCH"] = "PENALTY_FULL_RUN_BATCH"
+    steps: Annotated[
+        list[Literal["projection", "projection_summary", "mitigation", "mitigation_summary"]],
+        Field(min_length=1),
+    ]
+    scope: PenaltyFullRunScope = Field(default_factory=PenaltyFullRunScope)
+    projection_date: date | None = None
 
 
 def _default_job_type(value: Any) -> Any:
-    """`POST /job-runs` with an empty/omitted body historically defaulted to
-    `job_type=PENALTY_PROJECTION_BATCH` (Phase 7a, still relied on by
-    `tests/unit/api/test_api_batches.py`) -- a Pydantic discriminated union
-    needs the tag key present in the raw input to resolve which member
-    applies (member-level `job_type` defaults alone don't help it pick), so
-    this backfills the tag before discriminator resolution runs. Must sit
-    *after* `Field(discriminator=...)` in the `Annotated` chain -- a
-    `BeforeValidator` listed before the discriminator metadata does not run
-    early enough to affect tag resolution."""
+    """Backfill `job_type=PENALTY_PROJECTION_BATCH` so an empty body still resolves a union member.
+
+    Must sit after `Field(discriminator=...)` in the `Annotated` chain to run early enough.
+    """
     if isinstance(value, dict) and "job_type" not in value:
         return {**value, "job_type": "PENALTY_PROJECTION_BATCH"}
     return value
 
 
 JobRunRequest = Annotated[
-    PenaltyProjectionBatchRequest | CmirEmailIngestJobRunRequest,
+    PenaltyProjectionBatchRequest | PenaltyMitigationBatchRequest | PenaltyFullRunBatchRequest,
     Field(discriminator="job_type"),
     BeforeValidator(_default_job_type),
 ]
 
 
 class JobRunResponse(BaseModel):
+    """Response shape for `POST /job-runs`, confirming the dispatched batch."""
+
     job_run_id: UUID
     requested_item_count: int
     # Backend and pickup behavior at dispatch time; not an ETA.
@@ -79,6 +91,8 @@ class JobRunResponse(BaseModel):
 
 
 class JobRunStatusCounts(BaseModel):
+    """Per-status item counts for a job run."""
+
     PENDING: int
     RUNNING: int
     SUCCEEDED: int
@@ -86,6 +100,8 @@ class JobRunStatusCounts(BaseModel):
 
 
 class JobRunStatusResponse(BaseModel):
+    """Response shape for `GET /job-runs/{job_run_id}`, summarizing a batch's overall progress."""
+
     job_run_id: UUID
     requested_item_count: int
     counts: JobRunStatusCounts
@@ -94,6 +110,8 @@ class JobRunStatusResponse(BaseModel):
 
 
 class JobItemResponse(BaseModel):
+    """Response shape for one `process.job_item` row within a job run."""
+
     id: UUID
     item_type: str
     dedupe_key: str | None = None
@@ -109,6 +127,8 @@ class JobItemResponse(BaseModel):
 
 
 class JobItemListResponse(BaseModel):
+    """Paginated response shape for `GET /job-runs/{job_run_id}/items`."""
+
     job_run_id: UUID
     items: list[JobItemResponse]
     limit: int

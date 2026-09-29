@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 
 
 class OrderContext(BaseModel):
+    """Order-identifying and scheduling fields the mitigation options were ranked against."""
+
     order_id: str
     order_status: str
     retailer_name: str
@@ -22,8 +24,10 @@ class OrderContext(BaseModel):
 
 
 class MitigationOptionContext(BaseModel):
-    """One already-ranked, already-computed mitigation option -- ground
-    truth handed to the model, never something it derives itself."""
+    """One already-ranked, already-computed mitigation option.
+
+    Ground truth handed to the model, never something it derives itself.
+    """
 
     action: Literal["ACCEPT", "SPEED_UP_PRODUCTION", "SPLIT_SHIPMENT", "FASTER_CARRIER"]
     projected_penalty_after: float
@@ -43,13 +47,17 @@ class ActualOutcome(BaseModel):
 
 
 class PenaltyMitigationSummaryContext(BaseModel):
+    """Everything the model needs to narrate the engine's already-ranked mitigation options."""
+
     order: OrderContext
     current_projection_date: date  # the day the mitigation_options below were ranked for
-    current_total_expected_penalty_amount: float  # the ACCEPT baseline -- also mitigation_options[0].projected_penalty_after when ACCEPT ranks first, but given explicitly so the model never has to infer which entry is the baseline
+    # The ACCEPT baseline, stated explicitly so the model never has to work out which
+    # mitigation_options entry is the baseline.
+    current_total_expected_penalty_amount: float
     stacking_mode: str
 
-    # Already ranked (net_saving descending) by the pure engine -- never
-    # re-rank, never recompute a number from this list.
+    # Already ranked by the pure engine (net_saving descending); never re-rank, and
+    # never recompute a number from this list.
     mitigation_options: list[MitigationOptionContext]
 
     # Only populated when order.order_status == "DELIVERED"

@@ -1,16 +1,9 @@
 """Penalty-mitigation job execution and recovery sweep.
 
-Was `app/workers/fine_mitigation.py` (`fine`/`fines` -> `penalty`/`penalties`
-rename, per the approved plan's naming convention). Rewritten against the
-Phase 2/3 `common`/`process`/`penalties` repositories and services.
-
-Everything here is penalty-mitigation-specific: the MITIGATION_SUMMARY_REGEN
-per-item work (`run_mitigation_summary`) and the recovery sweep for stranded
-PENDING `penalty_summary` (MITIGATION) rows
-(`sweep_stranded_pending_mitigation_summaries`). Mirrors
-`app/workers/penalty_projection.py`'s shape for the sibling domain --
-mitigation itself has no nightly-enqueue equivalent (it's on-demand only),
-so this module is shorter and has no `enqueue_daily_run`-equivalent.
+Holds the MITIGATION_RUN per-item work, the MITIGATION_SUMMARY_REGEN per-item work,
+and the recovery sweep for stranded PENDING MITIGATION `penalty_summary` rows.
+Mitigation is on-demand only, so unlike the projection sibling this module has no
+nightly-enqueue equivalent.
 """
 
 from __future__ import annotations
@@ -31,12 +24,13 @@ from app.repositories.common.fulfillment import FulfillmentRepository
 from app.repositories.common.master_data import MasterDataRepository
 from app.repositories.common.purchase_order import PurchaseOrderRepository
 from app.repositories.penalties.job_context import PenaltyJobItemContextRepository
-from app.repositories.penalties.mitigation import MitigationOptionRepository
+from app.repositories.penalties.mitigation import MitigationInputRepository, MitigationOptionRepository
 from app.repositories.penalties.projection import ActualPenaltyRepository, PenaltyProjectionRepository
 from app.repositories.penalties.rule import PenaltyRuleRepository
 from app.repositories.penalties.summary import PenaltySummaryRepository
 from app.repositories.process.agent_registry import AgentRegistryRepository
 from app.repositories.process.job_queue import JobQueueRepository
+from app.services.penalties.mitigation.service import MitigationService
 from app.services.penalties.mitigation.summary_service import MitigationSummaryService
 from app.services.penalties.projection.service import ProjectionService
 
@@ -44,23 +38,23 @@ logger = logging.getLogger(__name__)
 
 
 def _missing_context_error(job_item_id: UUID) -> ValueError:
-    """Non-retryable: `execute_job`/`classify_failure` treat a bare
-    `ValueError` (not an `AppError`) as DEAD_LETTER -- a job item with no
-    matching context row can never succeed on retry. Mirrors
-    `app.workers.penalty_projection`'s identical helper (kept as its own
-    copy rather than a cross-module private import)."""
+    """Build the error for a job item with no matching context row.
+
+    A bare `ValueError` is what `classify_failure` dead-letters, and this can never
+    succeed on retry.
+    """
     return ValueError(
-        f"No penalty_job_item_context found for job_item_id={job_item_id!r} -- "
+        f"No penalty_job_item_context found for job_item_id={job_item_id!r}; "
         "cannot execute this job without its purchase_order_id/projection_date."
     )
 
 
 def _build_projection_service(session) -> ProjectionService:
-    """Mirrors `app.workers.penalty_projection`'s identical helper --
-    `MitigationSummaryService`/`ProjectionSummaryService._assemble_mandatory_context`
-    (via `_build_daily_history`) reads `projection_service.build_snapshot`,
-    so a full `ProjectionService` is needed here too, not just the
-    mitigation-specific repositories."""
+    """Build the full ProjectionService the summary services need for build_snapshot.
+
+    The mitigation-specific repositories alone are not enough: assembling mandatory
+    context reads `projection_service.build_snapshot`.
+    """
     return ProjectionService(
         purchase_orders=PurchaseOrderRepository(session),
         fulfillment=FulfillmentRepository(session),
@@ -70,6 +64,31 @@ def _build_projection_service(session) -> ProjectionService:
     )
 
 
+def run_mitigation(job: ClaimedJob, database: Database) -> None:
+    """Compute and persist fresh mitigation options against a persisted projection.
+
+    The batch-dispatched twin of `POST /penalties/mitigations`; both call
+    `MitigationService.run_for_purchase_order`. Not to be confused with
+    `run_mitigation_summary`, which needs these options to exist already and calls
+    the LLM over them; this function involves no LLM call.
+    """
+    with database.session() as session:
+        context = PenaltyJobItemContextRepository(session).get(job.job_item_id)
+        if context is None:
+            raise _missing_context_error(job.job_item_id)
+
+        service = MitigationService(
+            purchase_orders=PurchaseOrderRepository(session),
+            rules=PenaltyRuleRepository(session),
+            master_data=MasterDataRepository(session),
+            projections=PenaltyProjectionRepository(session),
+            mitigation_inputs=MitigationInputRepository(session),
+            mitigation_options=MitigationOptionRepository(session),
+            projection_service=_build_projection_service(session),
+        )
+        service.run_for_purchase_order(context["purchase_order_id"], context["projection_date"])
+
+
 def run_mitigation_summary(
     job: ClaimedJob,
     database: Database,
@@ -77,6 +96,13 @@ def run_mitigation_summary(
     *,
     heartbeat: Callable[[], None] | None,
 ) -> None:
+    """Regenerate the LLM narrative over existing mitigation options.
+
+    Requires those options to exist already; it never computes them. `run_generation`
+    only flushes its FAILED row, so a failure commits explicitly before re-raising;
+    otherwise `Database.session()` would roll that row back before the worker loop
+    could classify the failure.
+    """
     # Keep the LLM call outside the mitigation-options session's lifetime.
     with database.session() as session:
         context = PenaltyJobItemContextRepository(session).get(job.job_item_id)
@@ -102,14 +128,10 @@ def run_mitigation_summary(
             force_regenerate=context["force_regenerate_summary"],
         )
         if summary_job.status == SummaryStatus.PENDING:
-            # See app.workers.penalty_projection.run_summary's identical
-            # try/except -- run_generation's FAILED-row persistence is only
-            # a `flush()`; letting the exception propagate straight out of
-            # this `with database.session()` block would hit
-            # `Database.session()`'s own `except Exception:
-            # session.rollback()` and silently undo it. Commit explicitly
-            # before re-raising so the FAILED ledger row survives for the
-            # worker loop's retry/dead-letter classification to act on.
+            # run_generation only flushes its FAILED row, so letting the exception
+            # escape this block would hit Database.session()'s own rollback and undo
+            # it. Commit first so the FAILED ledger row survives for the worker loop
+            # to classify.
             try:
                 service.run_generation(
                     context["purchase_order_id"],
@@ -128,10 +150,7 @@ def sweep_stranded_pending_mitigation_summaries(
     *,
     today: date | None = None,
 ) -> SweepResult:
-    """Recover PENDING `penalty_summary` (MITIGATION) rows with no
-    corresponding job item -- full mirror of
-    sweep_stranded_pending_projection_summaries for the mitigation-summary
-    feature."""
+    """Recover PENDING MITIGATION `penalty_summary` rows with no corresponding job item."""
     tz = ZoneInfo(settings.summary.business_timezone)
     resolved_today = today or datetime.now(tz).date()
     earliest_as_of_date = resolved_today - timedelta(days=settings.summary.pending_sweep_days)

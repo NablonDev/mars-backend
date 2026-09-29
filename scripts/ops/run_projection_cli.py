@@ -3,7 +3,7 @@ No-server CLI: runs the penalty-projection service directly against the
 configured database (DATABASE_URL / .env), without needing `uvicorn`
 running. Kept for ad-hoc/local use and cron/Airflow-style scheduling
 where standing up an HTTP server just to run a batch job is unnecessary
--- the API (`POST /api/v1/purchase-orders/{purchase_order_id}/penalty-projections`,
+-- the API (`POST /api/v1/penalties/projections`,
 or `POST /api/v1/job-runs` for the full nightly batch) is the equivalent
 for anything that should go through HTTP.
 
@@ -22,7 +22,7 @@ Examples:
 --with-summary additionally runs the penalty-projection-summary generation
 for each purchase order right after its projection succeeds -- the same
 sequential guarantee as
-`POST /purchase-orders/{purchase_order_id}/penalty-projections/summary`,
+`POST /penalties/projections/summary`,
 for this no-HTTP-server path. Runs inline (no BackgroundTasks needed in a
 one-shot CLI process) and needs Azure OpenAI configured (AZURE_OPENAI_API_KEY/
 AZURE_OPENAI_ENDPOINT/AZURE_OPENAI_DEPLOYMENT_NAME).

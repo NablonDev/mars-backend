@@ -1,43 +1,4 @@
-"""Shared `get_or_schedule`/reuse-check/cache-hit-miss/PENDING->READY|FAILED
-lifecycle for the two penalty-summary LLM features (projection and
-mitigation summaries).
-
-Was two near-mirror implementations, `app/services/fine_projection/summary.py`
-(`FineProjectionSummaryService`) and `app/services/fine_mitigation/summary.py`
-(`FineMitigationSummaryService`) -- their documented duplication (see both
-modules' former docstrings) is merged here per the approved plan's Phase 2
-flag #3. `app.services.penalties.projection.summary_service`/
-`app.services.penalties.mitigation.summary_service` now hold only the
-genuinely different pieces: which repositories back the domain-specific
-history/context, which agent/prompt content, and how the mandatory context
-and content fingerprint are assembled.
-
-Both features now read/write the single merged `penalties.penalty_summary`
-table (`app/repositories/penalties/summary.py`) instead of two separate
-tables, keyed by the `summary_type` discriminator
-(`app.models.enums.SummaryType`).
-
-This module does NOT import `app.agents.*` beyond the provider client and
-tool base type -- prompt content, tool schemas, and the domain Pydantic
-context/output models stay owned by each domain's `app/agents/penalties/
-<domain>/` package. The bounded tool-calling loop itself (previously inline
-here, in `_run_tool_loop`) now lives in that package's `agent.py`
-(`PenaltyProjectionAgent`/`PenaltyMitigationAgent`, Phase 4) -- this class
-only assembles context/tools and delegates generation via the `_generate`
-hook, which each subclass implements to call its own agent's differently
-named public method (`generate_projection_summary`/
-`generate_mitigation_summary`).
-
-Per-instance `get_or_schedule` enqueues a `process.job_run`/`job_item` row
-(via `JobQueueRepository`) and attaches the matching
-`penalties.penalty_job_item_context` row in the same transaction, so a
-worker has something real to dequeue and `run_generation` against, and so
-`PenaltySummaryRepository.find_stranded_pending`'s recovery sweep (which
-looks for a PENDING summary with *no* matching job-item-context row) stays
-meaningful. See this phase's report for what was deliberately left out of
-this wiring (`ProjectionService.run_for_all_open`/
-`MitigationService.run_for_purchase_order` stay synchronous, unenqueued).
-"""
+"""Shared lifecycle for penalty-summary LLM features."""
 
 from __future__ import annotations
 
@@ -65,16 +26,19 @@ from app.repositories.penalties.summary import PenaltySummaryRepository
 from app.repositories.process.agent_registry import AgentRegistryRepository
 from app.repositories.process.job_queue import JobQueueRepository
 
-#: `NotFoundError(code=...)` for `get_status` when no summary job row exists
-#: at all -- keyed by `summary_domain` ("projection" | "mitigation").
+#: `NotFoundError(code=...)` for `get_status` when no summary job row exists at
+#: all, keyed by `summary_domain`.
 _NO_SUMMARY_JOB_CODES: dict[str, str] = {
     "projection": "NO_PROJECTION_SUMMARY_JOB_EXISTS",
     "mitigation": "NO_MITIGATION_SUMMARY_JOB_EXISTS",
+    "dispute": "NO_DISPUTE_SUMMARY_JOB_EXISTS",
 }
 
 
 @dataclass
 class SummaryJob[OutputT: BaseModel]:
+    """The status and (if ready) output of one penalty-summary generation job."""
+
     purchase_order_id: UUID
     as_of_date: date
     status: str
@@ -95,11 +59,11 @@ class SummaryServiceBase[ContextT: BaseModel, OutputT: BaseModel](ABC):
     `PenaltyProjectionAgent`/`PenaltyMitigationAgent` (see `_generate`).
     """
 
-    #: `SummaryType.PROJECTION` | `SummaryType.MITIGATION` -- the
-    #: `penalty_summary.summary_type` discriminator this instance reads/writes.
+    #: The `penalty_summary.summary_type` discriminator this instance reads and
+    #: writes: PROJECTION, MITIGATION, or DISPUTE.
     summary_type: ClassVar[str]
-    #: Keys `_NO_SUMMARY_JOB_CODES` / each agent's upstream-failure-code map
-    #: -- "projection" | "mitigation".
+    #: Keys `_NO_SUMMARY_JOB_CODES` and each agent's upstream-failure-code map:
+    #: "projection", "mitigation", or "dispute".
     summary_domain: ClassVar[str]
     #: `process.agent.agent_code` this feature registers/reads under.
     agent_code: ClassVar[str]
@@ -134,26 +98,25 @@ class SummaryServiceBase[ContextT: BaseModel, OutputT: BaseModel](ABC):
 
     @abstractmethod
     def _validate(self, purchase_order_id: UUID, as_of_date: date | None) -> tuple[dict, date, list[dict]]:
-        """Resolve `as_of_date`, confirm the purchase order and its
-        domain-specific history exist and are in range, and return
-        `(purchase_order, as_of_date, history)`. Raises
-        `NotFoundError(code="PO_NOT_FOUND")` /
-        `BusinessRuleError(code="NO_PROJECTION_EXISTS")` /
-        `BusinessRuleError(code="NO_MITIGATION_OPTIONS_EXIST")` /
-        `ValidationError(code="INVALID_AS_OF_DATE")` as appropriate."""
+        """Resolve `as_of_date` and confirm the purchase order and domain history are in range.
+
+        Returns `(purchase_order, as_of_date, history)`, or raises the domain's
+        own not-found, no-history, or invalid-date error.
+        """
 
     @abstractmethod
     def _history_for_generation(self, purchase_order_id: UUID, as_of_date: date) -> list[dict]:
-        """Like `_validate`'s history, but for `run_generation` -- no
-        date-range validation (the job that reaches here was already
-        validated once, at schedule time)."""
+        """Like `_validate`'s history, but for `run_generation`.
+
+        No date-range validation here: the job that reaches this point was
+        already validated once, at schedule time.
+        """
 
     @abstractmethod
     def _assemble_mandatory_context(
         self, purchase_order: dict, as_of_date: date, history: list[dict]
     ) -> ContextT:
-        """Build the Pydantic context object handed to the LLM as the
-        mandatory (non-tool-fetched) data."""
+        """Build the Pydantic context object handed to the LLM as the mandatory (non-tool-fetched) data."""
 
     @abstractmethod
     def _compute_content_fingerprint(self, context: ContextT) -> str:
@@ -165,9 +128,7 @@ class SummaryServiceBase[ContextT: BaseModel, OutputT: BaseModel](ABC):
 
     @abstractmethod
     def _output_with_reuse_cls(self) -> type[OutputT]:
-        """The domain's `*Output` class extended with the shared reuse
-        fields (`is_reused`, `generated_for_date`, `unchanged_since`,
-        `unchanged_for_days`)."""
+        """The domain's `*Output` class extended with the shared reuse fields."""
 
     @abstractmethod
     def _generate(
@@ -179,20 +140,22 @@ class SummaryServiceBase[ContextT: BaseModel, OutputT: BaseModel](ABC):
         tools: list[BaseTool],
         heartbeat: Callable[[], None] | None,
     ) -> PenaltySummaryOutputBase:
-        """Delegate to this feature's agent (`PenaltyProjectionAgent`/
-        `PenaltyMitigationAgent`) -- calls its differently-named public
-        method (`generate_projection_summary`/`generate_mitigation_summary`)
-        to run the bounded tool-calling loop and produce the final output.
+        """Delegate to this feature's agent to run the bounded tool-calling loop and produce the output.
 
-        Returns the plain (non-reuse-aware) output -- `run_generation` only
-        needs `model_name`/`summary` off of it; the reuse fields on `OutputT`
-        are assembled later, in `_to_output`, from the persisted row."""
+        Returns the plain (non-reuse-aware) output; the reuse fields on `OutputT` are
+        assembled later, in `_to_output`, from the persisted row.
+        """
 
     # ------------------------------------------------------------------
     # Shared lifecycle
     # ------------------------------------------------------------------
 
     def _ensure_registered(self) -> UUID:
+        """Idempotently register this feature's agent identity and return its row id.
+
+        Safe to call on every request path: the repository upserts on `agent_code`, so a stale
+        `prompt_version`/`system_prompt` from a prior deploy is corrected in place.
+        """
         return self.agent_registry.ensure_registered(
             agent_code=self.agent_code,
             prompt_version=self.prompt_version,
@@ -207,6 +170,17 @@ class SummaryServiceBase[ContextT: BaseModel, OutputT: BaseModel](ABC):
         as_of_date: date | None = None,
         force_regenerate: bool = False,
     ) -> SummaryJob[OutputT]:
+        """Get existing summary or schedule one for generation by a worker.
+
+        Validates the purchase order and as_of_date, then checks (in order):
+        (1) Is a READY summary cached for this PO/date/type? Return it immediately.
+        (2) Is reuse enabled and a matching narrative in-window? Clone it, return ready.
+        (3) Create a PENDING summary row and enqueue a job for a worker to generate
+        the summary later via run_generation. Return PENDING status.
+
+        force_regenerate=True skips cache/reuse checks and always enqueues a new job.
+        Raises NotFoundError if PO or domain history don't exist, or ValidationError
+        if as_of_date is out of range."""
         purchase_order, as_of_date, history = self._validate(purchase_order_id, as_of_date)
 
         context = self._assemble_mandatory_context(purchase_order, as_of_date, history)
@@ -251,9 +225,9 @@ class SummaryServiceBase[ContextT: BaseModel, OutputT: BaseModel](ABC):
     def _enqueue_regeneration_job(
         self, purchase_order_id: UUID, as_of_date: date, force_regenerate: bool
     ) -> None:
-        """Create a `process.job_run`/`job_item` for a worker to later pick
-        up and call `run_generation` against, with the matching
-        `penalty_job_item_context` row attached in the same transaction.
+        """Enqueue a job for a worker to later call `run_generation` against.
+
+        Attaches the matching `penalty_job_item_context` row in the same transaction.
         """
         settings = get_settings()
         run = self.job_queue.create_run(
@@ -270,12 +244,9 @@ class SummaryServiceBase[ContextT: BaseModel, OutputT: BaseModel](ABC):
         )
         if item is None:
             return
-        # `enqueue()` returns the existing in-flight row, not a new one,
-        # when `dedupe_key` is already PENDING/RUNNING (e.g. a second
-        # get_or_schedule call for the same PO/date/type while the first
-        # job is still unclaimed) -- a context row already exists for that
-        # job_item_id in that case, and creating a second one would violate
-        # its primary key.
+        # `enqueue()` returns the existing in-flight row, not a new one, when `dedupe_key` is already
+        # PENDING/RUNNING; a context row already exists for that job_item_id in that case, and
+        # creating a second one would violate its primary key.
         if self.job_context.get(item["id"]) is not None:
             return
         self.job_context.create(
@@ -293,7 +264,11 @@ class SummaryServiceBase[ContextT: BaseModel, OutputT: BaseModel](ABC):
         content_fingerprint: str,
         context_hash: str,
     ) -> dict | None:
-        """Reuse the latest matching narrative within the configured window."""
+        """Find and reuse a prior narrative if its content fingerprint matches, within `max_reuse_days`.
+
+        Returns the reused row dict, or None if no match is found within the window. Caller must
+        already have validated the purchase order and as_of_date.
+        """
         settings = get_settings()
         earliest_source_date = as_of_date - timedelta(days=settings.summary.max_reuse_days)
         agent_id = self._ensure_registered()
@@ -336,21 +311,30 @@ class SummaryServiceBase[ContextT: BaseModel, OutputT: BaseModel](ABC):
         return reused
 
     def get_status(self, purchase_order_id: UUID, as_of_date: date | None = None) -> SummaryJob[OutputT]:
+        """Fetch the status and output of a scheduled summary job.
+
+        Resolves as_of_date if omitted, then looks for a summary dated exactly
+        as_of_date. If not found, falls back to the nearest prior summary (to
+        handle queries after a date when no job was enqueued). Returns job status
+        (PENDING/READY/FAILED), output if READY, and error_message if FAILED.
+        Raises NotFoundError if no summary exists for the PO/date within the
+        historical range."""
         _, as_of_date, _ = self._validate(purchase_order_id, as_of_date)
 
         row = self.summaries.get_by_key(purchase_order_id, self.summary_type, as_of_date)
         if row is None:
-            # No job dated exactly as_of_date -- fall back to the nearest
-            # prior READY summary, same reasoning as find_reusable's
-            # nearest-prior-date matching.
-            row = self.summaries.get_latest_ready_not_after(purchase_order_id, self.summary_type, as_of_date)
+            # No job dated exactly as_of_date: fall back to the nearest prior job of any status.
+            # Status-agnostic on purpose, a PENDING/FAILED job dated before as_of_date must still
+            # be reported as such, not treated as if it never existed just because it never
+            # reached READY (see PenaltySummaryRepository.get_latest_not_after's docstring).
+            row = self.summaries.get_latest_not_after(purchase_order_id, self.summary_type, as_of_date)
         if row is None:
             raise NotFoundError(
                 code=_NO_SUMMARY_JOB_CODES[self.summary_domain],
                 message=(
                     f"No penalty-{self.summary_domain}-summary job found for "
-                    f"purchase_order_id={purchase_order_id!r}, as_of_date={as_of_date.isoformat()!r} -- "
-                    f"POST /purchase-orders/{{purchase_order_id}}/{self.summary_domain}-summary first."
+                    f"purchase_order_id={purchase_order_id}, as_of_date={as_of_date.isoformat()}. "
+                    f"POST /penalties/{self.summary_domain}s/summary first."
                 ),
             )
 
@@ -365,6 +349,11 @@ class SummaryServiceBase[ContextT: BaseModel, OutputT: BaseModel](ABC):
         )
 
     def _to_output(self, row: dict) -> OutputT:
+        """Map a persisted `penalty_summary` row onto the reuse-aware output DTO.
+
+        A row is "reused" when its `source_as_of_date` differs from its own `as_of_date`, meaning
+        `_try_reuse` cloned an earlier narrative instead of generating a new one.
+        """
         source_as_of_date = row.get("source_as_of_date")
         is_reused = source_as_of_date is not None
         as_of_date = row["as_of_date"]
@@ -453,6 +442,11 @@ class SummaryServiceBase[ContextT: BaseModel, OutputT: BaseModel](ABC):
         )
 
     def _safe_mark_failed(self, purchase_order_id: UUID, as_of_date: date, error_message: str) -> None:
+        """Persist a FAILED status for this job, swallowing any secondary failure.
+
+        Called from `run_generation`'s exception handlers, which must re-raise the original error
+        regardless of whether the failure write succeeds.
+        """
         try:
             self.summaries.mark_failed(
                 purchase_order_id,
@@ -470,5 +464,4 @@ class SummaryServiceBase[ContextT: BaseModel, OutputT: BaseModel](ABC):
             )
 
     # The bounded tool-calling loop itself lives in each domain's
-    # `PenaltyProjectionAgent`/`PenaltyMitigationAgent` (see `_generate`
-    # above) -- Phase 4 extraction, was inline here as `_run_tool_loop`.
+    # PenaltyProjectionAgent/PenaltyMitigationAgent (see _generate above).

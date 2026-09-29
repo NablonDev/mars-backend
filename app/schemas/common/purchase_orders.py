@@ -1,12 +1,6 @@
-"""API schemas for `common.purchase_order`/`purchase_order_line` -- header
-and line kept split per the ERP redesign (a confirmation or delivery can
-partially cover a multi-line PO).
+"""API schemas for `purchase_order` and `purchase_order_line`, kept as separate shapes.
 
-Was `app/schemas/orders.py`'s flat, single-line `OrderRequest`/
-`OrderResponse` -- `PurchaseOrderRequest` now carries a nested `lines` list;
-`app/api/v1/common/purchase_orders.py` creates the header then each line
-against `PurchaseOrderRepository.create_purchase_order`/`add_line` in turn
-(no single repository call does both -- see that repository's docstring).
+A confirmation or delivery can partially cover a multi-line PO, so the two never collapse.
 """
 
 from __future__ import annotations
@@ -18,6 +12,8 @@ from pydantic import BaseModel, ConfigDict
 
 
 class PurchaseOrderLineCreate(BaseModel):
+    """One line of a `POST /purchase-orders` request."""
+
     line_number: str
     retailer_po_line_number: str | None = None
     sku_id: UUID | None = None
@@ -34,6 +30,8 @@ class PurchaseOrderLineCreate(BaseModel):
 
 
 class PurchaseOrderLineResponse(BaseModel):
+    """Response shape for a `purchase_order_line` row."""
+
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
@@ -55,6 +53,8 @@ class PurchaseOrderLineResponse(BaseModel):
 
 
 class PurchaseOrderRequest(BaseModel):
+    """Request body for `POST /purchase-orders`, creating a PO header with its nested lines."""
+
     purchase_order_number: str
     retailer_id: UUID
     retailer_po_number: str | None = None
@@ -69,6 +69,8 @@ class PurchaseOrderRequest(BaseModel):
 
 
 class PurchaseOrderResponse(BaseModel):
+    """Response shape for a `purchase_order` row, including its lines."""
+
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID

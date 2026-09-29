@@ -14,7 +14,7 @@ repository fixtures those tables were deferred to this phase for.
 Phase 7a (API surface) restores the `app`/`client`/`seeded_client`
 fixtures, for the `common`/`penalties` domain at least (CMIR/PO-validation
 routes are mounted but not exercised through these fixtures -- `service`/
-`po_service` are fakes, see `_FakeCmirRunService`/`_FakePoValidationService`
+`po_service` are fakes, see `_FakeCmirService`/`_FakePoValidationService`
 below, so `create_app` never has to build the real Postgres-backed LangGraph
 composition root for a test that only needs `common`/`penalties`).
 
@@ -39,7 +39,9 @@ import os
 TEST_INTERNAL_API_KEY = "test-internal-api-key-do-not-use-in-prod-000000000000000000000000"
 os.environ.setdefault("APP_INTERNAL_API_KEY", TEST_INTERNAL_API_KEY)
 
+import hashlib
 from types import SimpleNamespace
+from uuid import UUID
 
 import pytest
 from sqlalchemy.pool import StaticPool
@@ -49,10 +51,12 @@ from app.repositories.cmir.action_log import ActionLogRepository
 from app.repositories.cmir.cmir_record import CmirRecordRepository
 from app.repositories.cmir.email import EmailRepository
 from app.repositories.cmir.job_context import CmirJobItemContextRepository, CmirJobRunContextRepository
+from app.repositories.common.delivery_change_request import PoDeliveryChangeRequestRepository
 from app.repositories.common.fulfillment import FulfillmentRepository
 from app.repositories.common.master_data import MasterDataRepository
 from app.repositories.common.purchase_order import PurchaseOrderRepository
-from app.repositories.penalties.delivery_change_request import PoDeliveryChangeRequestRepository
+from app.repositories.common.retailer_agreement import RetailerAgreementRepository
+from app.repositories.penalties.dispute import PenaltyDisputeRepository
 from app.repositories.penalties.job_context import (
     PenaltyJobItemContextRepository,
     PenaltyJobRunContextRepository,
@@ -102,11 +106,13 @@ def repos(db_session):
     Phase 3, and still keyed on deleted models today)."""
     return SimpleNamespace(
         master_data=MasterDataRepository(db_session),
+        retailer_agreements=RetailerAgreementRepository(db_session),
         purchase_orders=PurchaseOrderRepository(db_session),
         fulfillment=FulfillmentRepository(db_session),
         penalty_rules=PenaltyRuleRepository(db_session),
         penalty_projections=PenaltyProjectionRepository(db_session),
         actual_penalties=ActualPenaltyRepository(db_session),
+        disputes=PenaltyDisputeRepository(db_session),
         penalty_summaries=PenaltySummaryRepository(db_session),
         mitigation_inputs=MitigationInputRepository(db_session),
         mitigation_options=MitigationOptionRepository(db_session),
@@ -126,6 +132,21 @@ def repos(db_session):
         cmir_job_item_context=CmirJobItemContextRepository(db_session),
         cmir_job_run_context=CmirJobRunContextRepository(db_session),
     )
+
+
+def make_retailer_agreement(repos, retailer_id: UUID) -> UUID:
+    """Create a throwaway `retailer_agreement` for a test-seeded retailer.
+
+    `penalty_rule.retailer_agreement_id` is NOT NULL; test fixtures have no real uploaded
+    contract, so each gets its own disposable placeholder row.
+    """
+    created = repos.retailer_agreements.add_retailer_agreement(
+        retailer_id=retailer_id,
+        contract_code=f"TEST-{retailer_id}",
+        title="Test retailer agreement",
+        document_sha256=hashlib.sha256(f"test-agreement:{retailer_id}".encode()).hexdigest(),
+    )
+    return created["id"]
 
 
 class _UnconfiguredFakeChatClient:
@@ -183,7 +204,7 @@ class _NoOpJobQueue:
         return 0
 
 
-class _FakeCmirRunService:
+class _FakeCmirService:
     """Stand-in passed to `create_app(service=...)` so lifespan's `if
     app.state.service is None: build_service()` branch is never reached
     (these fixtures never run lifespan at all -- no `with TestClient(app):`
@@ -192,19 +213,19 @@ class _FakeCmirRunService:
     Postgres-backed LangGraph checkpointer, which no test using these
     fixtures should ever need.
 
-    Default value of the `cmir_run_service` fixture below -- a test module
+    Default value of the `cmir_service` fixture below -- a test module
     that needs the `client`/`app` fixtures to actually exercise cmir routes
-    overrides `cmir_run_service` (same fixture name) with a richer fake; see
+    overrides `cmir_service` (same fixture name) with a richer fake; see
     `tests/unit/api/test_cmir_api.py`/`test_workflow_threads_api.py`."""
 
 
 class _FakePoValidationService:
-    """Same purpose as `_FakeCmirRunService`, for `app.state.po_service` /
+    """Same purpose as `_FakeCmirService`, for `app.state.po_service` /
     the `po_validation_service` fixture below."""
 
 
 class _FakeOntologyUpdateRunService:
-    """Same purpose as `_FakeCmirRunService`, for
+    """Same purpose as `_FakeCmirService`, for
     `app.state.ontology_update_service` / the `ontology_update_service`
     fixture below -- `build_ontology_update_service()` -> `Container.build()`
     opens the same real Postgres-backed checkpointer, which no test using
@@ -212,17 +233,17 @@ class _FakeOntologyUpdateRunService:
 
 
 class _FakeOntologyInsertRunService:
-    """Same purpose as `_FakeCmirRunService`, for
+    """Same purpose as `_FakeCmirService`, for
     `app.state.ontology_insert_service` / the `ontology_insert_service`
     fixture below."""
 
 
 @pytest.fixture
-def cmir_run_service() -> object:
+def cmir_service() -> object:
     """Default fake for `app.state.service` -- override this fixture (same
     name) in a test module to supply a fake implementing the
-    `CmirRunService` methods your test's routes actually call."""
-    return _FakeCmirRunService()
+    `CmirService` methods your test's routes actually call."""
+    return _FakeCmirService()
 
 
 @pytest.fixture
@@ -254,7 +275,7 @@ def ontology_insert_service() -> object:
 @pytest.fixture
 def app(
     database: Database,
-    cmir_run_service: object,
+    cmir_service: object,
     po_validation_service: object,
     ontology_update_service: object,
     ontology_insert_service: object,
@@ -267,7 +288,7 @@ def app(
     exercise it) -- `app.state.database` is set directly instead, `
     require_internal_api_key`/`get_llm_client`/`get_job_queue` are
     overridden, and `service`/`po_service` come from the
-    `cmir_run_service`/`po_validation_service` fixtures (trivial stand-ins
+    `cmir_service`/`po_validation_service` fixtures (trivial stand-ins
     by default, so `create_app` never has to build the CMIR/PO-validation
     composition root -- a real Postgres LangGraph checkpointer -- for tests
     that only exercise `common`/`penalties` routes; overridable per test
@@ -277,7 +298,7 @@ def app(
     from app.main import create_app
 
     test_app = create_app(
-        service=cmir_run_service,
+        service=cmir_service,
         po_service=po_validation_service,
         ontology_update_service=ontology_update_service,
         ontology_insert_service=ontology_insert_service,

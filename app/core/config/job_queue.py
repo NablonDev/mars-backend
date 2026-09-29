@@ -1,16 +1,4 @@
-"""Batch job-queue settings, shared by both `cmir`/`po_validation` and
-`penalties` (the `process.job_run`/`process.job_item` backbone).
-
-`job_item` remains the source of truth for work state regardless of whether
-jobs are polled from Postgres or dispatched via Service Bus. The
-service_bus_* fields here are the job queue's own Azure resource -- kept
-separate from ServiceBusSettings (service_bus.py), which is CMIR's own,
-independent mail-processing queue; two unrelated Service Bus resources of
-the same underlying Azure type.
-
-Read by app.queue.factory.build_job_queue, app.queue.service_bus, and
-app.workers.loop (worker concurrency, batch size, backoff, deadlines).
-"""
+"""Settings for batch job queue (worker concurrency, backoff, deadlines)."""
 
 from __future__ import annotations
 
@@ -21,11 +9,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class JobQueueBackend(StrEnum):
+    """Backend that stores and dispatches batch job-queue items."""
+
     POSTGRES = "postgres"
     SERVICE_BUS = "service_bus"
 
 
 class JobQueueSettings(BaseSettings):
+    """Batch job-queue settings: backend choice, worker concurrency, retry backoff, and deadlines."""
+
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore", populate_by_name=True
     )

@@ -14,7 +14,7 @@ and would otherwise drift stale relative to the lead-time gate as real
 time passes).
 """
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -22,6 +22,7 @@ import pytest
 from app.core.exceptions import BusinessRuleError, ConflictError, NotFoundError, ValidationError
 from app.services.penalties.delivery_change import PoDeliveryChangeRequestService
 from app.services.penalties.projection.service import ProjectionService
+from tests.conftest import make_retailer_agreement
 
 _ORDER_QTY = 1000
 _UNIT_PRICE = 10.0
@@ -77,8 +78,9 @@ def _seed_order(
     plant = repos.master_data.add_plant(plant_code, None, None)
     repos.penalty_rules.add_rule(
         rule_code=f"RULE-{retailer_code}",
-        retailer_id=retailer["id"],
         violation_type="OTIF_LATE",
+        penalty_category="OTIF_LATE",
+        retailer_agreement_id=make_retailer_agreement(repos, retailer["id"]),
         calc_type="FLAT_FEE",
         rate=25.0,
     )
@@ -121,6 +123,12 @@ def test_create_request_success(repos):
     assert row["proposed_delivery_date"] == today + timedelta(days=16)
     assert row["baseline_delivery_date"] == today + timedelta(days=12)
     assert row["expires_at"] - row["requested_at"] == timedelta(hours=48)
+    # request_id is a server-generated external-system correlation key --
+    # not API-visible (the surrogate `id: UUID` is the sole public
+    # identifier), but still persisted for future reconciliation. Generated via
+    # `new_id("ext")` in `PoDeliveryChangeRequestService.create_request`.
+    assert row["request_id"].startswith("ext_")
+    assert len(row["request_id"]) == len("ext_") + 12
 
 
 def test_create_request_rejects_duplicate_active(repos):
@@ -210,7 +218,12 @@ def test_create_request_uses_per_retailer_policy(repos):
 
 
 def test_record_response_accepted_shifts_dates_and_retriggers_projection(repos):
-    today = date.today()  # noqa: DTZ011 -- test date anchor, not a naive-datetime bug (see module docstring)
+    # `now` is pinned and injected into both calls (record_response's own
+    # `now` parameter is designed for exactly this, per its docstring) so the
+    # test is anchored to a single fixed instant instead of two independent
+    # wall-clock reads that can straddle a UTC/local day boundary.
+    fixed_now = datetime(2026, 1, 15, 12, 0)  # noqa: DTZ001 (naive by design)
+    today = fixed_now.date()
     original_delivery = today + timedelta(days=12)
     original_ship = today + timedelta(days=10)
     proposed_delivery = today + timedelta(days=16)  # +4 days
@@ -222,9 +235,9 @@ def test_record_response_accepted_shifts_dates_and_retriggers_projection(repos):
         requested_delivery_date=original_delivery,
     )
     service = _build_service(repos)
-    request = service.create_request(purchase_order_id, "DELAY", proposed_delivery)
+    request = service.create_request(purchase_order_id, "DELAY", proposed_delivery, now=fixed_now)
 
-    updated = service.record_response(request["request_id"], "ACCEPTED")
+    updated = service.record_response(request["id"], "ACCEPTED", now=fixed_now)
 
     assert updated["status"] == "ACCEPTED"
     assert updated["retailer_response_date"] == today
@@ -258,9 +271,7 @@ def test_record_response_countered_shifts_by_countered_delta(repos):
     service = _build_service(repos)
     request = service.create_request(purchase_order_id, "DELAY", proposed_delivery)
 
-    updated = service.record_response(
-        request["request_id"], "COUNTERED", countered_delivery_date=countered_delivery
-    )
+    updated = service.record_response(request["id"], "COUNTERED", countered_delivery_date=countered_delivery)
 
     assert updated["status"] == "COUNTERED"
     assert updated["countered_delivery_date"] == countered_delivery
@@ -285,12 +296,15 @@ def test_record_response_countered_out_of_range_rejected(repos):
         # Not strictly between baseline_delivery_date (+12) and
         # proposed_delivery_date (+16).
         service.record_response(
-            request["request_id"], "COUNTERED", countered_delivery_date=today + timedelta(days=20)
+            request["id"], "COUNTERED", countered_delivery_date=today + timedelta(days=20)
         )
 
 
 def test_record_response_rejected_leaves_order_untouched(repos):
-    today = date.today()  # noqa: DTZ011 -- test date anchor, not a naive-datetime bug (see module docstring)
+    # See test_record_response_accepted_shifts_dates_and_retriggers_projection:
+    # `now` is pinned and injected into both calls for the same reason.
+    fixed_now = datetime(2026, 1, 15, 12, 0)  # noqa: DTZ001 (naive by design)
+    today = fixed_now.date()
     original_delivery = today + timedelta(days=12)
     original_ship = today + timedelta(days=10)
 
@@ -301,9 +315,9 @@ def test_record_response_rejected_leaves_order_untouched(repos):
         requested_delivery_date=original_delivery,
     )
     service = _build_service(repos)
-    request = service.create_request(purchase_order_id, "SHORTAGE", today + timedelta(days=16))
+    request = service.create_request(purchase_order_id, "SHORTAGE", today + timedelta(days=16), now=fixed_now)
 
-    updated = service.record_response(request["request_id"], "REJECTED")
+    updated = service.record_response(request["id"], "REJECTED", now=fixed_now)
 
     assert updated["status"] == "REJECTED"
     purchase_order = repos.purchase_orders.require_purchase_order(purchase_order_id)
@@ -326,16 +340,16 @@ def test_record_response_twice_raises_invalid_response(repos):
     )
     service = _build_service(repos)
     request = service.create_request(purchase_order_id, "DELAY", today + timedelta(days=16))
-    service.record_response(request["request_id"], "REJECTED")
+    service.record_response(request["id"], "REJECTED")
 
     with pytest.raises(ValidationError):
-        service.record_response(request["request_id"], "ACCEPTED")
+        service.record_response(request["id"], "ACCEPTED")
 
 
-def test_record_response_unknown_request_id_raises_not_found(repos):
+def test_record_response_unknown_id_raises_not_found(repos):
     service = _build_service(repos)
     with pytest.raises(NotFoundError):
-        service.record_response("ext_does_not_exist", "ACCEPTED")
+        service.record_response(uuid4(), "ACCEPTED")
 
 
 def test_expire_stale_transitions_pending_past_timeout_and_retriggers(repos):
@@ -359,7 +373,7 @@ def test_expire_stale_transitions_pending_past_timeout_and_retriggers(repos):
     expired = service.expire_stale(as_of=expire_as_of)
 
     assert len(expired) == 1
-    assert expired[0]["request_id"] == request["request_id"]
+    assert expired[0]["id"] == request["id"]
     assert expired[0]["status"] == "EXPIRED"
 
     # No active PENDING request remains, and the order's dates are untouched.
@@ -417,7 +431,7 @@ def test_negotiation_status_transitions_through_full_lifecycle(repos):
     assert repos.purchase_orders.require_purchase_order(purchase_order_1)["negotiation_status"] == "PENDING"
 
     # record_response(ACCEPTED) -> ACCEPTED
-    service.record_response(request["request_id"], "ACCEPTED")
+    service.record_response(request["id"], "ACCEPTED")
     assert repos.purchase_orders.require_purchase_order(purchase_order_1)["negotiation_status"] == "ACCEPTED"
 
     # A second order, walked through COUNTERED.
@@ -430,9 +444,7 @@ def test_negotiation_status_transitions_through_full_lifecycle(repos):
     )
     request_2 = service.create_request(purchase_order_2, "DELAY", proposed_delivery)
     assert repos.purchase_orders.require_purchase_order(purchase_order_2)["negotiation_status"] == "PENDING"
-    service.record_response(
-        request_2["request_id"], "COUNTERED", countered_delivery_date=today + timedelta(days=14)
-    )
+    service.record_response(request_2["id"], "COUNTERED", countered_delivery_date=today + timedelta(days=14))
     assert repos.purchase_orders.require_purchase_order(purchase_order_2)["negotiation_status"] == "COUNTERED"
 
     # A third order, walked through REJECTED.
@@ -444,7 +456,7 @@ def test_negotiation_status_transitions_through_full_lifecycle(repos):
         retailer_code="RET-EXT-NEG-3",
     )
     request_3 = service.create_request(purchase_order_3, "DELAY", proposed_delivery)
-    service.record_response(request_3["request_id"], "REJECTED")
+    service.record_response(request_3["id"], "REJECTED")
     assert repos.purchase_orders.require_purchase_order(purchase_order_3)["negotiation_status"] == "REJECTED"
 
     # A fourth order, walked through the sweep -> EXPIRED path.

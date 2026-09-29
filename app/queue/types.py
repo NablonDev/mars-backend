@@ -15,20 +15,11 @@ from uuid import UUID
 class ClaimedJob:
     """Immutable representation of a job claimed for execution.
 
-    `receipt` contains opaque backend-specific settlement state. Only the
-    backend that created the claim may interpret it.
-
-    The domain-shaped business key this dataclass used to carry directly
-    (`order_id`/`projection_date`/`task_type`/`stacking_mode_override`/
-    `force_regenerate_summary`) is gone -- it moved off `process.job_item`
-    entirely, onto each domain's own `job_item_context` extension table
-    (see `app.repositories.process.job_queue`'s module docstring). A
-    caller that needs those fields (e.g. `app.workers.penalty_projection`/
-    `penalty_mitigation`) looks up the matching context row itself, keyed
-    on `job_item_id`, rather than reading it off this dataclass.
-    `item_type` (was `task_type`) is `process.job_item.item_type`, the real
-    discriminator column, and is still carried here since every backend's
-    dispatch table needs it to route the claimed job at all.
+    `receipt` carries opaque backend-specific settlement state that only the backend
+    which created the claim may interpret; `item_type` mirrors
+    `process.job_item.item_type`, the discriminator every dispatch table routes on.
+    Domain-shaped job fields are absent by design: they live in each domain's own
+    `job_item_context` table, which workers look up by `job_item_id`.
     """
 
     job_item_id: UUID
@@ -42,11 +33,7 @@ class ClaimedJob:
 
 @dataclass
 class SweepResult:
-    """Result of one domain's stranded-PENDING-summary recovery sweep.
-
-    Shared by domain workers to provide a consistent, domain-neutral result.
-    Used to report recovered jobs and the associated job run, when available.
-    """
+    """Domain-neutral result of one stranded-PENDING-summary recovery sweep."""
 
     recovered_count: int
     job_run_id: UUID | None = None

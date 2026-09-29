@@ -30,7 +30,7 @@ class WorkflowNodes:
     No `workflow_thread_repository` collaborator here (unlike the
     pre-restructure version of this class): `process.workflow_thread` rows
     are now created lazily, exactly once per run, at the first human
-    interrupt -- exclusively by `CmirRunService._handle_graph_state` (see
+    interrupt -- exclusively by `CmirService._handle_graph_state` (see
     that method's docstring). Nothing in this graph creates one eagerly any
     more, so there is nothing for a node to inject that repository into.
     """

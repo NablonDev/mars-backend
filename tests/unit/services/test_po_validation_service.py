@@ -19,7 +19,7 @@ now a `common.purchase_order_line` row like any other domain's.
 A repository gap this exposed and could not silently route around: no
 `PurchaseOrderRepository` method sets `purchase_order_line.line_status`
 directly (nodes.py -- Phase 4 -- is the intended future writer, and it's
-currently broken/unwired, same as `app.services.cmir.run_service`'s sibling
+currently broken/unwired, same as `app.services.cmir.service`'s sibling
 gap). Where a test needs to simulate "the graph's outcome node already set
 this terminal status" (the old fakes' `forced_final_status` override), this
 suite writes the ORM row directly via `db_session`, flagged inline at each
@@ -78,6 +78,9 @@ def _build_service(repos, graph: FakeGraph) -> PoValidationService:
         human_actions=repos.human_actions,
         processing_errors=repos.processing_errors,
         cmir_records=repos.cmir_records,
+        job_queue=repos.job_queue,
+        job_run_context=repos.cmir_job_run_context,
+        job_item_context=repos.cmir_job_item_context,
         graph=graph,
     )
     return PoValidationService(
@@ -174,7 +177,7 @@ def test_qty_mismatch_interrupt_creates_thread_and_pending_action(repos) -> None
     thread_id = UUID(line["thread_id"])
     thread = repos.workflow_threads.get_by_id(thread_id)
     assert thread is not None
-    assert thread["purchase_order_line_id"] is not None
+    assert thread["subject_id"] is not None
     pending = repos.human_actions.get_open_for_thread(thread_id)
     assert pending is not None
     assert pending["interrupt_type"] == "qty_mismatch_decision"
@@ -287,7 +290,7 @@ def test_submit_qty_mismatch_decision_persists_decision_and_reaches_final_stage(
         repos, "qty_mismatch_decision", resume_results=[{}]
     )
     stage = service.get_stage(thread_id)
-    line_row = db_session.get(PurchaseOrderLine, stage["purchase_order_line_id"])
+    line_row = db_session.get(PurchaseOrderLine, stage["subject_id"])
     line_row.line_status = "READY_FOR_SO_CREATION_PARTIAL"
     db_session.flush()
 
@@ -311,3 +314,170 @@ def test_get_errors_rejects_unknown_po_line(repos) -> None:
         service.get_errors(uuid4())
 
     assert raised.value.code == "VALIDATION_ERROR"
+
+
+def test_get_errors_finds_pre_interrupt_error_with_no_thread(repos) -> None:
+    """A line that fails in a pre-interrupt node (handle_error) has no
+    workflow_thread at all -- get_errors must still find it, via
+    processing_error.purchase_order_line_id directly."""
+    retailer = repos.master_data.add_retailer("CUST-1", "Customer 1", None, "SUM")
+    plant = repos.master_data.add_plant("1000", None, None)
+    purchase_order = repos.purchase_orders.create_purchase_order(
+        purchase_order_number="PO-2026-0002", retailer_id=retailer["id"], order_date=date(2026, 1, 1)
+    )
+    line = repos.purchase_orders.add_line(
+        purchase_order_id=purchase_order["id"],
+        line_number="10",
+        ordered_quantity=100,
+        unit_price=0.0,
+        retailer_material_code="ACME-MAT-1",
+        plant_id=plant["id"],
+        line_status="FAILED",
+    )
+    repos.processing_errors.log(
+        "LOOKUP_FAILURE",
+        purchase_order_line_id=line["id"],
+        node_name="check_material_master",
+        error_code="LookupError",
+        error_message="no material_master row",
+    )
+    service = _build_service(repos, FakeGraph())
+
+    result = service.get_errors(line["id"])
+
+    assert len(result["items"]) == 1
+    assert result["items"][0]["error_type"] == "LOOKUP_FAILURE"
+    assert result["items"][0]["purchase_order_line_id"] == line["id"]
+
+
+def test_ingest_po_lines_creates_job_run_and_settles_job_item_succeeded(repos) -> None:
+    """Gap 1: ingest_po_lines must create a real process.job_run/job_item
+    trail (mirroring CmirService.start_email_ingest) and settle each
+    line's job item inline, in the same request, once its graph invocation
+    returns -- without changing the existing synchronous response shape."""
+    service = _build_service(repos, FakeGraph([{}]))
+
+    result = service.ingest_po_lines([_line_payload()])
+
+    job_run_id = UUID(result["batch_id"])
+    run_summary = repos.job_queue.get_run_summary(job_run_id)
+    assert run_summary["counts"]["SUCCEEDED"] == 1
+
+    items = repos.job_queue.list_run_items(job_run_id)
+    assert len(items) == 1
+    assert items[0]["item_type"] == "PO_VALIDATION"
+    assert items[0]["status"] == "SUCCEEDED"
+
+    po_line_id = UUID(result["lines"][0]["po_line_id"])
+    context = repos.cmir_job_item_context.get(items[0]["id"])
+    assert context is not None
+    assert context["purchase_order_line_id"] == po_line_id
+
+
+def test_ingest_po_lines_marks_job_item_dead_on_graph_exception(repos) -> None:
+    """A graph invocation that raises internally is a job-execution
+    failure, not just a business-level FAILED line -- the job item settles
+    DEAD, not SUCCEEDED (see PoValidationService._settle_job_item)."""
+    service = _build_service(repos, FakeGraph([RuntimeError("checkpointer unavailable")]))
+
+    result = service.ingest_po_lines([_line_payload()])
+
+    assert result["lines"][0]["thread_id"] is None
+    job_run_id = UUID(result["batch_id"])
+    items = repos.job_queue.list_run_items(job_run_id)
+    assert items[0]["status"] == "DEAD"
+    assert items[0]["last_error_code"] == "PO_VALIDATION_GRAPH_ERROR"
+
+
+def test_list_ready_lines_defaults_to_ready_statuses(repos) -> None:
+    """Gap 3: with no explicit status, only the 'ready' terminal statuses
+    are returned, not every line regardless of status."""
+    retailer = repos.master_data.add_retailer("CUST-2", "Customer 2", None, "SUM")
+    plant = repos.master_data.add_plant("2000", None, None)
+    purchase_order = repos.purchase_orders.create_purchase_order(
+        purchase_order_number="PO-READY-1", retailer_id=retailer["id"], order_date=date(2026, 1, 1)
+    )
+    ready_line = repos.purchase_orders.add_line(
+        purchase_order_id=purchase_order["id"],
+        line_number="10",
+        ordered_quantity=100,
+        unit_price=0.0,
+        plant_id=plant["id"],
+        line_status="READY_FOR_SO_CREATION",
+    )
+    repos.purchase_orders.add_line(
+        purchase_order_id=purchase_order["id"],
+        line_number="20",
+        ordered_quantity=100,
+        unit_price=0.0,
+        plant_id=plant["id"],
+        line_status="AWAITING_DECISION",
+    )
+    service = _build_service(repos, FakeGraph())
+
+    result = service.list_ready_lines()
+
+    ids = {row["id"] for row in result["items"]}
+    assert ready_line["id"] in ids
+    assert all(
+        row["line_status"] in ("READY_FOR_SO_CREATION", "READY_FOR_SO_CREATION_PARTIAL")
+        for row in result["items"]
+    )
+
+
+def test_list_ready_lines_filters_by_explicit_status(repos) -> None:
+    retailer = repos.master_data.add_retailer("CUST-3", "Customer 3", None, "SUM")
+    plant = repos.master_data.add_plant("3000", None, None)
+    purchase_order = repos.purchase_orders.create_purchase_order(
+        purchase_order_number="PO-READY-2", retailer_id=retailer["id"], order_date=date(2026, 1, 1)
+    )
+    awaiting_line = repos.purchase_orders.add_line(
+        purchase_order_id=purchase_order["id"],
+        line_number="10",
+        ordered_quantity=100,
+        unit_price=0.0,
+        plant_id=plant["id"],
+        line_status="AWAITING_DECISION",
+    )
+    service = _build_service(repos, FakeGraph())
+
+    result = service.list_ready_lines(status="AWAITING_DECISION")
+
+    assert [row["id"] for row in result["items"]] == [awaiting_line["id"]]
+
+
+def test_list_ready_lines_scoped_to_purchase_order_ignores_ready_default(repos) -> None:
+    """`purchase_order_id` given, `status=None`: every line for that PO
+    regardless of status -- the old nested `GET /purchase-orders/{id}/lines`
+    route's behavior, now folded into `list_ready_lines` itself (see that
+    method's docstring)."""
+    retailer = repos.master_data.add_retailer("CUST-4", "Customer 4", None, "SUM")
+    plant = repos.master_data.add_plant("4000", None, None)
+    purchase_order = repos.purchase_orders.create_purchase_order(
+        purchase_order_number="PO-READY-3", retailer_id=retailer["id"], order_date=date(2026, 1, 1)
+    )
+    awaiting_line = repos.purchase_orders.add_line(
+        purchase_order_id=purchase_order["id"],
+        line_number="10",
+        ordered_quantity=100,
+        unit_price=0.0,
+        plant_id=plant["id"],
+        line_status="AWAITING_DECISION",
+    )
+    # A different PO's ready line must not leak into the scoped result.
+    other_po = repos.purchase_orders.create_purchase_order(
+        purchase_order_number="PO-READY-4", retailer_id=retailer["id"], order_date=date(2026, 1, 1)
+    )
+    repos.purchase_orders.add_line(
+        purchase_order_id=other_po["id"],
+        line_number="10",
+        ordered_quantity=100,
+        unit_price=0.0,
+        plant_id=plant["id"],
+        line_status="READY_FOR_SO_CREATION",
+    )
+    service = _build_service(repos, FakeGraph())
+
+    result = service.list_ready_lines(purchase_order_id=purchase_order["id"])
+
+    assert [row["id"] for row in result["items"]] == [awaiting_line["id"]]

@@ -147,12 +147,18 @@ def test_partial_unique_index_rejects_second_inflight_row_but_allows_after_termi
         # application-level pre-check, to prove the DB-level partial
         # unique index (`uq_job_item_inflight`) itself is what rejects a
         # second in-flight row for the same (item_type, dedupe_key).
-        with pytest.raises(IntegrityError):
+        # attempt_count/max_attempts/metadata are supplied explicitly (matching
+        # the ORM-level defaults in app/models/process/job.py::JobItem) so this
+        # insert reaches the partial unique index instead of failing the
+        # NOT NULL constraint on those columns first -- those aren't
+        # `server_default`s at the DB level, so a raw insert that omits them
+        # would raise an IntegrityError of its own, for the wrong reason.
+        with pytest.raises(IntegrityError) as exc_info:
             session.execute(
                 text(
                     "INSERT INTO process.job_item "
-                    "(id, job_run_id, item_type, dedupe_key, status) "
-                    "VALUES (:id, :run_id, :item_type, :dedupe_key, 'PENDING')"
+                    "(id, job_run_id, item_type, dedupe_key, status, attempt_count, max_attempts, metadata) "
+                    "VALUES (:id, :run_id, :item_type, :dedupe_key, 'PENDING', 0, 5, '{}'::jsonb)"
                 ),
                 {
                     "id": uuid.uuid4(),
@@ -161,6 +167,10 @@ def test_partial_unique_index_rejects_second_inflight_row_but_allows_after_termi
                     "dedupe_key": dedupe_key,
                 },
             )
+        assert "uq_job_item_inflight" in str(exc_info.value), (
+            "IntegrityError was not raised by the uq_job_item_inflight partial "
+            f"unique index: {exc_info.value}"
+        )
         session.rollback()
 
         # Move the first row to a terminal state directly via raw SQL --

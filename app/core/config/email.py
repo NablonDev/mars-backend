@@ -1,7 +1,4 @@
-"""CMIR inbound-email (Gmail IMAP) settings.
-
-Read by app.services.email_reader.GmailImapReader via EmailConfig.from_settings().
-"""
+"""CMIR inbound-email (Gmail IMAP) settings."""
 
 from __future__ import annotations
 
@@ -10,6 +7,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class EmailSettings(BaseSettings):
+    """CMIR inbound-email (Gmail IMAP) connection and polling settings."""
+
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore", populate_by_name=True
     )

@@ -1,15 +1,4 @@
-"""Repository for `penalties.penalty_job_run_context`/`penalty_job_item_context`
--- the penalties-specific extension tables over the shared
-`process.job_run`/`process.job_item` queue (see
-`app.models.penalties.job_context` for why these stay domain-owned and why
-the table names are prefixed).
-
-Deferred by Phase 2 to Phase 3 (this phase): these models existed from
-Phase 1 with no repository. Wired in here so `ProjectionService`/
-`MitigationService`/the two summary services can attach the matching
-domain context row in the same transaction as the `process.job_item` row
-`JobQueueRepository.enqueue()` creates.
-"""
+"""Repository for penalty_job_run_context and penalty_job_item_context."""
 
 from __future__ import annotations
 
@@ -20,10 +9,11 @@ from uuid import UUID
 from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
-from app.models.penalties.job_context import PenaltyJobItemContext, PenaltyJobRunContext
+from app.models.penalties import PenaltyJobItemContext, PenaltyJobRunContext
 
 
 def _run_context_to_dict(row: PenaltyJobRunContext) -> dict:
+    """Serialize a PenaltyJobRunContext row into a dict."""
     return {
         "job_run_id": row.job_run_id,
         "projection_date": row.projection_date,
@@ -33,6 +23,7 @@ def _run_context_to_dict(row: PenaltyJobRunContext) -> dict:
 
 
 def _item_context_to_dict(row: PenaltyJobItemContext) -> dict:
+    """Serialize a PenaltyJobItemContext row into a dict."""
     return {
         "job_item_id": row.job_item_id,
         "purchase_order_id": row.purchase_order_id,
@@ -44,6 +35,12 @@ def _item_context_to_dict(row: PenaltyJobItemContext) -> dict:
 
 
 class PenaltyJobRunContextRepository:
+    """Access layer for penalty_job_run_context.
+
+    Holds the per-run parameters (projection date, stacking-mode override,
+    arbitrary metadata) a scheduled penalty job was launched with.
+    """
+
     def __init__(self, session: Session) -> None:
         self._session = session
 
@@ -54,6 +51,7 @@ class PenaltyJobRunContextRepository:
         stacking_mode_override: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict:
+        """Create a penalty_job_run_context row for a job run."""
         row = PenaltyJobRunContext(
             job_run_id=job_run_id,
             projection_date=projection_date,
@@ -65,18 +63,23 @@ class PenaltyJobRunContextRepository:
         return _run_context_to_dict(row)
 
     def get(self, job_run_id: UUID) -> dict | None:
+        """Fetch a job run's context by job_run_id, or None if not found."""
         row = self._session.get(PenaltyJobRunContext, job_run_id)
         return _run_context_to_dict(row) if row is not None else None
 
     def truncate_all(self) -> None:
-        """Deletes every penalty_job_run_context row, for a force-reseed.
-        FKs to process.job_run, so must run before
-        `JobQueueRepository.truncate_all()` clears it."""
+        """Delete every row; must run before `JobQueueRepository.truncate_all` (FK)."""
         self._session.execute(delete(PenaltyJobRunContext))
         self._session.flush()
 
 
 class PenaltyJobItemContextRepository:
+    """Access layer for penalty_job_item_context.
+
+    Holds the per-PO parameters (task type, stacking-mode override, force-
+    regenerate flag) a single job item was dispatched with.
+    """
+
     def __init__(self, session: Session) -> None:
         self._session = session
 
@@ -89,6 +92,7 @@ class PenaltyJobItemContextRepository:
         stacking_mode_override: str | None = None,
         force_regenerate_summary: bool = False,
     ) -> dict:
+        """Create a penalty_job_item_context row for a job item."""
         row = PenaltyJobItemContext(
             job_item_id=job_item_id,
             purchase_order_id=purchase_order_id,
@@ -102,16 +106,11 @@ class PenaltyJobItemContextRepository:
         return _item_context_to_dict(row)
 
     def get(self, job_item_id: UUID) -> dict | None:
+        """Fetch a job item's context by job_item_id, or None if not found."""
         row = self._session.get(PenaltyJobItemContext, job_item_id)
         return _item_context_to_dict(row) if row is not None else None
 
     def truncate_all(self) -> None:
-        """Deletes every penalty_job_item_context row, for a force-reseed.
-        FKs to both process.job_item and common.purchase_order, so must run
-        before `JobQueueRepository.truncate_all()`/
-        `PurchaseOrderRepository.truncate_all()` clear either -- this is
-        exactly the class of FK-ordering bug documented in
-        `force-seeding-error.txt` (a pre-restructure job_item->order FK
-        violation on force-reseed), now against the new schema's tables."""
+        """Delete every row; must run before the job-item and purchase-order truncates."""
         self._session.execute(delete(PenaltyJobItemContext))
         self._session.flush()

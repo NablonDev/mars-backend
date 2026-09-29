@@ -1,13 +1,4 @@
-"""Repository for `common` schema master data: retailers, SKUs, materials
-(plus per-plant material_master), plants/storage locations/warehouses,
-carriers, and retailer-owned ship-to locations.
-
-Was `app/repositories/fine_master_data.py`. Every row now has a UUID
-surrogate `id` (see app/db/base.py::generate_uuid7) in addition to its
-natural business code (`retailer_code`, `sku_code`, ...); callers that
-used to pass the business key straight into downstream FKs now look the
-row up here first to get its `id`.
-"""
+"""Repository for common schema master data: retailers, SKUs, materials, plants, carriers."""
 
 from __future__ import annotations
 
@@ -32,6 +23,7 @@ from app.models import (
 
 
 def _retailer_to_dict(r: Retailer) -> dict:
+    """Serialize a Retailer row into a dict."""
     return {
         "id": r.id,
         "retailer_code": r.retailer_code,
@@ -46,14 +38,17 @@ def _retailer_to_dict(r: Retailer) -> dict:
 
 
 def _sku_to_dict(r: Sku) -> dict:
+    """Serialize a Sku row into a dict."""
     return {"id": r.id, "sku_code": r.sku_code, "description": r.description, "material_id": r.material_id}
 
 
 def _material_to_dict(r: Material) -> dict:
+    """Serialize a Material row into a dict."""
     return {"id": r.id, "material_code": r.material_code, "description": r.description}
 
 
 def _material_master_to_dict(r: MaterialMaster) -> dict:
+    """Serialize a MaterialMaster row into a dict."""
     return {
         "id": r.id,
         "material_id": r.material_id,
@@ -71,6 +66,7 @@ def _material_master_to_dict(r: MaterialMaster) -> dict:
 
 
 def _plant_to_dict(r: Plant) -> dict:
+    """Serialize a Plant row into a dict."""
     return {
         "id": r.id,
         "plant_code": r.plant_code,
@@ -80,6 +76,7 @@ def _plant_to_dict(r: Plant) -> dict:
 
 
 def _storage_location_to_dict(r: StorageLocation) -> dict:
+    """Serialize a StorageLocation row into a dict."""
     return {
         "id": r.id,
         "plant_id": r.plant_id,
@@ -89,6 +86,7 @@ def _storage_location_to_dict(r: StorageLocation) -> dict:
 
 
 def _warehouse_to_dict(r: Warehouse) -> dict:
+    """Serialize a Warehouse row into a dict."""
     return {
         "id": r.id,
         "warehouse_code": r.warehouse_code,
@@ -98,6 +96,7 @@ def _warehouse_to_dict(r: Warehouse) -> dict:
 
 
 def _carrier_to_dict(r: Carrier) -> dict:
+    """Serialize a Carrier row into a dict."""
     return {
         "id": r.id,
         "carrier_code": r.carrier_code,
@@ -107,6 +106,7 @@ def _carrier_to_dict(r: Carrier) -> dict:
 
 
 def _retailer_location_to_dict(r: RetailerLocation) -> dict:
+    """Serialize a RetailerLocation row into a dict."""
     return {
         "id": r.id,
         "retailer_id": r.retailer_id,
@@ -124,6 +124,12 @@ def _retailer_location_to_dict(r: RetailerLocation) -> dict:
 
 
 class MasterDataRepository:
+    """Access layer for common schema master data.
+
+    Manages retailers, SKUs, materials, plants, carriers, warehouses, and
+    retailer locations. All writes are idempotent (upsert on natural keys).
+    """
+
     def __init__(self, session: Session) -> None:
         self._session = session
 
@@ -135,6 +141,7 @@ class MasterDataRepository:
     # ------------------------------------------------------------------
 
     def _get_retailer_row(self, retailer_id: UUID) -> Retailer | None:
+        """Fetch a retailer row by its surrogate id, or None if not found."""
         return self._session.get(Retailer, retailer_id)
 
     def add_retailer(
@@ -148,6 +155,13 @@ class MasterDataRepository:
         extension_response_sla_hours: int = 48,
         extension_penalty_threshold: float = 0.0,
     ) -> dict:
+        """Create a retailer row and return it as a dict.
+
+        `stacking_mode` and the `extension_*` fields seed the retailer's
+        penalty-stacking and delivery-change-request policies with sane
+        defaults, so callers only need to override the ones a given
+        retailer actually differs on.
+        """
         row = Retailer(
             retailer_code=retailer_code,
             retailer_name=retailer_name,
@@ -162,7 +176,13 @@ class MasterDataRepository:
         self._session.flush()
         return _retailer_to_dict(row)
 
+    def get_retailer(self, retailer_id: UUID) -> dict | None:
+        """Fetch a retailer by its surrogate id, or None if not found."""
+        row = self._get_retailer_row(retailer_id)
+        return _retailer_to_dict(row) if row is not None else None
+
     def get_retailer_by_code(self, retailer_code: str) -> dict | None:
+        """Fetch a retailer by its natural key `retailer_code`, or None if not found."""
         row = self._session.scalars(select(Retailer).where(Retailer.retailer_code == retailer_code)).first()
         return _retailer_to_dict(row) if row is not None else None
 
@@ -228,17 +248,19 @@ class MasterDataRepository:
         )
 
     def list_retailers(self) -> list[dict]:
+        """List every retailer, in no guaranteed order."""
         rows = self._session.scalars(select(Retailer)).all()
         return [_retailer_to_dict(r) for r in rows]
 
     def get_stacking_mode(self, retailer_id: UUID) -> str:
-        # retailer_id is a DB-level FK on every caller's table, so `retailer`
-        # is never actually None here -- the fallback exists only because
-        # nothing at the type level proves that to a caller of this method.
+        """Fetch a retailer's penalty stacking mode (SUM or MAX), defaulting to SUM."""
+        # retailer_id is a DB-level FK on every caller's table, so the row always
+        # exists; the fallback is here only because nothing at the type level says so.
         retailer = self._get_retailer_row(retailer_id)
         return retailer.stacking_mode if retailer else "SUM"
 
     def get_extension_policy(self, retailer_id: UUID) -> dict:
+        """Fetch extension (DCR) policy for a retailer, with built-in defaults."""
         retailer = self._get_retailer_row(retailer_id)
         if retailer is None:
             return {"min_lead_days": 2, "response_sla_hours": 48, "penalty_threshold": 0.0}
@@ -253,25 +275,30 @@ class MasterDataRepository:
     # ------------------------------------------------------------------
 
     def add_sku(self, sku_code: str, description: str | None = None, material_id: UUID | None = None) -> dict:
+        """Create a SKU row; `material_id` stays None until the SKU is mapped to a material."""
         row = Sku(sku_code=sku_code, description=description, material_id=material_id)
         self._session.add(row)
         self._session.flush()
         return _sku_to_dict(row)
 
     def list_skus(self) -> list[dict]:
+        """List every SKU, in no guaranteed order."""
         rows = self._session.scalars(select(Sku)).all()
         return [_sku_to_dict(r) for r in rows]
 
     def add_material(self, material_code: str, description: str | None = None) -> dict:
+        """Create a material row and return it as a dict.
+
+        `Material` is the plant-agnostic product definition; per-plant
+        inventory and sourcing facts live on `MaterialMaster` instead.
+        """
         row = Material(material_code=material_code, description=description)
         self._session.add(row)
         self._session.flush()
         return _material_to_dict(row)
 
     def list_materials(self) -> list[dict]:
-        """Phase 7a addition (flagged): `GET /api/v1/materials` (approved
-        plan §5) had no listing method here -- purely additive, mirrors
-        `list_skus`/`list_plants`/`list_carriers` above."""
+        """List every material, in no guaranteed order."""
         rows = self._session.scalars(select(Material)).all()
         return [_material_to_dict(r) for r in rows]
 
@@ -283,6 +310,7 @@ class MasterDataRepository:
         return list(self._session.scalars(select(Material)).all())
 
     def get_material_by_code(self, material_code: str) -> dict | None:
+        """Fetch a material by its natural key `material_code`, or None if not found."""
         row = self._session.scalars(select(Material).where(Material.material_code == material_code)).first()
         return _material_to_dict(row) if row is not None else None
 
@@ -310,6 +338,14 @@ class MasterDataRepository:
         source_system: str | None = None,
         last_synced_at: datetime | None = None,
     ) -> dict:
+        """Create a material_master row and return it as a dict.
+
+        Holds the per-plant inventory and lifecycle facts for a material: available
+        quantity, discontinuation status, and the `follow_up_material_id` a purchase
+        order should be re-sourced against once the material is phased out.
+        `find_material_master` is the natural-key lookup on (`sap_material_number`,
+        `plant_id`).
+        """
         row = MaterialMaster(
             material_id=material_id,
             sap_material_number=sap_material_number,
@@ -328,8 +364,7 @@ class MasterDataRepository:
         return _material_master_to_dict(row)
 
     def list_material_masters(self) -> list[dict]:
-        """Phase 7a addition (flagged): `GET /api/v1/material-masters`
-        (approved plan §5) had no listing method here -- purely additive."""
+        """List every material_master row across all materials and plants."""
         rows = self._session.scalars(select(MaterialMaster)).all()
         return [_material_master_to_dict(r) for r in rows]
 
@@ -377,6 +412,7 @@ class MasterDataRepository:
         return _material_master_to_dict(row)
 
     def find_material_master(self, sap_material_number: str, plant_id: UUID) -> dict | None:
+        """Fetch a material_master by SAP number and plant, or None if not found."""
         row = self._session.scalars(
             select(MaterialMaster).where(
                 MaterialMaster.sap_material_number == sap_material_number,
@@ -423,12 +459,14 @@ class MasterDataRepository:
     def add_plant(
         self, plant_code: str, plant_name: str | None = None, country_code: str | None = None
     ) -> dict:
+        """Create a plant row, identified by `plant_code`."""
         row = Plant(plant_code=plant_code, plant_name=plant_name, country_code=country_code)
         self._session.add(row)
         self._session.flush()
         return _plant_to_dict(row)
 
     def get_plant_by_code(self, plant_code: str) -> dict | None:
+        """Fetch a plant by its natural key `plant_code`, or None if not found."""
         row = self._session.scalars(select(Plant).where(Plant.plant_code == plant_code)).first()
         return _plant_to_dict(row) if row is not None else None
 
@@ -456,6 +494,7 @@ class MasterDataRepository:
         return self.add_plant(plant_code, plant_name, country_code)
 
     def list_plants(self) -> list[dict]:
+        """List every plant, in no guaranteed order."""
         rows = self._session.scalars(select(Plant)).all()
         return [_plant_to_dict(r) for r in rows]
 
@@ -468,6 +507,7 @@ class MasterDataRepository:
     def add_storage_location(
         self, plant_id: UUID, storage_location_code: str, storage_location_name: str | None = None
     ) -> dict:
+        """Create a storage_location row, always scoped to a single plant."""
         row = StorageLocation(
             plant_id=plant_id,
             storage_location_code=storage_location_code,
@@ -480,6 +520,7 @@ class MasterDataRepository:
     def add_warehouse(
         self, warehouse_code: str, warehouse_name: str | None = None, plant_id: UUID | None = None
     ) -> dict:
+        """Create a warehouse row; a warehouse need not belong to any plant."""
         row = Warehouse(warehouse_code=warehouse_code, warehouse_name=warehouse_name, plant_id=plant_id)
         self._session.add(row)
         self._session.flush()
@@ -492,6 +533,11 @@ class MasterDataRepository:
     def add_carrier(
         self, carrier_code: str, carrier_name: str, historical_reliability_score: float = 90.0
     ) -> dict:
+        """Create a carrier row and return it as a dict.
+
+        `historical_reliability_score` defaults to a neutral 90.0 when the
+        real historical figure for a new carrier isn't known yet.
+        """
         row = Carrier(
             carrier_code=carrier_code,
             carrier_name=carrier_name,
@@ -502,10 +548,12 @@ class MasterDataRepository:
         return _carrier_to_dict(row)
 
     def get_carrier(self, carrier_id: UUID) -> dict | None:
+        """Fetch a carrier by surrogate id, or None if not found."""
         row = self._session.get(Carrier, carrier_id)
         return _carrier_to_dict(row) if row is not None else None
 
     def list_carriers(self) -> list[dict]:
+        """List every carrier, in no guaranteed order."""
         rows = self._session.scalars(select(Carrier)).all()
         return [_carrier_to_dict(r) for r in rows]
 
@@ -527,6 +575,11 @@ class MasterDataRepository:
         country_code: str | None = None,
         is_active: bool = True,
     ) -> dict:
+        """Create a retailer_location row and return it as a dict.
+
+        `location_code` is the retailer-scoped natural key; every address field is
+        optional. Locations are retired by setting `is_active` false, not deleted.
+        """
         row = RetailerLocation(
             retailer_id=retailer_id,
             location_code=location_code,
@@ -545,6 +598,7 @@ class MasterDataRepository:
         return _retailer_location_to_dict(row)
 
     def list_retailer_locations(self, retailer_id: UUID) -> list[dict]:
+        """List every location for a retailer, inactive ones included."""
         rows = self._session.scalars(
             select(RetailerLocation).where(RetailerLocation.retailer_id == retailer_id)
         ).all()
@@ -555,11 +609,12 @@ class MasterDataRepository:
     # ------------------------------------------------------------------
 
     def truncate_all(self) -> None:
-        """Deletes every master-data row, for a force-reseed, in FK-safe
-        child-before-parent order. Caller must first clear anything that
-        FK-references these (penalty_rule, purchase_order, and
-        purchase_order's own dependents) -- see the seeding service for
-        the full order."""
+        """Delete every master-data row, child before parent, for a force-reseed.
+
+        Callers must first clear everything that FK-references master data
+        (penalty_rule, purchase_order and its dependents); the seeding service owns
+        that order.
+        """
         self._session.execute(delete(RetailerLocation))
         self._session.execute(delete(Warehouse))
         self._session.execute(delete(StorageLocation))

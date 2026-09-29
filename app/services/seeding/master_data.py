@@ -1,34 +1,23 @@
-"""Master/reference data (retailers, materials/SKUs, plants, carriers)
-shared by both penalty-projection and penalty-mitigation seeding -- not
-exclusive to either sub-domain, so it stays out of their seeding modules.
+"""Master/reference data seeds: retailers, materials/SKUs, plants, and carriers.
 
-Was `app/services/seeding/master_data.py` against the old flat
-`sku`/`location` model. Rewritten against the ERP-normalized `common`
-schema (Phase 3 -- services move/folder-split):
-
-- The old flat `sku` row (`sku_id`, `sku_code` -- which was actually a
-  material-like code, e.g. "MAT-100234") is now two rows: a `material`
-  (plant-agnostic identity, `material_code` = the old `sku_code`) and a
-  `sku` (`sku_code` = the old `sku_id`, `material_id` FK to the new
-  `material` row). `material_master` (the per-plant stock/logistics
-  extension) is NOT seeded here -- none of the four worked-example
-  scenarios' projection/mitigation math reads it; only PO-validation's
-  quantity check does, and that domain seeds its own fixtures separately
-  (out of scope for this seed set).
-- The old `location` row (one flat table for both a manufacturing plant and
-  a distribution center) is now a `plant` row for each -- `warehouse` is a
-  distinct concept in the new schema (a `delivery.ship_from_warehouse_id`
-  target) that neither worked example's seed data or engine inputs need.
+Shared by both projection and mitigation seeding, so it stays out of either
+sub-domain's module. `material_master` and `warehouse` are deliberately not
+seeded: no worked-example scenario reads them.
 """
 
 from __future__ import annotations
 
+import hashlib
 from typing import TypedDict
+from uuid import UUID
 
 from app.repositories.common.master_data import MasterDataRepository
+from app.repositories.common.retailer_agreement import RetailerAgreementRepository
 
 
 class _RetailerSeed(TypedDict):
+    """One `retailer` row's seed fixture, matching `MasterDataRepository.add_retailer`'s fields."""
+
     retailer_code: str
     retailer_name: str
     priority_tier: str
@@ -53,27 +42,23 @@ _RETAILERS: list[_RetailerSeed] = [
         "retailer_name": "Amazon",
         "priority_tier": "TIER_1",
         "stacking_mode": "SUM",
-        # Amazon's shorter SLA is deliberate -- it's what makes the
-        # AMZ-780112 timeout scenario in the seeding day-loop actually
-        # expire within that order's own scenario window.
+        # Amazon's shorter SLA is deliberate: it is what makes the AMZ-780112
+        # timeout scenario expire within that order's own scenario window.
         "extension_min_lead_days": 2,
         "extension_response_sla_hours": 24,
         "extension_penalty_threshold": 100.0,
     },
 ]
 
-# (material_code, sku_code, description) -- material_code was the old
-# scenario data's "sku_code" (e.g. "MAT-100234"); sku_code was the old
-# "sku_id" (e.g. "SKU-PED30").
+# (material_code, sku_code, description)
 _MATERIALS_AND_SKUS = [
     ("MAT-100234", "SKU-PED30", "Pedigree Adult Dry Dog Food 30lb"),
     ("MAT-100511", "SKU-CES12", "Cesar Adult Wet Dog Food Variety Pack 12ct"),
     ("MAT-100587", "SKU-WHI20", "Whiskas Adult Dry Cat Food 20lb"),
 ]
 
-# (plant_code, plant_name) -- was `_LOCATIONS`; both the manufacturing
-# plant and the distribution center become `plant` rows (see module
-# docstring).
+# (plant_code, plant_name); both the manufacturing plant and the
+# distribution center are `plant` rows.
 _PLANTS = [
     ("LOC-COL", "Mars Petcare Plant - Columbia MO"),
     ("LOC-ATL", "Mars DC - Atlanta GA"),
@@ -81,6 +66,8 @@ _PLANTS = [
 
 
 class _CarrierSeed(TypedDict):
+    """One `carrier` row's seed fixture, matching `MasterDataRepository.add_carrier`'s fields."""
+
     carrier_code: str
     carrier_name: str
     historical_reliability_score: float
@@ -96,9 +83,35 @@ _CARRIERS: list[_CarrierSeed] = [
 ]
 
 
-def seed(master_data: MasterDataRepository) -> dict[str, int]:
-    """Idempotent: safe to call repeatedly. Skips anything that already
-    exists rather than erroring on a duplicate key."""
+def ensure_placeholder_retailer_agreement(
+    retailer_agreements: RetailerAgreementRepository, retailer: dict
+) -> UUID:
+    """Idempotent per-retailer placeholder `retailer_agreement`, reused across seed runs.
+
+    Seed/demo rules have no real uploaded contract to carry `penalty_rule.retailer_agreement_id`
+    (NOT NULL); shared by projection, dispute, and this module's own retailer seeding.
+    """
+    existing = retailer_agreements.list_for_retailer(retailer["id"])
+    if existing:
+        return existing[0]["id"]
+    created = retailer_agreements.add_retailer_agreement(
+        retailer_id=retailer["id"],
+        contract_code=f"SEED-{retailer['retailer_code']}",
+        title=f"Seed placeholder agreement ({retailer['retailer_code']})",
+        document_sha256=hashlib.sha256(f"seed-placeholder:{retailer['retailer_code']}".encode()).hexdigest(),
+    )
+    return created["id"]
+
+
+def seed(
+    master_data: MasterDataRepository, retailer_agreements: RetailerAgreementRepository
+) -> dict[str, int]:
+    """Seed master data, skipping any row whose natural key already exists.
+
+    Also ensures a placeholder `retailer_agreement` per retailer:
+    `penalty_rule.retailer_agreement_id` is NOT NULL, and worked-example rules have no
+    genuine uploaded contract to point at.
+    """
     counts = {"retailers": 0, "materials": 0, "skus": 0, "plants": 0, "carriers": 0}
 
     existing_retailers = {r["retailer_code"] for r in master_data.list_retailers()}
@@ -115,6 +128,9 @@ def seed(master_data: MasterDataRepository) -> dict[str, int]:
                 r["extension_penalty_threshold"],
             )
             counts["retailers"] += 1
+        retailer = master_data.get_retailer_by_code(r["retailer_code"])
+        assert retailer is not None
+        ensure_placeholder_retailer_agreement(retailer_agreements, retailer)
 
     existing_skus = {s["sku_code"] for s in master_data.list_skus()}
     for material_code, sku_code, description in _MATERIALS_AND_SKUS:

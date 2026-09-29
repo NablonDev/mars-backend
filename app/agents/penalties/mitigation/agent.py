@@ -1,23 +1,11 @@
-"""`PenaltyMitigationAgent`: owns the bounded tool-calling loop for
-penalty-mitigation-summary generation.
-
-Extracted from `app.services.penalties._summary_base.SummaryServiceBase`'s
-former `_run_tool_loop` (itself inline in `FineMitigationSummaryService`
-before that). `MitigationSummaryService` now only assembles context/tools
-and delegates generation to this class via `generate_mitigation_summary`.
-
-See `app.agents.penalties.projection.agent`'s module docstring for the
-runtime system-prompt-loading rationale -- identical here.
-"""
+"""Bounded tool-calling loop for penalty mitigation summary generation."""
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from collections.abc import Callable
 from datetime import date
-from typing import Any
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
@@ -27,28 +15,21 @@ from app.agents.penalties.mitigation.schema import PenaltyMitigationSummaryOutpu
 from app.agents.providers.azure_openai import AzureOpenAIChatClient
 from app.core.exceptions import ExternalServiceError
 from app.repositories.process.agent_registry import AgentRegistryRepository
+from app.utils.heartbeat import invoke_heartbeat
+from app.utils.json_helpers import json_default, wrap_data
 
 logger = logging.getLogger(__name__)
 
+# Keep tool use bounded so a model cannot trigger an unbounded sequence of
+# LLM and tool calls. The final LLM call occurs after this loop.
 MAX_TOOL_ROUNDS = 4
 
-#: `ExternalServiceError(code=...)` for an exhausted/failed tool-calling loop
-#: -- keyed by `summary_domain` ("projection" | "mitigation").
+# Error codes are selected by summary domain because the same generation
+# machinery is shared by projection and mitigation summaries.
 _UPSTREAM_FAILURE_CODES: dict[str, str] = {
     "projection": "PENALTY_PROJECTION_SUMMARY_UPSTREAM_FAILED",
     "mitigation": "PENALTY_MITIGATION_SUMMARY_UPSTREAM_FAILED",
 }
-
-
-def _json_default(value: Any) -> Any:
-    if isinstance(value, date):
-        return value.isoformat()
-    return str(value)
-
-
-def _wrap_data(payload: dict | list) -> str:
-    body = json.dumps(payload, default=_json_default, sort_keys=True)
-    return f"<DATA>\n{body}\n</DATA>"
 
 
 class PenaltyMitigationAgent:
@@ -78,16 +59,26 @@ class PenaltyMitigationAgent:
         tools: list[BaseTool],
         heartbeat: Callable[[], None] | None = None,
     ) -> PenaltyMitigationSummaryOutput:
+        """Run the bounded tool-calling loop and return the mitigation-narration summary.
+
+        Seeds the conversation with the active mitigation-agent's system prompt and
+        the mitigation context wrapped as untrusted <DATA>, then lets the model call
+        the supplied tools for up to MAX_TOOL_ROUNDS - 1 rounds before forcing a
+        final, tool-free response. Invokes heartbeat (if given) before each LLM call
+        so a long-running worker isn't reaped mid-generation. Raises
+        ExternalServiceError if the provider call fails or the model returns no
+        usable text.
+        """
         active_agent = self._active_agent_row()
         messages: list[BaseMessage] = [
             SystemMessage(content=active_agent["system_prompt"]),
-            HumanMessage(content=_wrap_data(context.model_dump(mode="json"))),
+            HumanMessage(content=wrap_data(context.model_dump(mode="json"), default=json_default)),
         ]
 
         try:
             for round_number in range(1, MAX_TOOL_ROUNDS):
                 # Heartbeat between LLM calls keeps long-running workers alive.
-                self._invoke_heartbeat(heartbeat, order_id)
+                invoke_heartbeat(heartbeat, order_id, logger)
 
                 logger.info(
                     "Calling LLM for order_id=%s round=%s/%s",
@@ -119,7 +110,7 @@ class PenaltyMitigationAgent:
                     result = tool.invoke(tool_call["args"])
                     messages.append(
                         ToolMessage(
-                            content=_wrap_data(result),
+                            content=wrap_data(result, default=json_default),
                             tool_call_id=tool_call["id"],
                         )
                     )
@@ -171,6 +162,7 @@ class PenaltyMitigationAgent:
         )
 
     def _active_agent_row(self) -> dict:
+        """Fetch the active process.agent row for this agent code, or raise ExternalServiceError."""
         active = self._agent_registry.get_active(self._agent_code)
         if active is None:
             raise ExternalServiceError(
@@ -181,16 +173,3 @@ class PenaltyMitigationAgent:
                 },
             )
         return active
-
-    @staticmethod
-    def _invoke_heartbeat(heartbeat: Callable[[], None] | None, order_id: str) -> None:
-        """Best-effort heartbeat; callback failures never abort generation."""
-        if heartbeat is None:
-            return
-        try:
-            heartbeat()
-        except Exception:
-            logger.exception(
-                "Summary heartbeat callback failed for order_id=%s; continuing generation",
-                order_id,
-            )

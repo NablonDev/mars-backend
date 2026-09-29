@@ -1,4 +1,4 @@
-# Mars Petcare Backend -- CMIR Email Resolution, PO Validation, and Projected Penalties & Mitigation
+# Mars Petcare Backend -- CMIR Email Resolution, PO Validation, and Projected Penalties, Mitigation & Dispute Resolution
 
 Two agentic backends in one FastAPI app, separated by Postgres schema:
 
@@ -9,9 +9,14 @@ Two agentic backends in one FastAPI app, separated by Postgres schema:
 
 - **Projected Penalties** (`penalties` schema) — forecasts, ahead of delivery, the
   retailer chargebacks Mars Petcare is likely to incur on open purchase orders,
-  driven by production shortfalls and shipment delays. A deterministic
-  rules engine computes the projection; an LLM-powered endpoint can explain,
-  in plain language, why a given order's number is what it is.
+  driven by production shortfalls and shipment delays; after delivery,
+  re-adjudicates a retailer's already-charged deduction against Mars's own
+  rules and the real, final delivery facts (not the risk-adjusted ones
+  projection works with). A deterministic rules engine computes both the
+  projection and the dispute verdict; the LLM only explains the projection, or
+  narrates the dispute outcome, in plain language. A separate LangGraph
+  pipeline extracts candidate penalty rules from an uploaded contract, with a
+  human-review step before anything is promoted into a live rule.
 
 Both domains share a `common` schema (retailers, materials, purchase orders,
 ...) and a `process` schema (the job/agent/workflow backbone: `job_run`,
@@ -68,9 +73,16 @@ Seed penalties demo data and try it out:
 ```bash
 curl -X POST http://127.0.0.1:8000/api/v1/admin/seed-master-data
 curl -X POST http://127.0.0.1:8000/api/v1/admin/simulate-daily-run
-curl -X POST http://127.0.0.1:8000/api/v1/purchase-orders/<purchase_order_id>/penalty-projections \
-  -H "Content-Type: application/json" -d '{}'
+curl -X POST http://127.0.0.1:8000/api/v1/penalties/projections \
+  -H "Content-Type: application/json" -d '{"purchase_order_id": "<purchase_order_id>"}'
 ```
+
+`seed-master-data` also seeds a separate, additive set of dispute fixtures
+(not touched by `simulate-daily-run`). A dispute moves through
+`OPEN` → `ANALYZED` → `RESOLVED`/`OVERRIDDEN`; the deterministic rules
+engine — never the LLM — computes the verdict, matched against the rules
+in force on the historical charge date, not today. See `docs/RUNBOOK.md`
+§11 for the full walkthrough.
 
 ### The batch worker
 
@@ -132,11 +144,10 @@ app/
                                 workflow_threads.py + processing_errors.py (shared), admin.py
   core/                       -- config/ (nested settings), exceptions.py + envelope.py,
                                 middleware/, rate_limit.py
-  services/                     -- business logic, domain-first: penalties/, cmir/,
-                                     po_validation/, seeding/
-    penalties/projection/         -- pure calculation, no SQLAlchemy/FastAPI
+  services/                     -- business logic, domain-first: penalties{projection,mitigation,dispute}/,
+                                     cmir/, po_validation/, seeding/
   agents/                            -- LLM/LangGraph layer: providers/ (shared),
-                                        penalties/{projection,mitigation}/, cmir/, po_validation/
+                                        penalties/{projection,mitigation,dispute}/, cmir/, po_validation/
   queue/                               -- job-queue dispatch backends behind one Protocol
                                           (shared by both domains), plus the CMIR Service Bus producer
   workers/                              -- the claim/execute/settle loop (shared), plus the
@@ -168,7 +179,7 @@ Main endpoints (base path `/api/v1`):
 |---|---|---|
 | `POST` | `/cmir/email-events` | Start one email ingest batch. |
 | `GET` | `/workflow-threads?domain=cmir` | Reviewer queue: list workflow threads. |
-| `GET` | `/job-runs?job_type=CMIR_EMAIL_INGEST` | Ops view: batch/run rollups (shared job-queue resource). |
+| `GET` | `/job-runs/{job_run_id}` | Ops view: run rollup for one ingest batch (`job_run_id` is the `batch_id` returned by `POST /cmir/email-events`; shared job-queue resource — no filter-by-`job_type` list route exists). |
 | `GET` | `/workflow-threads/{thread_id}` | Get current stage/status for one thread (`?include=snapshot` for the full snapshot). |
 | `POST` | `/workflow-threads/{thread_id}/missing-fields` | Submit missing mandatory fields and resume graph. |
 | `PATCH` | `/workflow-threads/{thread_id}/draft` | Save reviewer draft edits. |

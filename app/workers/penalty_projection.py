@@ -1,29 +1,12 @@
 """Penalty-projection job execution, recovery sweep, and daily enqueue.
 
-Was `app/workers/fine_projection.py` (`fine`/`fines` -> `penalty`/`penalties`
-rename, per the approved plan's naming convention -- mirrors the
-`app/services/penalties/projection/` rename). Rewritten against the Phase
-2/3 `common`/`process`/`penalties` repositories and services; stale
-imports (`app.repositories.job_queue`, `app.repositories.order`,
-`app.repositories.fine_rule`, `app.repositories.fine_master_data`,
-`app.repositories.fine_projection.*`, `app.repositories.agent_registry`,
-`app.services.fine_projection.*`) are gone.
+Holds the ORDER_RUN and PROJECTION_SUMMARY_REGEN per-item work, the nightly enqueue of
+one ORDER_RUN per OPEN purchase order, the recovery sweep for stranded PENDING
+PROJECTION `penalty_summary` rows, and the PO delivery-change-request expiry sweep.
 
-Everything here is penalty-projection-specific: the ORDER_RUN/
-PROJECTION_SUMMARY_REGEN per-item work (`run_projection`, `run_summary`),
-the nightly enqueue of one ORDER_RUN per OPEN purchase order
-(`enqueue_daily_run`), the recovery sweep for stranded PENDING
-`penalty_summary` (PROJECTION) rows
-(`sweep_stranded_pending_projection_summaries`), and the PO
-delivery-change-request expiry sweep
-(`sweep_expired_po_delivery_change_requests`).
-
-The domain-shaped business key (`purchase_order_id`, `projection_date`,
-`stacking_mode_override`, `force_regenerate_summary`) a `ClaimedJob` used to
-carry directly is gone from `process.job_item`/`ClaimedJob` (see
-`app.repositories.process.job_queue`'s and `app.queue.types`'s module
-docstrings) -- every per-item function below re-reads it from the matching
-`penalties.penalty_job_item_context` row via `PenaltyJobItemContextRepository`,
+`ClaimedJob` carries no domain-shaped business key, so every per-item function below
+re-reads `purchase_order_id`, `projection_date`, `stacking_mode_override` and
+`force_regenerate_summary` from the matching `penalties.penalty_job_item_context` row,
 keyed on `job.job_item_id`.
 """
 
@@ -42,10 +25,10 @@ from app.db.session import Database
 from app.models.enums import JobRunType, JobTaskType, SummaryStatus, SummaryType
 from app.queue.interfaces import JobDispatcher
 from app.queue.types import ClaimedJob, SweepResult
+from app.repositories.common.delivery_change_request import PoDeliveryChangeRequestRepository
 from app.repositories.common.fulfillment import FulfillmentRepository
 from app.repositories.common.master_data import MasterDataRepository
 from app.repositories.common.purchase_order import PurchaseOrderRepository, describe_no_open_orders
-from app.repositories.penalties.delivery_change_request import PoDeliveryChangeRequestRepository
 from app.repositories.penalties.job_context import (
     PenaltyJobItemContextRepository,
     PenaltyJobRunContextRepository,
@@ -63,16 +46,19 @@ logger = logging.getLogger(__name__)
 
 
 def _missing_context_error(job_item_id: UUID) -> ValueError:
-    """Non-retryable: `execute_job`/`classify_failure` treat a bare
-    `ValueError` (not an `AppError`) as DEAD_LETTER -- a job item with no
-    matching context row can never succeed on retry."""
+    """Build the error for a job item with no matching context row.
+
+    A bare `ValueError` is what `classify_failure` dead-letters, and this can never
+    succeed on retry.
+    """
     return ValueError(
-        f"No penalty_job_item_context found for job_item_id={job_item_id!r} -- "
+        f"No penalty_job_item_context found for job_item_id={job_item_id!r}; "
         "cannot execute this job without its purchase_order_id/projection_date."
     )
 
 
 def _build_projection_service(session) -> ProjectionService:
+    """Assemble a `ProjectionService` from a session-scoped set of repositories."""
     return ProjectionService(
         purchase_orders=PurchaseOrderRepository(session),
         fulfillment=FulfillmentRepository(session),
@@ -83,6 +69,10 @@ def _build_projection_service(session) -> ProjectionService:
 
 
 def run_projection(job: ClaimedJob, database: Database) -> None:
+    """Recompute and persist penalty projections for one purchase order.
+
+    Raises a non-retryable `ValueError` when the job item's context row is missing.
+    """
     with database.session() as session:
         context = PenaltyJobItemContextRepository(session).get(job.job_item_id)
         if context is None:
@@ -103,6 +93,13 @@ def run_summary(
     *,
     heartbeat: Callable[[], None] | None,
 ) -> None:
+    """Regenerate the LLM narrative over an existing projection.
+
+    `heartbeat` is forwarded so the worker loop can detect lost ownership mid-call.
+    The service only flushes its FAILED row, so a failure commits explicitly before
+    re-raising; otherwise `Database.session()` would roll that row back before the
+    worker loop could classify the failure.
+    """
     # Keep the LLM call outside the projection session's lifetime.
     with database.session() as session:
         context = PenaltyJobItemContextRepository(session).get(job.job_item_id)
@@ -128,16 +125,10 @@ def run_summary(
             force_regenerate=context["force_regenerate_summary"],
         )
         if summary_job.status == SummaryStatus.PENDING:
-            # run_generation persists failure and re-raises for worker
-            # classification (SummaryServiceBase.run_generation's own
-            # docstring). That persisted FAILED row is only a `flush()`,
-            # not a `commit()` -- letting the exception propagate straight
-            # out of this `with database.session()` block would hit
-            # `Database.session()`'s own `except Exception:
-            # session.rollback()` and silently undo it. Commit explicitly
-            # before re-raising so the FAILED ledger row survives for the
-            # worker loop's retry/dead-letter classification to act on;
-            # verified live against Postgres (see this phase's report).
+            # run_generation persists its FAILED row with a flush(), not a commit(), so
+            # letting the exception escape this block would hit Database.session()'s own
+            # rollback and undo it. Commit first so the FAILED ledger row survives for
+            # the worker loop to classify.
             try:
                 service.run_generation(
                     context["purchase_order_id"],
@@ -151,6 +142,8 @@ def run_summary(
 
 @dataclass
 class EnqueueResult:
+    """Outcome of `enqueue_daily_run`: the created job run and how many orders it enqueued."""
+
     job_run_id: UUID
     purchase_order_count: int
     enqueued_count: int
@@ -165,14 +158,12 @@ def enqueue_daily_run(
     projection_date: date | None = None,
     stacking_mode_override: str | None = None,
 ) -> EnqueueResult:
-    """Create the daily job_run and enqueue one ORDER_RUN job_item per OPEN
-    purchase order, with its matching `penalty_job_item_context` row attached
-    in the same transaction.
+    """Create the daily job_run and enqueue one ORDER_RUN item per OPEN purchase order.
 
-    Mirrors `app.api.v1.job_runs._trigger_penalty_projection_batch`'s
-    enqueue logic (kept independent -- that route is HTTP-request-scoped,
-    this is the nightly/standalone entry point `scripts/ops/run_daily_batch.py`
-    calls with no server running).
+    Each item's `penalty_job_item_context` row is attached in the same transaction.
+    This is the nightly entry point `scripts/ops/run_daily_batch.py` calls with no
+    server running, so it deliberately duplicates the HTTP batch route's enqueue logic
+    rather than sharing it.
     """
     tz = ZoneInfo(settings.summary.business_timezone)
     resolved_date = projection_date or datetime.now(tz).date()
@@ -212,9 +203,9 @@ def enqueue_daily_run(
                 dedupe_key=dedupe_key,
                 max_attempts=settings.job_queue.max_attempts,
             )
-            # A collision may return an item belonging to an earlier run, or a
-            # context row already attached to it -- only attach/dispatch items
-            # created for this run (mirrors the API route's own guard).
+            # A collision may return an item belonging to an earlier run, or a context
+            # row already attached to it, so only attach and dispatch items created for
+            # this run (mirrors the API route's own guard).
             if item is None or item["job_run_id"] != job_run_id:
                 continue
             if job_item_context.get(item["id"]) is None:
@@ -255,8 +246,7 @@ def sweep_stranded_pending_projection_summaries(
     *,
     today: date | None = None,
 ) -> SweepResult:
-    """Recover PENDING `penalty_summary` (PROJECTION) rows with no
-    corresponding job item.
+    """Recover PENDING PROJECTION `penalty_summary` rows with no corresponding job item.
 
     Dispatches only after the DB transaction commits.
     """
@@ -331,12 +321,11 @@ def sweep_expired_po_delivery_change_requests(
     *,
     as_of: datetime | None = None,
 ) -> SweepResult:
-    """Recover PENDING PO delivery-change requests whose `expires_at` has
-    passed -- transitions each to EXPIRED and re-triggers projection for its
-    purchase order (see PoDeliveryChangeRequestService.expire_stale).
-    Unlike sweep_stranded_pending_projection_summaries, no JobDispatcher is
-    involved: the status flip and the run_for_purchase_order re-trigger both
-    happen inline, before commit, since no LLM call is needed for either.
+    """Expire PENDING PO delivery-change requests whose `expires_at` has passed.
+
+    Each moves to EXPIRED and re-triggers projection for its purchase order. No
+    JobDispatcher is involved: neither step needs an LLM call, so both run inline
+    before the commit.
     """
     with database.session() as session:
         master_data = MasterDataRepository(session)

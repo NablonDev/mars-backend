@@ -1,14 +1,12 @@
-"""Enums and data structures for the mitigation-ranking stage.
-
-Moved unchanged from `app/services/fine_mitigation/types.py` (Phase 3 --
-services move/folder-split).
-"""
+"""Enums and data structures for the mitigation-ranking stage."""
 
 from dataclasses import dataclass
 from enum import Enum
 
 
 class ShortageCause(Enum):
+    """Root cause of a projected production shortfall, driving which mitigation options apply."""
+
     LABOR_CAPACITY = "LABOR_CAPACITY"
     RAW_MATERIAL = "RAW_MATERIAL"
     UNKNOWN = "UNKNOWN"
@@ -16,9 +14,11 @@ class ShortageCause(Enum):
 
 @dataclass
 class MitigationInputs:
-    """Cause/cost assumptions for one order -- mutable, current-best-guess
-    data, not a historized fact. See
-    `app/repositories/penalties/mitigation.py`."""
+    """Cause and cost assumptions for one order.
+
+    Mutable, current-best-guess data rather than a historized fact; see
+    `app/repositories/penalties/mitigation.py`.
+    """
 
     order_id: str
     shortage_cause: ShortageCause = ShortageCause.UNKNOWN
@@ -34,6 +34,8 @@ class MitigationInputs:
 
 @dataclass
 class MitigationOption:
+    """One ranked candidate response to a projected shortage, with its net cost/benefit."""
+
     action: str  # "ACCEPT" | "SPEED_UP_PRODUCTION" | "SPLIT_SHIPMENT" | "FASTER_CARRIER"
     projected_penalty_after: float
     action_cost: float

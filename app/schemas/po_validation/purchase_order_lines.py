@@ -1,6 +1,4 @@
-"""API schemas for `POST /api/v1/po-validation/purchase-order-lines` (was
-`POST /ingest/po-lines`) and the flat `GET /api/v1/purchase-order-lines`
-cross-PO listing (was `GET /po-lines`).
+"""API schemas for PO-line ingest and the cross-PO `GET /api/v1/purchase-order-lines` listing.
 
 Class names drop the stale `po_line`/`Po*` abbreviation in favor of the full
 `purchase_order_line` wording (approved plan's locked-in naming decision),
@@ -21,14 +19,15 @@ threads (checkpointed before this rename) stay compatible.
 
 from __future__ import annotations
 
-from typing import Any
-
 from pydantic import BaseModel, Field
 
 from app.schemas.cmir.threads import IsoDatetime
+from app.schemas.common.purchase_orders import PurchaseOrderLineResponse
 
 
 class IngestPurchaseOrderLineItem(BaseModel):
+    """One line of an ingest request, as received from the source order system."""
+
     po_number: str
     po_line_number: str
     # Application-level naming, aligned with the DB/domain vocabulary
@@ -44,44 +43,37 @@ class IngestPurchaseOrderLineItem(BaseModel):
 
 
 class IngestPurchaseOrderLinesRequest(BaseModel):
+    """Request body for `POST /api/v1/po-validation/purchase-order-lines`."""
+
     lines: list[IngestPurchaseOrderLineItem] = Field(min_length=1)
 
 
 class PurchaseOrderLineIngestSummary(BaseModel):
+    """Per-line outcome of an ingest request: the line, its status, and its thread if any."""
+
     po_line_id: str
     batch_id: str
     po_number: str
     po_line_number: str
     status: str
     thread_id: str | None = None
-    # `PoValidationService._ingest_one_line`'s touchless path always sends
-    # `None`; once a `workflow_thread` exists (first interrupt or later),
-    # this is that thread's real `updated_at` -- round-trippable straight
-    # into `POST /workflow-threads/{thread_id}/decisions`' `expected_updated_at`
-    # without an intermediate GET, so it uses the same `IsoDatetime` as
-    # `WorkflowThreadResponse.updated_at` (see that type's docstring).
+    # `None` on the touchless path; otherwise the thread's real `updated_at`, round-trippable
+    # straight into a decision request's `expected_updated_at` without an intermediate GET.
     updated_at: IsoDatetime | None = None
 
 
 class IngestPurchaseOrderLinesResponse(BaseModel):
+    """Response shape for `POST /api/v1/po-validation/purchase-order-lines`."""
+
     batch_id: str
     total_lines: int
     lines: list[PurchaseOrderLineIngestSummary]
 
 
 class PurchaseOrderLinesListResponse(BaseModel):
-    """Cross-PO, filtered listing -- `PoValidationService.list_ready_lines`
-    has no repository support for this today (no "list every
-    purchase_order_line by line_status across every PO" query exists on
-    `PurchaseOrderRepository`; only `list_lines(purchase_order_id)`, scoped
-    to one PO) -- see that service method's docstring, point 4. The route
-    surfaces `ValidationError(code="VIEW_NOT_SUPPORTED")` rather than
-    faking an unindexed full scan; use
-    `GET /purchase-orders/{purchase_order_id}/lines` for a single PO's lines
-    in the meantime.
-    """
+    """Paginated `purchase_order_line` listing, optionally filtered by PO and line status."""
 
-    items: list[dict[str, Any]]
+    items: list[PurchaseOrderLineResponse]
     next_cursor: str | None = None
 
 

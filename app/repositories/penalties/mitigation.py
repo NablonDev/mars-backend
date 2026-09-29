@@ -1,16 +1,4 @@
-"""Repository for per-PO mitigation cause/cost assumptions
-(`penalties.mitigation_input`) and persisted, ranked mitigation options
-(`penalties.mitigation_option`). Was
-`app/repositories/fine_mitigation/mitigation.py`
-(`MitigationRepository`/`MitigationResultRepository`).
-
-**Naming collision, inherited from the approved Phase 1 plan, not
-introduced here:** the ORM model `app.models.penalties.mitigation.MitigationOption`
-and the pure-engine dataclass `app.services.fine_mitigation.types.MitigationOption`
-now share the same class name (the plan explicitly unifies on it for the
-ORM class, which used to be called `MitigationResult` to avoid exactly
-this clash) -- both are imported below, aliased to keep them apart.
-"""
+"""Repository for mitigation_input and mitigation_option."""
 
 from __future__ import annotations
 
@@ -28,6 +16,7 @@ from app.services.penalties.mitigation.types import MitigationOption as Mitigati
 
 
 def _row_to_inputs(row: MitigationInput, purchase_order_id: UUID) -> MitigationInputs:
+    """Convert a MitigationInput row into a MitigationInputs value object."""
     return MitigationInputs(
         order_id=str(purchase_order_id),
         shortage_cause=ShortageCause(row.shortage_cause),
@@ -51,10 +40,17 @@ def _row_to_inputs(row: MitigationInput, purchase_order_id: UUID) -> MitigationI
 
 
 class MitigationInputRepository:
+    """Access layer for mitigation_input data.
+
+    Manages mitigation inputs (shortage cause, capacity/carrier/split options)
+    per purchase order, with idempotent upsert semantics.
+    """
+
     def __init__(self, session: Session) -> None:
         self._session = session
 
     def _get_row(self, purchase_order_id: UUID) -> MitigationInput | None:
+        """Fetch the mitigation_input row for a PO, or None if not found."""
         return self._session.scalars(
             select(MitigationInput).where(MitigationInput.purchase_order_id == purchase_order_id)
         ).first()
@@ -64,15 +60,19 @@ class MitigationInputRepository:
         return list(self._session.scalars(select(MitigationInput.purchase_order_id)).all())
 
     def get_inputs(self, purchase_order_id: UUID) -> MitigationInputs:
-        """Never raises: a PO with no row simply has all-default
-        (unknown/unconfirmed) inputs."""
+        """Fetch mitigation inputs for a PO, defaulting to all-unknown if none exist."""
         row = self._get_row(purchase_order_id)
         if row is None:
             return MitigationInputs(order_id=str(purchase_order_id))
         return _row_to_inputs(row, purchase_order_id)
 
     def upsert_inputs(self, purchase_order_id: UUID, **fields: Any) -> None:
-        """Idempotent: insert if the PO has no row yet, else update in place."""
+        """Create or update mitigation inputs for a PO (idempotent).
+
+        A partial update: only the keys present in `fields` are touched, so
+        callers can set e.g. just `shortage_cause` without clobbering
+        previously recorded carrier/capacity data for the same PO.
+        """
         row = self._get_row(purchase_order_id)
         if row is None:
             self._session.add(MitigationInput(purchase_order_id=purchase_order_id, **fields))
@@ -82,17 +82,14 @@ class MitigationInputRepository:
         self._session.flush()
 
     def truncate_all(self) -> None:
-        """Deletes every mitigation_input row, plus mitigation_option
-        (otherwise owned by MitigationOptionRepository) -- both FK to
-        purchase_order, so both must be cleared before
-        PurchaseOrderRepository.truncate_all() clears purchase_order
-        itself."""
+        """Delete mitigation options and inputs; both must precede the PO truncate."""
         self._session.execute(delete(MitigationOptionModel))
         self._session.execute(delete(MitigationInput))
         self._session.flush()
 
 
 def _option_to_dict(row: MitigationOptionModel) -> dict:
+    """Serialize a MitigationOptionModel row into a dict."""
     return {
         "id": row.id,
         "purchase_order_id": row.purchase_order_id,
@@ -108,19 +105,23 @@ def _option_to_dict(row: MitigationOptionModel) -> dict:
 
 
 class MitigationOptionRepository:
-    """Repository for mitigation_option -- persisted, ranked output of
-    app/services/fine_mitigation/engine.py::MitigationEngine.evaluate.
-    Was `MitigationResultRepository`."""
+    """Access layer for mitigation_option facts.
+
+    Persists ranked mitigation actions from penalty mitigation engine.
+    Keyed by (purchase_order_id, projection_date, action) with idempotent writes.
+    """
 
     def __init__(self, session: Session) -> None:
         self._session = session
 
     def commit(self) -> None:
+        """Commit the session, flushing pending changes."""
         self._session.commit()
 
     def _find(
         self, purchase_order_id: UUID, projection_date: date, action: str
     ) -> MitigationOptionModel | None:
+        """Fetch a mitigation_option by (PO, date, action), or None if not found."""
         return self._session.scalars(
             select(MitigationOptionModel).where(
                 MitigationOptionModel.purchase_order_id == purchase_order_id,
@@ -135,11 +136,11 @@ class MitigationOptionRepository:
         projection_date: date,
         options: list[MitigationOptionValue],
     ) -> list[dict]:
-        """Upsert one row per option, keyed on (purchase_order_id,
-        projection_date, action). Never deletes: an action that is no
-        longer structurally eligible on a later re-run simply stops being
-        written, its previous row is left in place as history (same
-        append-only posture as every other fact table)."""
+        """Upsert one row per option, keyed on (purchase_order_id, projection_date, action).
+
+        Nothing is ever deleted: an action that stops being eligible on a later run
+        simply stops being written, and its earlier row remains as history.
+        """
         rows: list[dict] = []
         for option in options:
             existing = self._find(purchase_order_id, projection_date, option.action)
@@ -172,19 +173,12 @@ class MitigationOptionRepository:
         return rows
 
     def get_by_id(self, mitigation_option_id: UUID) -> dict | None:
-        """Fetch one `mitigation_option` row by its own surrogate id.
-
-        Phase 7a addition (flagged -- repositories were nominally out of
-        scope for that phase): `GET /penalty-mitigations/{mitigation_id}`
-        (approved plan §5) has no other way to resolve a single option row;
-        every other method here is keyed by `(purchase_order_id,
-        projection_date)`, not by this table's own `id`. Purely additive,
-        zero behavior change to any existing method."""
+        """Fetch one `mitigation_option` row by its surrogate id, or None."""
         row = self._session.get(MitigationOptionModel, mitigation_option_id)
         return _option_to_dict(row) if row is not None else None
 
     def list_for_date(self, purchase_order_id: UUID, projection_date: date) -> list[dict]:
-        """Ranked (net_saving descending) options for one exact day."""
+        """Fetch ranked options for one exact date (by net_saving, descending)."""
         rows = self._session.scalars(
             select(MitigationOptionModel).where(
                 MitigationOptionModel.purchase_order_id == purchase_order_id,
@@ -194,6 +188,7 @@ class MitigationOptionRepository:
         return sorted((_option_to_dict(r) for r in rows), key=lambda r: r["net_saving"], reverse=True)
 
     def _latest_date_not_after(self, purchase_order_id: UUID, not_after: date | None = None) -> date | None:
+        """Resolve the most recent projection_date, optionally bounded by not_after."""
         stmt = select(func.max(MitigationOptionModel.projection_date)).where(
             MitigationOptionModel.purchase_order_id == purchase_order_id,
         )
@@ -202,26 +197,31 @@ class MitigationOptionRepository:
         return self._session.scalar(stmt)
 
     def get_latest(self, purchase_order_id: UUID) -> list[dict]:
-        """Ranked options for the most recent projection_date on record."""
+        """Fetch ranked options for the most recent projection_date on record."""
         latest_date = self._latest_date_not_after(purchase_order_id)
         if latest_date is None:
             return []
         return self.list_for_date(purchase_order_id, latest_date)
 
     def get_latest_not_after(self, purchase_order_id: UUID, as_of_date: date) -> list[dict]:
-        """Ranked options for the most recent projection_date <= as_of_date.
-
-        Same nearest-prior-date reasoning as
-        PenaltySummaryRepository.get_latest_ready_not_after.
-        """
+        """Fetch ranked options for the most recent projection_date <= as_of_date."""
         latest_date = self._latest_date_not_after(purchase_order_id, not_after=as_of_date)
         if latest_date is None:
             return []
         return self.list_for_date(purchase_order_id, latest_date)
 
     def earliest_date(self, purchase_order_id: UUID) -> date | None:
+        """Fetch the earliest projection_date on record for a PO, or None if none exist."""
         return self._session.scalar(
             select(func.min(MitigationOptionModel.projection_date)).where(
+                MitigationOptionModel.purchase_order_id == purchase_order_id
+            )
+        )
+
+    def latest_date(self, purchase_order_id: UUID) -> date | None:
+        """Fetch the latest projection_date on record for a PO, or None if none exist."""
+        return self._session.scalar(
+            select(func.max(MitigationOptionModel.projection_date)).where(
                 MitigationOptionModel.purchase_order_id == purchase_order_id
             )
         )

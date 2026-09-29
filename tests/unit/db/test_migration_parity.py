@@ -1,9 +1,12 @@
 """
-Proves the hand-authored Alembic migrations (the 5-revision chain in
-alembic/versions/: 0824321a02a4_common_schema.py, ff53dabe6e4c_process_schema.py,
-374aa902b053_cmir_schema.py, 4b41f6bcb2f3_penalties_schema.py, and
-a5b39c6e2181_langgraph_schema.py) actually match app/models/, rather than
-just asserting it in a docstring. Builds one SQLite DB via
+Proves the hand-authored Alembic migrations (the 5-revision "initial" squash
+in alembic/versions/: 0824321a02a4_initial_common_schema.py,
+ff53dabe6e4c_initial_process_schema.py, 374aa902b053_initial_cmir_schema.py,
+4b41f6bcb2f3_initial_penalties_schema.py, and
+a5b39c6e2181_initial_langgraph_schema.py, plus every normal chained revision
+added since -- currently just 11ce88f609e0_penalty_dispute_schema.py) actually
+match app/models/, rather than just asserting it in a docstring. Builds one
+SQLite DB via
 `alembic upgrade head` (walks the whole chain) and another via
 `Base.metadata.create_all()`, then diffs table and column names.
 
@@ -16,13 +19,21 @@ those must be verified against a real Postgres database instead.
 No live Postgres needed for this test itself -- it only checks structural
 parity between the migrations and the ORM, not Postgres-specific DDL
 correctness. Both engines go through `apply_sqlite_schema_translation`
-because `Base.metadata` has tables bound to the `common`, `process`,
-`cmir`, and `penalties` schemas (app/db/base.py), which SQLite cannot
-express -- the same translation app/db/session.py and alembic/env.py
-apply, so the tables land unqualified on both sides and stay comparable.
+because `Base.metadata` has tables bound to the `process`, `cmir`, and
+`penalties` schemas (app/db/base.py), which SQLite cannot express -- the
+same translation app/db/session.py and alembic/env.py apply, so the
+tables land unqualified on both sides and stay comparable. The shared
+master/fulfillment tables (`app/models/common/`) carry no schema binding
+at all -- they resolve to `public` on Postgres and need no translation on
+SQLite either, so they compare cleanly on both sides without any special
+handling here.
 `langgraph` is not part of this comparison: it has no ORM model and its
 migration creates no tables (Postgres-only `CREATE SCHEMA`, a no-op on
 SQLite).
+
+`Base` is imported from `app.db.base` (not `app.models`) because mars_common
+is the single source of truth for ORM model metadata and `app.db.base` is a
+straight re-export of it; `app/models/` only re-exports the models themselves.
 """
 
 from pathlib import Path
@@ -31,8 +42,8 @@ from alembic.config import Config
 from sqlalchemy import create_engine, inspect
 
 from alembic import command
+from app.db.base import Base
 from app.db.session import apply_sqlite_schema_translation
-from app.models import Base
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 

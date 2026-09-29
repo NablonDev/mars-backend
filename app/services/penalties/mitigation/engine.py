@@ -1,17 +1,12 @@
-"""Ranks candidate mitigation actions against the ACCEPT baseline for a single open order.
-
-Moved unchanged from `app/services/fine_mitigation/engine.py` (Phase 3 --
-services move/folder-split); only the import paths below changed.
-
-All cost/cause inputs here (ANTICIPATED_SHORTFALL_PCT, DELAY_PROBABILITY_TABLE) are
-mocked, since no real Mars data source for them exists yet.
-"""
+"""Ranks candidate mitigation actions against the ACCEPT baseline."""
 
 from dataclasses import replace
 
 from app.services.penalties.mitigation.types import MitigationInputs, MitigationOption, ShortageCause
 from app.services.penalties.projection import (
     DELAY_VIOLATION_TYPES,
+    ENGINE_FAMILY_DELAY,
+    ENGINE_FAMILY_SHORTAGE,
     SHORTAGE_VIOLATION_TYPES,
     OrderSnapshot,
     PenaltyRule,
@@ -22,14 +17,12 @@ from app.services.penalties.projection.shortage import shortfall_units_for_prici
 
 
 class MitigationEngine:
-    """Stateless entry point for the penalty-mitigation domain: ranks ACCEPT
-    plus every structurally-eligible mitigation action for a single open
-    order.
+    """Stateless entry point for the penalty-mitigation domain.
 
-    Holds a `ProjectionEngine` instance so the hypothetical-scenario option
-    generators below can re-run the projection engine without constructing
-    a new one per option; the penalty rules and order snapshot themselves are
-    per-call, not naturally constant, so they stay method arguments.
+    Ranks ACCEPT plus every structurally-eligible mitigation action for one
+    open order. Holds a `ProjectionEngine` so the hypothetical-scenario option
+    generators can re-run projections without constructing one per option;
+    rules and snapshot are per-call and stay method arguments.
     """
 
     def __init__(self) -> None:
@@ -42,14 +35,20 @@ class MitigationEngine:
         projection: ProjectionResult,
         inputs: MitigationInputs,
     ) -> list[MitigationOption]:
-        """Ranks ACCEPT plus every structurally-eligible mitigation action by net_saving, descending."""
+        """Generate and rank candidate mitigation actions by net savings.
+
+        `net_saving` is the baseline penalty less both the penalty after the
+        action and the action's own cost, ranked descending so the highest-value
+        option comes first. ACCEPT is always present; the others drop out when
+        structurally ineligible.
+        """
         options = [self._accept_option(projection)]
 
         speed_up = self._speed_up_production_option(snapshot, rules, projection, inputs)
         if speed_up is not None:
             options.append(speed_up)
 
-        split_shipment = self._split_shipment_option(snapshot, projection, inputs)
+        split_shipment = self._split_shipment_option(snapshot, rules, projection, inputs)
         if split_shipment is not None:
             options.append(split_shipment)
 
@@ -61,6 +60,13 @@ class MitigationEngine:
         return options
 
     def _accept_option(self, projection: ProjectionResult) -> MitigationOption:
+        """Build the always-present ACCEPT baseline: pay the projected penalty, no action taken.
+
+        Zero cost and zero net saving by construction, since every other
+        option's `net_saving` is measured against this baseline. Marked HIGH
+        risk whenever the projected penalty is nonzero, purely to flag it
+        against genuinely mitigating options in a ranked list.
+        """
         return MitigationOption(
             action="ACCEPT",
             projected_penalty_after=projection.total_expected_penalty_amount,
@@ -68,7 +74,7 @@ class MitigationEngine:
             net_saving=0.0,
             risk_level="HIGH" if projection.total_expected_penalty_amount > 0 else "LOW",
             confidence="CONFIRMED",
-            rationale="Pay the projected penalty as-is -- always knowable, no mitigation attempted.",
+            rationale="Pay the projected penalty as-is: always knowable, no mitigation attempted.",
         )
 
     def _speed_up_production_option(
@@ -78,13 +84,21 @@ class MitigationEngine:
         projection: ProjectionResult,
         inputs: MitigationInputs,
     ) -> MitigationOption | None:
+        """Evaluate boosting production capacity to close the current shortfall.
+
+        Returns None when the shortfall is already zero, when a raw-material
+        cause is confirmed (more labor or time cannot help), or when capacity
+        boost data is missing. Confidence is CONFIRMED only when both the
+        shortage cause and the boost data are confirmed, and confidence plus
+        schedule margin together set the risk level.
+        """
         shortfall = shortfall_units_for_pricing(snapshot)
         if shortfall <= 0:
             return None
         if inputs.shortage_cause == ShortageCause.RAW_MATERIAL and inputs.shortage_cause_confirmed:
             return None  # known for certain that more labor/time won't help
         if inputs.capacity_boost_cost_per_unit is None or inputs.capacity_boost_max_units_per_day is None:
-            return None  # "not present" tier -- nothing to compute from
+            return None  # "not present" tier; nothing to compute from
 
         days_available = max((snapshot.required_ship_date - snapshot.projection_date).days, 0)
         closable_units = min(shortfall, inputs.capacity_boost_max_units_per_day * days_available)
@@ -126,6 +140,55 @@ class MitigationEngine:
             rationale=rationale,
         )
 
+    def _split_shipment_option(
+        self,
+        snapshot: OrderSnapshot,
+        rules: list[PenaltyRule],
+        projection: ProjectionResult,
+        inputs: MitigationInputs,
+    ) -> MitigationOption | None:
+        """Evaluate splitting the shipment to avoid delay penalties.
+
+        Returns None when nothing is confirmed yet or the whole order is already
+        confirmed. The confirmed portion ships on schedule, so only shortage
+        penalties remain, which is why confidence is always CONFIRMED. Risk is a
+        fixed MEDIUM for the qualitative retailer-relationship impact.
+        """
+        if snapshot.confirmed_qty <= 0 or snapshot.confirmed_qty >= snapshot.order_qty:
+            return None  # nothing ready to ship now, or nothing missing
+
+        # The confirmed portion ships on the original date, so delay-type
+        # violations don't apply to it. The engine already prices the shortage
+        # penalty off the true confirmed_qty vs order_qty gap today, so that
+        # half of `projection` needs no hypothetical re-run.
+        family_by_rule_id = {r.rule_id: _effective_engine_family(r) for r in rules}
+        shortage_only = [
+            v for v in projection.violations if family_by_rule_id.get(v.rule_id) == ENGINE_FAMILY_SHORTAGE
+        ]
+        if projection.stacking_mode == "MAX":
+            projected_penalty_after = max((v.expected_penalty_amount for v in shortage_only), default=0.0)
+        else:
+            projected_penalty_after = sum(v.expected_penalty_amount for v in shortage_only)
+
+        action_cost = inputs.split_shipment_handling_cost
+        net_saving = projection.total_expected_penalty_amount - projected_penalty_after - action_cost
+
+        rationale = (
+            f"Ships the {snapshot.confirmed_qty} confirmed units on schedule and the remaining "
+            f"{snapshot.order_qty - snapshot.confirmed_qty} units later: avoids delay penalties, "
+            "shortage penalties still apply."
+        )
+
+        return MitigationOption(
+            action="SPLIT_SHIPMENT",
+            projected_penalty_after=round(projected_penalty_after, 2),
+            action_cost=round(action_cost, 2),
+            net_saving=round(net_saving, 2),
+            risk_level="MEDIUM",  # qualitative retailer-relationship risk, not computed
+            confidence="CONFIRMED",  # reuses the already-trusted shortage pricing, no new assumption
+            rationale=rationale,
+        )
+
     def _faster_carrier_option(
         self,
         snapshot: OrderSnapshot,
@@ -133,10 +196,22 @@ class MitigationEngine:
         projection: ProjectionResult,
         inputs: MitigationInputs,
     ) -> MitigationOption | None:
-        if not any(rule.violation_type in DELAY_VIOLATION_TYPES for rule in rules):
+        """Evaluate switching to an express carrier to reduce transit delay risk.
+
+        Returns None when no delay-type rule applies to this retailer or express
+        carrier data is missing. Confidence is CONFIRMED only when both carrier
+        cost and transit data are confirmed, and confidence alone gates the risk
+        level.
+        """
+        if not any(_effective_engine_family(rule) == ENGINE_FAMILY_DELAY for rule in rules):
             return None  # no delay-type rule applies to this retailer
         if inputs.express_carrier_cost is None or inputs.express_carrier_transit_days is None:
             return None  # "not present" tier
+
+        days_to_delivery = (snapshot.requested_delivery_date - snapshot.projection_date).days
+        if days_to_delivery < inputs.express_carrier_transit_days:
+            # Phase 4 Cutoff: carrier expedite cannot arrive before MABD delivery due date
+            return None
 
         hypothetical = replace(snapshot, expected_transit_days=inputs.express_carrier_transit_days)
         projected_penalty_after = self._projection_engine.project(
@@ -149,8 +224,8 @@ class MitigationEngine:
         risk_level = "LOW" if confidence == "CONFIRMED" else "MEDIUM"
 
         rationale = (
-            f"Re-routes via an express carrier ({inputs.express_carrier_transit_days}-day transit) "
-            f"for ${action_cost:.2f}"
+            f"Re-routes via an express carrier ({inputs.express_carrier_transit_days}-day transit, "
+            f"{days_to_delivery}d remaining) for ${action_cost:.2f}"
             f"{'' if confidence == 'CONFIRMED' else ' (carrier cost/transit data not fully confirmed)'}."
         )
 
@@ -164,37 +239,20 @@ class MitigationEngine:
             rationale=rationale,
         )
 
-    def _split_shipment_option(
-        self, snapshot: OrderSnapshot, projection: ProjectionResult, inputs: MitigationInputs
-    ) -> MitigationOption | None:
-        if snapshot.confirmed_qty <= 0 or snapshot.confirmed_qty >= snapshot.order_qty:
-            return None  # nothing ready to ship now, or nothing missing
 
-        # The confirmed portion ships on the original date, so delay-type
-        # violations don't apply to it -- but the engine already prices the
-        # shortage penalty off the true confirmed_qty vs order_qty gap today, so
-        # that half of `projection` needs no hypothetical re-run at all.
-        shortage_only = [v for v in projection.violations if v.violation_type in SHORTAGE_VIOLATION_TYPES]
-        if projection.stacking_mode == "MAX":
-            projected_penalty_after = max((v.expected_penalty_amount for v in shortage_only), default=0.0)
-        else:
-            projected_penalty_after = sum(v.expected_penalty_amount for v in shortage_only)
+def _effective_engine_family(rule: PenaltyRule) -> str | None:
+    """`rule.engine_family` when set, else inferred from `violation_type` for a rule with none.
 
-        action_cost = inputs.split_shipment_handling_cost
-        net_saving = projection.total_expected_penalty_amount - projected_penalty_after - action_cost
-
-        rationale = (
-            f"Ships the {snapshot.confirmed_qty} confirmed units on schedule and the remaining "
-            f"{snapshot.order_qty - snapshot.confirmed_qty} units later -- avoids delay penalties, "
-            "shortage penalties still apply."
-        )
-
-        return MitigationOption(
-            action="SPLIT_SHIPMENT",
-            projected_penalty_after=round(projected_penalty_after, 2),
-            action_cost=round(action_cost, 2),
-            net_saving=round(net_saving, 2),
-            risk_level="MEDIUM",  # qualitative retailer-relationship risk, not computed
-            confidence="CONFIRMED",  # reuses the already-trusted shortage pricing, no new assumption
-            rationale=rationale,
-        )
+    `PenaltyRule.engine_family` is `None` for a rule seeded directly or published before
+    that column existed (see its docstring in `projection/types.py`), so filtering on the stored field
+    alone silently drops those rules from every family-based option. Falling back to the
+    same `violation_type` sets the engine itself dispatches on keeps that legacy/seeded data
+    working exactly as it did before the engine_family filter existed.
+    """
+    if rule.engine_family is not None:
+        return rule.engine_family
+    if rule.violation_type in SHORTAGE_VIOLATION_TYPES:
+        return ENGINE_FAMILY_SHORTAGE
+    if rule.violation_type in DELAY_VIOLATION_TYPES:
+        return ENGINE_FAMILY_DELAY
+    return None

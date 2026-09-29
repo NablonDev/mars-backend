@@ -1,17 +1,4 @@
-"""Repository for `cmir.cmir_record` -- the SCD2-versioned CMIR mapping
-history. Was `app/repositories/cmir.py` (`PostgresCMIRRepository`,
-`CMIRRecordORM`); `app.models.cmir.cmir_record.CmirRecord` keeps the same
-SCD2 shape (`is_current`/`valid_from`/`valid_to`/`superseded_by_id`) and the
-same partial-unique-index invariant (one current row per
-`(customer_identity_key, target_customer_material_ref_key)`, enforced by
-raw migration DDL, not an ORM-level `Index`), so `supersede_and_insert`'s
-logic is preserved as-is. Column rename: `email_id` -> `email_event_id`.
-
-Switched, like the sibling `cmir` repositories, to the project's standard
-injected-`Session` pattern instead of the old per-call `Database` session.
-No dependence on `app.schemas.cmir.Cmir` (out of scope this phase):
-callers pass the merged field values directly.
-"""
+"""Repository for cmir.cmir_record, SCD2-versioned CMIR mapping history."""
 
 from __future__ import annotations
 
@@ -25,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models import CmirRecord, HumanAction, WorkflowThreadSubject
+from app.models.enums import WorkflowThreadSubjectType
 from app.schemas.cmir import MANDATORY_FIELDS
 from app.services.identity import normalize_identity_key
 
@@ -32,18 +20,11 @@ logger = logging.getLogger(__name__)
 
 
 class CmirVersionConflict(Exception):
-    """Raised by CmirRecordRepository.supersede_and_insert when the current record
-    for an entity changed since the version this write was based on was read.
-
-    Can come from either the cheap app-level id comparison (the common case) or from
-    the database rejecting the insert against the partial unique index on
-    (customer_identity_key, target_customer_material_ref_key) WHERE is_current -- the
-    index is the actual correctness guarantee; the id comparison is just an early,
-    cheaper exit for a clean error message. Callers must treat both sources identically.
-    """
+    """Raised when the current record changed since the version being written was read."""
 
 
 def _to_dict(row: CmirRecord) -> dict[str, Any]:
+    """Project a `CmirRecord` row onto the content fields callers see, without SCD2 bookkeeping."""
     return {
         "id": row.id,
         "sender_type": row.sender_type,
@@ -61,18 +42,23 @@ def _to_dict(row: CmirRecord) -> dict[str, Any]:
 
 
 class CmirRecordRepository:
+    """SCD2-versioned CMIR mapping history.
+
+    At most one `is_current` row exists per (customer_identity,
+    target_customer_material_ref) pair; supersessions are recorded rather than
+    overwritten in place.
+    """
+
     def __init__(self, session: Session) -> None:
         self._session = session
 
     def find_latest_for_customer_material(
         self, customer_identity: str, target_customer_material_ref: str
     ) -> dict[str, Any] | None:
-        """Return the current (is_current) cmir_record row for this customer/material pair.
+        """Return the current row for this customer/material pair, or None.
 
-        Used by PO Validation. Shares the same is_current invariant as get_current
-        below -- kept as its own method rather than merged with get_current because it
-        returns a narrower dict shape (the four fields PO Validation actually uses),
-        not the full content-field set.
+        Kept separate from `get_current` because PO validation needs only the four
+        fields returned here, not the full content-field set.
         """
         row = self._session.scalars(
             select(CmirRecord).where(
@@ -101,13 +87,10 @@ class CmirRecordRepository:
     ) -> UUID:
         """Insert a CMIR mapping from a human-submitted PO line entry.
 
-        Reuses supersede_and_insert (with expected_current_id=None) instead of a bare
-        insert: this method is only ever called after validate_against_cmir found no
-        current mapping, so "still none now" is the precondition, not just the common
-        case. Reusing the same path means the one-current-per-entity invariant holds
-        here too, and a rare race (something else created a current mapping in the
-        meantime) surfaces as CmirVersionConflict instead of silently leaving two
-        rows both claiming to be current for the same entity.
+        Callers reach this only after `validate_against_cmir` found no current
+        mapping, so "no current row" is a precondition. Routing through
+        `supersede_and_insert` keeps the one-current-per-entity invariant, turning a
+        concurrent insert into `CmirVersionConflict` instead of a second current row.
         """
         return self.supersede_and_insert(
             customer_identity=customer_identity,
@@ -355,27 +338,30 @@ class CmirRecordRepository:
         thread_id_by_po_line: dict[UUID, UUID] = {}
         thread_id_by_email_event: dict[UUID, UUID] = {}
         if po_line_ids or email_event_ids:
+            # WorkflowThreadSubject carries a polymorphic subject_type/subject_id
+            # pair, not a typed FK column per domain -- see
+            # app/repositories/process/workflow.py's module docstring.
             subject_rows = self._session.execute(
                 select(
                     WorkflowThreadSubject.workflow_thread_id,
-                    WorkflowThreadSubject.purchase_order_line_id,
-                    WorkflowThreadSubject.email_event_id,
+                    WorkflowThreadSubject.subject_type,
+                    WorkflowThreadSubject.subject_id,
                 ).where(
-                    WorkflowThreadSubject.purchase_order_line_id.in_(po_line_ids)
-                    if not email_event_ids
-                    else (
-                        WorkflowThreadSubject.email_event_id.in_(email_event_ids)
-                        if not po_line_ids
-                        else WorkflowThreadSubject.purchase_order_line_id.in_(po_line_ids)
-                        | WorkflowThreadSubject.email_event_id.in_(email_event_ids)
+                    (
+                        (WorkflowThreadSubject.subject_type == WorkflowThreadSubjectType.PURCHASE_ORDER_LINE.value)
+                        & WorkflowThreadSubject.subject_id.in_(po_line_ids)
+                    )
+                    | (
+                        (WorkflowThreadSubject.subject_type == WorkflowThreadSubjectType.EMAIL_EVENT.value)
+                        & WorkflowThreadSubject.subject_id.in_(email_event_ids)
                     )
                 )
             ).all()
             for subject in subject_rows:
-                if subject.purchase_order_line_id is not None:
-                    thread_id_by_po_line[subject.purchase_order_line_id] = subject.workflow_thread_id
-                if subject.email_event_id is not None:
-                    thread_id_by_email_event[subject.email_event_id] = subject.workflow_thread_id
+                if subject.subject_type == WorkflowThreadSubjectType.PURCHASE_ORDER_LINE.value:
+                    thread_id_by_po_line[subject.subject_id] = subject.workflow_thread_id
+                elif subject.subject_type == WorkflowThreadSubjectType.EMAIL_EVENT.value:
+                    thread_id_by_email_event[subject.subject_id] = subject.workflow_thread_id
 
         thread_ids = list({*thread_id_by_po_line.values(), *thread_id_by_email_event.values()})
         latest_action_by_thread: dict[UUID, dict[str, Any]] = {}
@@ -427,6 +413,15 @@ class CmirRecordRepository:
         merged: dict[str, Any],
         expected_current_id: UUID | None,
     ) -> UUID:
+        """Retire the current row for this entity and insert `merged` as its replacement.
+
+        `expected_current_id` must match the row that is actually current (`None`
+        when none is expected yet); a mismatch raises `CmirVersionConflict` before
+        anything is written. The old row is flushed to `is_current=False` first, so
+        the partial unique index never sees two current rows for one entity; a
+        concurrent writer that slips into that window hits the same index and also
+        raises `CmirVersionConflict`. Returns the id of the new row.
+        """
         customer_identity_key = normalize_identity_key(customer_identity)
         target_customer_material_ref_key = normalize_identity_key(target_customer_material_ref)
 
@@ -446,12 +441,10 @@ class CmirRecordRepository:
             )
 
         if current is not None:
-            # Free the one-current-per-entity slot before inserting the
-            # replacement -- the partial unique index checks immediately, not at
-            # commit, so the old row must stop being current before the new one
-            # can become current. An explicit flush here forces this UPDATE to
-            # reach the database before the INSERT below, overriding SQLAlchemy's
-            # default insert-before-update flush ordering.
+            # The partial unique index checks immediately rather than at commit, so
+            # the old row must stop being current before the new one is inserted.
+            # This flush forces the UPDATE ahead of the INSERT below, overriding
+            # SQLAlchemy's default insert-before-update ordering.
             current.is_current = False
             current.valid_to = func.now()
             self._session.flush()
@@ -477,10 +470,9 @@ class CmirRecordRepository:
         try:
             self._session.flush()
         except IntegrityError as exc:
-            # The partial unique index is the true correctness guarantee -- the
-            # id comparison above is a best-effort early exit for a clean error
-            # message. If a concurrent writer won the race in the gap between
-            # that check and this flush, the constraint catches it here instead.
+            # The partial unique index is the real correctness guarantee; the id
+            # comparison above is a best-effort early exit for a clean error message.
+            # A writer that won the race in between is caught here instead.
             self._session.rollback()
             raise CmirVersionConflict(
                 f"Concurrent write detected for customer_identity={customer_identity!r}, "

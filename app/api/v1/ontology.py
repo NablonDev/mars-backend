@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends
@@ -26,7 +27,7 @@ router = APIRouter(tags=["ontology"])
 )
 def get_material_traceability(
     material_code: str,
-    graph_service: OntologyGraphService = Depends(get_ontology_graph_service),
+    graph_service: Annotated[OntologyGraphService, Depends(get_ontology_graph_service)],
 ) -> Envelope[TraceabilityResult]:
     result = graph_service.find_cmir_records_for_material(material_code)
     return success_envelope(result)
@@ -38,7 +39,7 @@ def get_material_traceability(
 )
 def get_successor_chain(
     material_master_id: UUID,
-    graph_service: OntologyGraphService = Depends(get_ontology_graph_service),
+    graph_service: Annotated[OntologyGraphService, Depends(get_ontology_graph_service)],
 ) -> Envelope[SuccessorChainResult]:
     result = graph_service.successor_chain(material_master_id)
     return success_envelope(result)
@@ -50,7 +51,7 @@ def get_successor_chain(
 )
 def get_entity_context(
     entity_name: str,
-    context_service: OntologyContextService = Depends(get_ontology_context_service),
+    context_service: Annotated[OntologyContextService, Depends(get_ontology_context_service)],
 ) -> Envelope[EntityContext]:
     result = context_service.get_entity_context(entity_name)
     return success_envelope(result)
@@ -62,7 +63,7 @@ def get_entity_context(
 )
 def get_entity_relationships(
     entity_name: str,
-    context_service: OntologyContextService = Depends(get_ontology_context_service),
+    context_service: Annotated[OntologyContextService, Depends(get_ontology_context_service)],
 ) -> Envelope[list[RelationshipContext]]:
     result = context_service.get_relationships(entity_name)
     return success_envelope(result)

@@ -1,6 +1,9 @@
 """API tests for `common.purchase_order`/`purchase_order_line` and their
-fulfillment facts (confirmations, shipments, demand exceptions, actual
-penalties)."""
+fulfillment facts (confirmations, shipments, demand exceptions). Actual
+penalties are also exercised here for historical grouping, even though
+their routes now live flat under `/penalties/actual-penalties` (see
+`app/api/v1/penalties/actual_penalties.py`) rather than nested under
+`/purchase-orders/{purchase_order_id}/...` like the other facts above."""
 
 from __future__ import annotations
 
@@ -131,8 +134,9 @@ def test_add_and_list_actual_penalty(client, retailer):
     po = _create_purchase_order(client, retailer["id"])
 
     resp = client.post(
-        f"/api/v1/purchase-orders/{po['id']}/actual-penalties",
+        "/api/v1/penalties/actual-penalties",
         json={
+            "purchase_order_id": po["id"],
             "actual_penalty_number": "PEN-001",
             "violation_type": "SHORT_SHIP",
             "actual_penalty_amount": 123.45,
@@ -140,10 +144,47 @@ def test_add_and_list_actual_penalty(client, retailer):
         },
     )
     assert resp.status_code == 201, resp.text
+    created = resp.json()["data"]
 
-    listed = client.get(f"/api/v1/purchase-orders/{po['id']}/actual-penalties").json()["data"]
+    listed = client.get("/api/v1/penalties/actual-penalties", params={"purchase_order_id": po["id"]}).json()[
+        "data"
+    ]
     assert len(listed) == 1
     assert listed[0]["actual_penalty_amount"] == 123.45
+
+    fetched = client.get(f"/api/v1/penalties/actual-penalties/{created['id']}").json()["data"]
+    assert fetched["id"] == created["id"]
+
+
+def test_list_actual_penalties_across_purchase_orders(client, retailer):
+    po = _create_purchase_order(client, retailer["id"])
+    client.post(
+        "/api/v1/penalties/actual-penalties",
+        json={
+            "purchase_order_id": po["id"],
+            "actual_penalty_number": "PEN-002",
+            "violation_type": "SHORT_SHIP",
+            "actual_penalty_amount": 50.0,
+            "invoice_or_deduction_date": "2026-08-15",
+        },
+    )
+
+    listed = client.get("/api/v1/penalties/actual-penalties").json()["data"]
+    assert any(row["purchase_order_id"] == po["id"] for row in listed)
+
+
+def test_get_actual_penalty_unknown_id_returns_404(client):
+    unknown_id = "00000000-0000-0000-0000-000000000000"
+
+    resp = client.get(f"/api/v1/penalties/actual-penalties/{unknown_id}")
+
+    assert resp.status_code == 404
+    body = resp.json()
+    assert body["error"]["code"] == "ACTUAL_PENALTY_NOT_FOUND"
+    # Regression: must render the UUID's clean str() form, never the raw
+    # `UUID('...')` repr (a bare `!r` in the f-string used to leak that).
+    assert body["message"] == f"No actual penalty found with actual_penalty_id={unknown_id}"
+    assert "UUID(" not in body["message"]
 
 
 def test_facts_against_unknown_purchase_order_return_404(client):
@@ -152,4 +193,9 @@ def test_facts_against_unknown_purchase_order_return_404(client):
     resp = client.get(f"/api/v1/purchase-orders/{unknown_id}/shipments")
 
     assert resp.status_code == 404
-    assert resp.json()["error"]["code"] == "PO_NOT_FOUND"
+    body = resp.json()
+    assert body["error"]["code"] == "PO_NOT_FOUND"
+    # Regression: must render the UUID's clean str() form, never the raw
+    # `UUID('...')` repr (a bare `!r` in the f-string used to leak that).
+    assert body["message"] == f"No purchase order found with purchase_order_id={unknown_id}"
+    assert "UUID(" not in body["message"]

@@ -1,7 +1,7 @@
 [project]
-name = "mars"
+name = "mars-backend"
 version = "0.1.0"
-description = "Mars Petcare Backend -- CMIR Email Resolution, PO Validation, and Projected Penalties & Mitigation."
+description = "Mars Petcare Backend -- CMIR Email Resolution, PO Validation, and Projected Penalties, Mitigation & Dispute Resolution"
 readme = "README.md"
 authors = [
     { name = "Kaustubh Trivedi", email = "kaustubh.trivedi@nablon.ai" },
@@ -28,6 +28,7 @@ dependencies = [
     "rdflib>=7.1,<8.0",
     "sqlalchemy>=2.0.51,<3.0",
     "uvicorn[standard]>=0.51,<1.0",
+    "mars-common",
 ]
 
 [tool.uv]
@@ -37,19 +38,12 @@ dependencies = [
 # so `uv run` does not try to build a `src/` layout that does not exist.
 package = false
 
-[tool.ruff]
-# 110 matches the line length already in de facto use across app/ -- formalized
-# here so `ruff format` doesn't rewrap the pre-existing codebase to the 88-char
-# default.
-line-length = 110
+[tool.uv.sources]
+mars-common = { path = "../mars-common", editable = true }
 
-[tool.ruff.lint.flake8-bugbear]
-# FastAPI's `Depends(...)`/`Query(...)`/`Path(...)` as argument defaults
-# is the framework's documented, intentional pattern (used throughout
-# app/api/) -- not the mutable-default-argument bug B008 exists to catch.
-# Silences that repo-wide false positive without touching any other
-# bugbear rule.
-extend-immutable-calls = ["fastapi.Depends", "fastapi.Query", "fastapi.Path"]
+[tool.ruff]
+line-length = 110
+target-version = "py312"
 
 [dependency-groups]
 dev = [
@@ -59,9 +53,13 @@ dev = [
 ]
 
 [tool.mypy]
-# Minimal, permissive baseline so the tool is runnable at all -- there is
-# no existing green baseline to hold this to yet. Deliberately not
-# `strict = true` and no per-module overrides: tightening this is a
-# separate, later decision, not part of this tooling-gate phase.
 python_version = "3.12"
 ignore_missing_imports = true
+check_untyped_defs = true
+
+[project.scripts]
+mars-bff = "mars_bff:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"

@@ -1,13 +1,16 @@
+"""LangGraph node wrapper that records each node execution to agent_traces."""
+
 from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from datetime import UTC, datetime
 from typing import Any
 
 from langgraph.errors import GraphInterrupt
 
 from app.repositories.process.agent_registry import AgentTraceRepository
+from app.utils.clock import utc_now
+from app.utils.sanitize import strip_nul_bytes
 
 # Deliberately Dict[str, Any], not the CMIR-specific GraphState: LangGraph reads a
 # wrapped node function's parameter annotation to decide which state keys to pass
@@ -38,8 +41,9 @@ def traced(node_name: str, fn: NodeFn, trace_repo: AgentTraceRepository) -> Node
     """
 
     def wrapped(state: dict[str, Any]) -> dict[str, Any]:
+        """Run the wrapped node, logging its outcome (completed, paused, or failed) to agent_traces."""
         run_id = state.get("run_id")
-        started_at = datetime.now(UTC)
+        started_at = utc_now()
         t0 = time.perf_counter()
 
         try:
@@ -52,9 +56,9 @@ def traced(node_name: str, fn: NodeFn, trace_repo: AgentTraceRepository) -> Node
                     node_name,
                     "paused",
                     started_at,
-                    datetime.now(UTC),
+                    utc_now(),
                     duration_ms,
-                    input_snapshot=state,
+                    input_snapshot=strip_nul_bytes(state),
                     output_snapshot=None,
                     error=None,
                 )
@@ -67,11 +71,11 @@ def traced(node_name: str, fn: NodeFn, trace_repo: AgentTraceRepository) -> Node
                     node_name,
                     "failed",
                     started_at,
-                    datetime.now(UTC),
+                    utc_now(),
                     duration_ms,
-                    input_snapshot=state,
+                    input_snapshot=strip_nul_bytes(state),
                     output_snapshot=None,
-                    error=str(exc),
+                    error=strip_nul_bytes(str(exc)),
                 )
             raise
         else:
@@ -82,10 +86,10 @@ def traced(node_name: str, fn: NodeFn, trace_repo: AgentTraceRepository) -> Node
                     node_name,
                     "completed",
                     started_at,
-                    datetime.now(UTC),
+                    utc_now(),
                     duration_ms,
-                    input_snapshot=state,
-                    output_snapshot=result,
+                    input_snapshot=strip_nul_bytes(state),
+                    output_snapshot=strip_nul_bytes(result),
                     error=None,
                 )
             return result

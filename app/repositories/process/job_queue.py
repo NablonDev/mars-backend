@@ -1,31 +1,9 @@
-"""Repository for the shared `process.job_run`/`process.job_item` batch
-queue -- used by both the `penalties` and `cmir`/`po_validation` domains.
-Was `app/repositories/job_queue.py`.
-
-The domain-shaped business key (`order_id`, `projection_date`, `task_type`)
-that used to drive in-flight dedup is gone from `process.job_item`: those
-columns now live on each domain's own `job_item_context` extension table
-(`app.models.penalties.job_context.PenaltyJobItemContext`,
-`app.models.cmir.job_context.CmirJobItemContext`), which this repository
-deliberately does not import (see app/models/process/job.py's `JobItem`
-docstring, and the plan's `process` schema being domain-agnostic). Callers
-now pass a pre-computed `dedupe_key` string at enqueue time; writing the
-matching domain context row is a separate call the domain layer makes
-against its own repository (not yet implemented as of this phase -- see
-this PR's summary).
-
-The recovery-sweep methods that used to live here
-(`find_stranded_pending_projection_summaries` /
-`find_stranded_pending_mitigation_summaries`) moved to
-`app.repositories.penalties.summary` -- they need `PenaltySummary` and
-`PenaltyJobItemContext`, both `penalties`-schema concerns this
-domain-agnostic module should not import.
-"""
+"""Repository for shared process.job_run and process.job_item batch queue."""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any, cast
 from uuid import UUID
 
@@ -37,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.models import JobItem, JobRun
 from app.models.enums import JobItemStatus
+from app.utils.clock import utc_now_naive
 
 # A job is never left in FAILED: retryable failures return to PENDING.
 _INFLIGHT_STATUSES = (JobItemStatus.PENDING, JobItemStatus.RUNNING)
@@ -67,10 +46,11 @@ _CLAIM_BATCH_SQL = text(
 
 
 def _utcnow() -> datetime:
-    return datetime.now(UTC).replace(tzinfo=None)
+    return utc_now_naive()
 
 
 def _to_dict(row: JobItem) -> dict:
+    """Project a `JobItem` row onto the plain dict shape returned to callers."""
     return {
         "id": row.id,
         "job_run_id": row.job_run_id,
@@ -94,6 +74,7 @@ def _to_dict(row: JobItem) -> dict:
 
 
 def _run_to_dict(row: JobRun) -> dict:
+    """Project a `JobRun` row onto the plain dict shape returned to callers."""
     return {
         "id": row.id,
         "job_type": row.job_type,
@@ -108,10 +89,19 @@ def _run_to_dict(row: JobRun) -> dict:
 
 
 class JobQueueRepository:
+    """The shared `job_run`/`job_item` batch queue behind the CMIR and PO-validation workers.
+
+    Postgres gets the concurrency-safe paths (`SKIP LOCKED` claims, partial
+    unique indexes for dedupe); SQLite, used only in unit tests, falls back
+    to single-threaded equivalents that exercise the same happy-path
+    semantics without the same concurrency guarantees.
+    """
+
     def __init__(self, session: Session) -> None:
         self._session = session
 
     def _is_postgres(self) -> bool:
+        """Branch point for the Postgres-only fast paths that have no portable SQLite equivalent."""
         return self._session.bind is not None and self._session.bind.dialect.name == "postgresql"
 
     # ------------------------------------------------------------------
@@ -124,13 +114,18 @@ class JobQueueRepository:
         trigger_type: str,
         requested_item_count: int = 0,
     ) -> dict:
+        """Open a new job run."""
         row = JobRun(job_type=job_type, trigger_type=trigger_type, requested_item_count=requested_item_count)
         self._session.add(row)
         self._session.flush()
         return _run_to_dict(row)
 
     def set_requested_item_count(self, job_run_id: UUID, count: int) -> None:
-        """Set the run count to the number of items actually enqueued."""
+        """Set the run count to the number of items actually enqueued.
+
+        Called after enqueueing, since `create_run` usually records a placeholder
+        count. A no-op when the run no longer exists.
+        """
         run = self._session.get(JobRun, job_run_id)
         if run is not None:
             run.requested_item_count = count
@@ -141,6 +136,7 @@ class JobQueueRepository:
     # ------------------------------------------------------------------
 
     def _find_inflight(self, dedupe_key: str) -> JobItem | None:
+        """Find the PENDING/RUNNING row already claiming `dedupe_key`, if any."""
         return self._session.scalars(
             select(JobItem).where(
                 JobItem.dedupe_key == dedupe_key,
@@ -155,15 +151,14 @@ class JobQueueRepository:
         dedupe_key: str | None = None,
         *,
         max_attempts: int,
+        metadata: dict[str, Any] | None = None,
     ) -> dict | None:
-        """Insert one job, returning the existing in-flight row if
-        `dedupe_key` is already in flight.
+        """Insert one job, returning the existing in-flight row for a live `dedupe_key`.
 
         The partial unique index (`dedupe_key IS NOT NULL`) closes the
-        concurrent-insert race on Postgres. A ``None`` dedupe_key never
-        dedupes (matches the partial index's own exclusion of NULL rows).
-        ``None`` return is possible if the winning row becomes terminal
-        before the loser re-reads it.
+        concurrent-insert race on Postgres, and a `None` dedupe_key never dedupes.
+        Returns `None` when the winning row turns terminal before the loser re-reads
+        it. `metadata` lands on `job_item.metadata_json`, defaulting to `{}`.
         """
         if dedupe_key is not None:
             existing = self._find_inflight(dedupe_key)
@@ -176,6 +171,7 @@ class JobQueueRepository:
             dedupe_key=dedupe_key,
             status=JobItemStatus.PENDING,
             max_attempts=max_attempts,
+            metadata_json=metadata or {},
         )
         self._session.add(row)
 
@@ -191,7 +187,15 @@ class JobQueueRepository:
         return _to_dict(row)
 
     def enqueue_many(self, job_run_id: UUID, items: Sequence[dict[str, Any]], *, max_attempts: int) -> int:
-        """Bulk-enqueue jobs, skipping dedupe_keys already in flight."""
+        """Bulk-enqueue jobs, skipping dedupe_keys already in flight.
+
+        On Postgres this is one `INSERT ... ON CONFLICT DO NOTHING` against
+        the partial unique index on `dedupe_key`, so concurrent callers can't
+        double-enqueue the same key even under load. On SQLite (unit tests
+        only) the check is done in Python against the current in-flight set before
+        inserting, which is idempotent only because tests run single-threaded. Returns
+        the number of rows actually inserted, not the number of items passed in.
+        """
         if not items:
             return 0
 
@@ -250,11 +254,11 @@ class JobQueueRepository:
         limit: int,
         job_item_ids: Sequence[UUID] | None = None,
     ) -> list[dict]:
-        """Claim up to ``limit`` eligible jobs for ``worker_id``.
+        """Claim up to `limit` eligible jobs for `worker_id`.
 
-        With ``job_item_ids=None`` claims oldest eligible jobs; otherwise
-        restricts claims to the supplied IDs. Postgres increments
-        ``attempt_count`` atomically with the claim.
+        With `job_item_ids=None` this claims the oldest eligible jobs; otherwise it
+        restricts claims to the supplied ids. Postgres increments `attempt_count`
+        atomically with the claim.
         """
         if self._is_postgres():
             result = self._session.execute(
@@ -307,6 +311,7 @@ class JobQueueRepository:
         return result.rowcount > 0
 
     def mark_succeeded(self, job_item_id: UUID, worker_id: str) -> dict | None:
+        """Mark a claimed job SUCCEEDED, returning None if `worker_id` no longer holds its lock."""
         row = self._session.get(JobItem, job_item_id)
         if row is None or row.locked_by != worker_id:
             return None
@@ -354,7 +359,11 @@ class JobQueueRepository:
         error: str,
         error_code: str | None,
     ) -> dict | None:
-        """Move a job directly to DEAD, regardless of retry count."""
+        """Move a job directly to DEAD, regardless of retry count.
+
+        For failures where retrying is pointless, such as a permanently invalid
+        payload. Returns None when `worker_id` no longer holds the job's lock.
+        """
         row = self._session.get(JobItem, job_item_id)
         if row is None or row.locked_by != worker_id:
             return None
@@ -409,7 +418,13 @@ class JobQueueRepository:
     # Observability
     # ------------------------------------------------------------------
 
+    def get_item(self, job_item_id: UUID) -> dict | None:
+        """Fetch one `job_item` row, `metadata_json` included, which `ClaimedJob` omits."""
+        row = self._session.get(JobItem, job_item_id)
+        return _to_dict(row) if row is not None else None
+
     def get_run_summary(self, job_run_id: UUID) -> dict:
+        """Return per-status item counts for a run, alongside its requested and actual total item counts."""
         run = self._session.get(JobRun, job_run_id)
         requested_item_count = run.requested_item_count if run is not None else 0
 
@@ -435,6 +450,7 @@ class JobQueueRepository:
         limit: int = 100,
         offset: int = 0,
     ) -> list[dict]:
+        """Page through a run's items, oldest first, optionally filtered to one status."""
         stmt = select(JobItem).where(JobItem.job_run_id == job_run_id)
         if status is not None:
             stmt = stmt.where(JobItem.status == status)
@@ -448,6 +464,7 @@ class JobQueueRepository:
     # ------------------------------------------------------------------
 
     def try_advisory_lock(self, key: int) -> bool:
+        """Attempt to take a session-scoped Postgres advisory lock on `key`; always succeeds on SQLite."""
         if self._is_postgres():
             return bool(
                 self._session.execute(text("SELECT pg_try_advisory_lock(:key)"), {"key": key}).scalar()
@@ -458,6 +475,7 @@ class JobQueueRepository:
         return True
 
     def release_advisory_lock(self, key: int) -> None:
+        """Release the advisory lock on `key` taken by `try_advisory_lock`; a no-op on SQLite."""
         if self._is_postgres():
             self._session.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": key})
 
@@ -466,8 +484,7 @@ class JobQueueRepository:
     # ------------------------------------------------------------------
 
     def truncate_all(self) -> None:
-        """Deletes every job_item row, then every job_run row (child before
-        parent -- job_item.job_run_id FKs to job_run.id)."""
+        """Delete every job_item, then every job_run (child before parent)."""
         self._session.execute(delete(JobItem))
         self._session.execute(delete(JobRun))
         self._session.flush()

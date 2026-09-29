@@ -5,9 +5,8 @@ from uuid import uuid4
 
 from rdflib import RDF, Graph, Literal
 
-from app.models.cmir.cmir_record import CmirRecord
-from app.models.common.material import Material, MaterialMaster
-from app.models.common.plant import Plant
+from app.models.cmir import CmirRecord
+from app.models.common import Material, MaterialMaster, Plant
 from app.services.ontology.ontology_builder import MARS, OntologyBuilder
 
 

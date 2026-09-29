@@ -323,6 +323,7 @@ class PoValidationWorkflowTests(unittest.TestCase):
         self.assertEqual(len(self.processing_errors.logged), 1)
         self.assertEqual(self.processing_errors.logged[0]["error_type"], "LOOKUP_FAILURE")
         self.assertEqual(self.processing_errors.logged[0]["node_name"], "check_material_master")
+        self.assertEqual(self.processing_errors.logged[0]["purchase_order_line_id"], "line-7")
 
 
 if __name__ == "__main__":

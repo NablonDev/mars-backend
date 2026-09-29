@@ -15,6 +15,7 @@ from __future__ import annotations
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from pydantic import BaseModel, model_validator
 
 from app.core.exceptions import (
     AppError,
@@ -173,3 +174,72 @@ def test_request_validation_error_is_reshaped_into_the_envelope(error_client: Te
     assert body["data"] is None
     assert isinstance(body["error"]["details"], dict)
     assert body["error"]["details"]["errors"]
+
+
+# ---------------------------------------------------------------------------
+# RequestValidationError ctx sanitization -- regression test for the bug
+# `test_tiered_rule_without_tiers_is_rejected`
+# (tests/unit/api/test_api_penalty_rules.py) used to `xfail` for.
+# ---------------------------------------------------------------------------
+
+_TIERED_PAYLOAD_ERROR_MESSAGE = "calc_type=TIERED requires at least one tier band"
+
+
+class _TieredPayload(BaseModel):
+    """Module-level (not nested in the test function) so FastAPI can resolve
+    the `payload: _TieredPayload` string annotation against this module's
+    globals under `from __future__ import annotations` -- a class local to
+    the test function isn't in the route function's `__globals__`, and
+    FastAPI silently falls back to treating `payload` as an unresolvable
+    query param instead of the request body."""
+
+    calc_type: str
+    tiers: list | None = None
+
+    @model_validator(mode="after")
+    def _tiered_requires_tiers(self) -> _TieredPayload:
+        if self.calc_type == "TIERED" and not self.tiers:
+            raise ValueError(_TIERED_PAYLOAD_ERROR_MESSAGE)
+        return self
+
+
+def test_request_validation_error_from_bare_value_error_is_sanitized_not_500() -> None:
+    """A Pydantic `model_validator` that raises a bare `ValueError` (the
+    pattern `PenaltyRuleRequest._tiered_requires_tiers` uses, and the only
+    supported way to express a cross-field rule) packages that `ValueError`
+    into `exc.errors()`'s `ctx["error"]` as the raw exception object itself
+    -- not JSON-serializable. `JSONResponse.render` has no fallback encoder,
+    so `_request_validation_error_handler` used to raise an unhandled
+    `TypeError` from inside the handler (surfacing as a 500) instead of
+    returning the intended 422.
+
+    Exercised through a real route + `TestClient`, per this project's
+    testing-conventions skill, rather than calling the private sanitizer
+    helper directly -- this proves the fix end to end: no crash, and the
+    original validator message actually reaches the response body (not
+    silently dropped, which a blind `jsonable_encoder` pass would do --
+    it collapses a bare `ValueError` to `{}`).
+    """
+    app = FastAPI()
+    register_exception_handlers(app)
+
+    @app.post("/tiered")
+    def _tiered(payload: _TieredPayload) -> dict:
+        return {"calc_type": payload.calc_type}
+
+    client = TestClient(app, raise_server_exceptions=False)
+
+    response = client.post("/tiered", json={"calc_type": "TIERED"})
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["success"] is False
+    assert body["error"]["code"] == "REQUEST_VALIDATION_ERROR"
+
+    errors = body["error"]["details"]["errors"]
+    assert len(errors) == 1
+    # The original message survives both where Pydantic already put it ...
+    assert _TIERED_PAYLOAD_ERROR_MESSAGE in errors[0]["msg"]
+    # ... and in the sanitized `ctx`, proving the raw `ValueError` was
+    # converted to its `str()` form rather than dropped or left unencodable.
+    assert errors[0]["ctx"] == {"error": _TIERED_PAYLOAD_ERROR_MESSAGE}

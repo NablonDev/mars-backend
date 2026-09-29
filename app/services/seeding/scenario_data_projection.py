@@ -38,7 +38,7 @@ AMZ_RULES = [
 ]
 
 # ---------------------------------------------------------------------
-# WMT-100234 -- 10-day process, order Aug1, required ship Aug9, delivery Aug11
+# WMT-100234: 10-day process, order Aug1, required ship Aug9, delivery Aug11
 # ---------------------------------------------------------------------
 _req_delivery = date(2026, 8, 11)
 _req_ship = date(2026, 8, 9)
@@ -151,7 +151,7 @@ wmt_days = [
 ]
 
 # ---------------------------------------------------------------------
-# WMT-100511 -- 10-day process, order Aug5, required ship Aug13, delivery Aug15
+# WMT-100511: 10-day process, order Aug5, required ship Aug13, delivery Aug15
 # ---------------------------------------------------------------------
 _req_delivery2 = date(2026, 8, 15)
 _req_ship2 = date(2026, 8, 13)
@@ -257,7 +257,7 @@ wmt2_days = [
 ]
 
 # ---------------------------------------------------------------------
-# AMZ-778501 -- 12-day process, order Aug2, required ship Aug12, delivery Aug14
+# AMZ-778501: 12-day process, order Aug2, required ship Aug12, delivery Aug14
 # ---------------------------------------------------------------------
 _req_delivery3 = date(2026, 8, 14)
 _req_ship3 = date(2026, 8, 12)
@@ -377,7 +377,7 @@ amz1_days = [
 ]
 
 # ---------------------------------------------------------------------
-# AMZ-780112 -- 8-day process, order Aug10, required ship Aug16, delivery Aug18
+# AMZ-780112: 8-day process, order Aug10, required ship Aug16, delivery Aug18
 # ---------------------------------------------------------------------
 _req_delivery4 = date(2026, 8, 18)
 _req_ship4 = date(2026, 8, 16)

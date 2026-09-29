@@ -1,3 +1,9 @@
+"""Workflow execution state for the CMIR resolution pipeline.
+
+Carries extracted email data, validation results, and merge decisions through
+the graph nodes. Updated by each node as it processes the email message.
+"""
+
 from __future__ import annotations
 
 from typing import Any, Literal, TypedDict
@@ -5,6 +11,13 @@ from uuid import UUID
 
 
 class GraphState(TypedDict, total=False):
+    """Workflow execution state.
+
+    Holds all data flowing through the CMIR extraction, validation, and merge
+    pipeline. Each node reads from and updates this state as the email moves
+    from receipt through AI extraction, human approval, and persistence.
+    """
+
     email: dict[str, Any]  # EmailMessage, as a dict
     email_id: Any
     batch_id: str

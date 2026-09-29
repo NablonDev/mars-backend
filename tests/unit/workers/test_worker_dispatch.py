@@ -39,6 +39,7 @@ from app.models.enums import SummaryType
 from app.queue.types import ClaimedJob
 from app.repositories.common.master_data import MasterDataRepository
 from app.repositories.common.purchase_order import PurchaseOrderRepository
+from app.repositories.common.retailer_agreement import RetailerAgreementRepository
 from app.repositories.penalties.job_context import PenaltyJobItemContextRepository
 from app.repositories.penalties.mitigation import MitigationOptionRepository
 from app.repositories.penalties.projection import PenaltyProjectionRepository
@@ -97,10 +98,17 @@ def _seed_purchase_order(database: Database, po_number: str, *, with_rules: bool
             plant_id=plant["id"],
         )
         if with_rules:
+            retailer_agreement = RetailerAgreementRepository(session).add_retailer_agreement(
+                retailer_id=retailer["id"],
+                contract_code=f"TEST-{po_number}",
+                title="Test retailer agreement",
+                document_sha256="0" * 64,
+            )
             rules.add_rule(
                 rule_code=f"RULE-{po_number}-FLAT",
-                retailer_id=retailer["id"],
                 violation_type="OTIF_LATE",
+                penalty_category="OTIF_LATE",
+                retailer_agreement_id=retailer_agreement["id"],
                 calc_type="FLAT_FEE",
                 rate=50.0,
             )
@@ -115,13 +123,16 @@ def _make_job_with_context(
     *,
     stacking_mode_override: str | None = None,
     force_regenerate_summary: bool = False,
+    metadata: dict | None = None,
 ) -> ClaimedJob:
     with database.session() as session:
         job_queue = JobQueueRepository(session)
         job_context = PenaltyJobItemContextRepository(session)
         run = job_queue.create_run(job_type=item_type, trigger_type="ON_DEMAND")
         dedupe_key = f"{purchase_order_id}:{projection_date.isoformat()}:{item_type}"
-        item = job_queue.enqueue(run["id"], item_type=item_type, dedupe_key=dedupe_key, max_attempts=5)
+        item = job_queue.enqueue(
+            run["id"], item_type=item_type, dedupe_key=dedupe_key, max_attempts=5, metadata=metadata
+        )
         assert item is not None
         job_context.create(
             job_item_id=item["id"],
@@ -325,6 +336,56 @@ def _seed_mitigation_options(database: Database, purchase_order_id: UUID, projec
         session.commit()
 
 
+def test_mitigation_run_computes_and_persists_options(database):
+    """MITIGATION_RUN (the PENALTY_MITIGATION_BATCH per-item worker path) --
+    computes and persists mitigation options via the same
+    `MitigationService.run_for_purchase_order` compute path
+    `POST /penalties/mitigations` uses synchronously, no LLM
+    call involved."""
+    purchase_order_id = _seed_purchase_order(database, "PO-MIT-RUN")
+    llm = FakeChatClient()
+    # ORDER_RUN first so a projection exists (MITIGATION_RUN's precondition,
+    # same as MitigationService.run_for_purchase_order's own check).
+    execute_job(
+        _make_job_with_context(database, "ORDER_RUN", purchase_order_id, date(2026, 8, 5)),
+        database,
+        Settings(),
+        llm,
+        heartbeat=None,
+    )
+    llm_invocations_after_order_run = len(llm.invocations)
+
+    job = _make_job_with_context(database, "MITIGATION_RUN", purchase_order_id, date(2026, 8, 5))
+    execute_job(job, database, Settings(), llm, heartbeat=None)
+
+    with database.session() as session:
+        options = MitigationOptionRepository(session).list_for_date(purchase_order_id, date(2026, 8, 5))
+
+    assert options, "mitigation options should have been persisted"
+    # No LLM round-trip for MITIGATION_RUN itself -- only ORDER_RUN's own
+    # summary generation invoked the fake client.
+    assert len(llm.invocations) == llm_invocations_after_order_run
+
+
+def test_mitigation_run_without_a_projection_raises_no_projection_exists(database):
+    purchase_order_id = _seed_purchase_order(database, "PO-MIT-RUN-NOPROJ")
+    llm = FakeChatClient()
+    job = _make_job_with_context(database, "MITIGATION_RUN", purchase_order_id, date(2026, 8, 5))
+
+    with pytest.raises(BusinessRuleError) as exc_info:
+        execute_job(job, database, Settings(), llm, heartbeat=None)
+    assert exc_info.value.code == "NO_PROJECTION_EXISTS"
+
+
+def test_mitigation_run_propagates_purchase_order_not_found(database):
+    llm = FakeChatClient()
+    job = _make_job_with_context(database, "MITIGATION_RUN", uuid4(), date(2026, 8, 5))
+
+    with pytest.raises(NotFoundError) as exc_info:
+        execute_job(job, database, Settings(), llm, heartbeat=None)
+    assert exc_info.value.code == "PO_NOT_FOUND"
+
+
 def test_mitigation_summary_regen_generates_summary(database):
     purchase_order_id = _seed_purchase_order(database, "PO-MIT-WORKER")
     _seed_mitigation_options(database, purchase_order_id, date(2026, 8, 5))
@@ -351,3 +412,81 @@ def test_mitigation_summary_regen_without_options_raises_no_mitigation_options_e
     with pytest.raises(BusinessRuleError) as exc_info:
         execute_job(job, database, Settings(), llm, heartbeat=None)
     assert exc_info.value.code == "NO_MITIGATION_OPTIONS_EXIST"
+
+
+# ---------------------------------------------------------------------
+# PENALTY_FULL_RUN (job_type=PENALTY_FULL_RUN_BATCH's per-item worker path)
+# ---------------------------------------------------------------------
+
+
+def test_penalty_full_run_executes_all_four_steps_in_order(database):
+    """The new dispatch-table entry: `execute_job` routes `PENALTY_FULL_RUN`
+    to `app.workers.penalty_full_run.run_full_run`, which reads `steps` off
+    `process.job_item.metadata` and runs all four steps -- projection,
+    projection summary, mitigation, and mitigation summary -- against one
+    claimed job item, regardless of the order `steps` lists them in."""
+    purchase_order_id = _seed_purchase_order(database, "PO-FULL-RUN")
+    llm = FakeChatClient()
+    job = _make_job_with_context(
+        database,
+        "PENALTY_FULL_RUN",
+        purchase_order_id,
+        date(2026, 8, 5),
+        metadata={"steps": ["mitigation_summary", "mitigation", "projection_summary", "projection"]},
+    )
+
+    execute_job(job, database, Settings(), llm, heartbeat=None)
+
+    with database.session() as session:
+        history = PenaltyProjectionRepository(session).list_history(purchase_order_id)
+        projection_summary = PenaltySummaryRepository(session).get_by_key(
+            purchase_order_id, SummaryType.PROJECTION, date(2026, 8, 5)
+        )
+        options = MitigationOptionRepository(session).list_for_date(purchase_order_id, date(2026, 8, 5))
+        mitigation_summary = PenaltySummaryRepository(session).get_by_key(
+            purchase_order_id, SummaryType.MITIGATION, date(2026, 8, 5)
+        )
+
+    assert history, "projection step should have persisted a projection"
+    assert projection_summary is not None and projection_summary["status"] == "READY"
+    assert options, "mitigation step should have persisted mitigation options"
+    assert mitigation_summary is not None and mitigation_summary["status"] == "READY"
+
+
+def test_penalty_full_run_runs_only_the_requested_steps(database):
+    """Only `projection` requested -- no summary, no mitigation options,
+    no mitigation summary should be produced."""
+    purchase_order_id = _seed_purchase_order(database, "PO-FULL-RUN-PARTIAL")
+    llm = FakeChatClient()
+    job = _make_job_with_context(
+        database,
+        "PENALTY_FULL_RUN",
+        purchase_order_id,
+        date(2026, 8, 5),
+        metadata={"steps": ["projection"]},
+    )
+
+    execute_job(job, database, Settings(), llm, heartbeat=None)
+
+    with database.session() as session:
+        history = PenaltyProjectionRepository(session).list_history(purchase_order_id)
+        projection_summary = PenaltySummaryRepository(session).get_by_key(
+            purchase_order_id, SummaryType.PROJECTION, date(2026, 8, 5)
+        )
+        options = MitigationOptionRepository(session).list_for_date(purchase_order_id, date(2026, 8, 5))
+
+    assert history, "projection step should have persisted a projection"
+    assert projection_summary is None
+    assert options == []
+    assert llm.invocations == []
+
+
+def test_penalty_full_run_with_no_steps_in_metadata_raises_value_error(database):
+    purchase_order_id = _seed_purchase_order(database, "PO-FULL-RUN-NOSTEPS")
+    llm = FakeChatClient()
+    job = _make_job_with_context(
+        database, "PENALTY_FULL_RUN", purchase_order_id, date(2026, 8, 5), metadata={}
+    )
+
+    with pytest.raises(ValueError, match="steps"):
+        execute_job(job, database, Settings(), llm, heartbeat=None)

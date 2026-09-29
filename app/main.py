@@ -7,6 +7,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.dependencies import (
     build_ontology_insert_service,
@@ -23,7 +24,7 @@ from app.core.middleware import AccessLogMiddleware, RequestIdMiddleware
 from app.db.session import Database
 from app.ontology.config.validation import validate_mapping
 from app.queue.factory import build_job_queue
-from app.services.cmir.run_service import CmirRunService
+from app.services.cmir.service import CmirService
 from app.services.ontology import materialize_job
 from app.services.ontology_insert.run_service import OntologyInsertRunService
 from app.services.ontology_update.run_service import OntologyUpdateRunService
@@ -57,14 +58,24 @@ async def _run_ontology_materialize_loop(interval_seconds: int) -> None:
 
 
 def create_app(
-    service: CmirRunService | None = None,
+    service: CmirService | None = None,
     po_service: PoValidationService | None = None,
     ontology_update_service: OntologyUpdateRunService | None = None,
     ontology_insert_service: OntologyInsertRunService | None = None,
     settings: Settings | None = None,
 ) -> FastAPI:
+    """Build the FastAPI app, wiring middleware, routers, and exception handlers.
+
+    `service`/`po_service` let tests inject fakes directly; left as None, the
+    lifespan builds the real LangGraph-backed services on startup instead.
+    """
     resolved = settings or get_settings()
-    configure_logging(resolved.app.log_level)
+    configure_logging(
+        resolved.app.log_level,
+        resolved.app.log_format,
+        no_color=resolved.app.no_color,
+        no_bold=resolved.app.no_bold,
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
@@ -87,9 +98,9 @@ def create_app(
             pool_timeout=resolved.database.pool_timeout,
         )
         app.state.job_queue = build_job_queue(resolved, app.state.database)
-        # CMIR/PO-validation services carry their own composition root
-        # (LangGraph + a shared Postgres checkpointer) -- built here unless a
-        # test already injected a fake via create_app(service=...).
+        # CMIR/PO-validation services carry their own composition root (LangGraph
+        # plus a shared Postgres checkpointer), built here unless a test already
+        # injected a fake via create_app(service=...).
         if app.state.service is None:
             app.state.service = build_service()
         if app.state.po_service is None:
@@ -127,6 +138,14 @@ def create_app(
     app.state.ontology_insert_service = ontology_insert_service
 
     # Last-added middleware is outermost; request IDs must wrap access logging.
+    # CORSMiddleware added first (innermost), matching mars-bff's ordering.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=resolved.cors.allowed_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     app.add_middleware(AccessLogMiddleware)
     app.add_middleware(RequestIdMiddleware)
 

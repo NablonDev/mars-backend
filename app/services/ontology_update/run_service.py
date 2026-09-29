@@ -1,6 +1,6 @@
 """Orchestrates the ontology-update POC's LangGraph runs -- the only
 caller of `graph.invoke`/`Command(resume=...)` for this graph, matching
-`CmirRunService`/`PoValidationService`'s exact convention (see
+`CmirService`/`PoValidationService`'s exact convention (see
 `docs/ARCHITECTURE.md` §1: "Services... are the only callers of
 `graph.invoke`/`Command(resume=...)` in the whole system").
 

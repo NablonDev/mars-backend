@@ -1,5 +1,5 @@
 """Integration test for the A.1 CMIR conflict-rollback fix -- proves that
-CmirRunService's own transaction/control-flow persists the reviewer's
+CmirService's own transaction/control-flow persists the reviewer's
 thread/human_action/agent_run bookkeeping to REAL Postgres even when the
 graph resume reports a CMIR SCD2 write conflict, verified via an
 independent DB connection (not the one the service call itself used).
@@ -39,7 +39,7 @@ from app.core.config import get_settings
 from app.core.container import Container
 from app.core.exceptions import ConflictError
 from app.db.session import Database
-from app.services.cmir.run_service import CmirRunService
+from app.services.cmir.service import CmirService
 
 
 def _connect_or_none() -> Database | None:
@@ -131,7 +131,7 @@ def test_submit_decision_conflict_commits_bookkeeping_to_real_postgres(pg_databa
             uow.graph = graph
             yield uow
 
-    service = CmirRunService(
+    service = CmirService(
         email_reader=container.email_reader,
         repos_factory=container.cmir_repos,
         unit_of_work_factory=uow_factory,

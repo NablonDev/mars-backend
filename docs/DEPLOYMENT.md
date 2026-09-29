@@ -64,7 +64,7 @@ server.
 
 ### What did NOT change
 
-- Every pre-existing endpoint behaves the same. `POST /api/v1/purchase-orders/{purchase_order_id}/penalty-projections`
+- Every pre-existing endpoint behaves the same. `POST /api/v1/penalties/projections`
   is still synchronous and inline.
 - `scripts/ops/run_projection_cli.py` still works for single orders and ad-hoc
   runs. It was not modified.
@@ -121,10 +121,11 @@ psycopg3 is what is pinned.
 alembic upgrade head
 ```
 
-This creates every schema (`common`, `process`, `cmir`, `penalties`,
-`langgraph`) including `process.job_run`/`process.job_item` and the
-projection/mitigation summary fingerprint columns — **there is no code path
-that creates them lazily.** An API container started against an un-migrated
+This creates every dedicated schema (`process`, `cmir`, `penalties`,
+`langgraph`) plus the shared master/fulfillment tables in `public`,
+including `process.job_run`/`process.job_item` and the projection/
+mitigation summary fingerprint columns — **there is no code path that
+creates them lazily.** An API container started against an un-migrated
 database will start fine and then fail on the first `/job-runs` call.
 
 ### 3.3 Seed something to work on
@@ -217,29 +218,43 @@ python scripts/ops/run_daily_batch.py --fail-on-dead     # CI framing: exit 1 if
 On-demand deliberately does **not** wait for a batch, and does not run
 inline in the API process either: `get_or_schedule` enqueues a
 `process.job_run`/`job_item` (plus its matching `penalty_job_item_context`
-row) and returns immediately with `status=PENDING` -- a worker (`python
-scripts/ops/run_daily_batch.py` or the standalone worker loop) claims and
-generates it later, out of band. There is no `BackgroundTasks` slot and no
-process-local concurrency governor to configure here:
+row) and returns immediately with `status=PENDING` -- **nothing processes
+it until a worker is run separately.** In local dev that's either
+`python scripts/ops/run_daily_batch.py --drain-only` or the standalone
+worker container, `docker compose --profile tools run --rm
+fines-projection-worker` (§3.8 -- gated behind `profiles: [tools]`, so it
+is **not** started by a plain `docker compose up`); in a deployed
+environment it's the nightly Container Apps Job (§6.6). Until one of
+those actually runs, the row sits at `PENDING` indefinitely with no LLM
+call ever made -- that is expected, by-design behavior, not a bug. There
+is no `BackgroundTasks` slot and no process-local concurrency governor to
+configure here:
 
-The path is `/purchase-orders/{purchase_order_id}/penalty-projections/summary`
-(the PO's surrogate UUID, not its business number like `WMT-100234` --
-look it up via `GET /api/v1/purchase-orders` first), and **the body is
-required** — omit `-d '{}'` and you get a `422`, not a default:
+The path is `/api/v1/penalties/projections/summary`, and **the body is
+required** — it needs at least `purchase_order_id` (the PO's surrogate
+UUID, not its business number like `WMT-100234` -- look it up via
+`GET /api/v1/purchase-orders` first); omitting the body entirely gets a
+`422`, not a default:
 
 ```bash
-curl -X POST localhost:8000/api/v1/purchase-orders/<purchase_order_id>/penalty-projections/summary \
-  -H 'content-type: application/json' -d '{}'
+curl -X POST localhost:8000/api/v1/penalties/projections/summary \
+  -H 'content-type: application/json' -d '{"purchase_order_id": "<purchase_order_id>"}'
 # → 200 with a cached summary, or 202 with status PENDING
 ```
 
 Optional body fields: `as_of_date` (defaults to today) and
 `force_regenerate` (defaults to `false`). This route is idempotent trigger-and-poll
 in one: call it again with the same body to check on a `PENDING` job, or poll
-via `GET /api/v1/penalty-projections/{projection_id}?include=summary` once the
-row's `projection_id` is known. It never 404s on a missing job -- `get_or_schedule`
-creates one if none exists. A genuinely wrong URL still gets Starlette's own
-`{"detail":"Not Found"}`, distinguishable from any app-level error envelope.
+via the dedicated `GET /api/v1/penalties/projections/summary?purchase_order_id=&as_of_date=`
+read route, or `GET /api/v1/penalties/projections/{projection_id}?include=summary`
+once the row's `projection_id` is known. It never 404s on the trigger route for a
+missing job -- `get_or_schedule` creates one if none exists. The dedicated `GET`
+read route above is a plain `200` with `status: null` if none was ever triggered
+for this `purchase_order_id` -- the same "nothing to show yet, not an error"
+convention `?include=summary` already uses elsewhere in this API; an unknown
+`purchase_order_id` is still a genuine `404 PO_NOT_FOUND`. A genuinely wrong URL
+still gets Starlette's own `{"detail":"Not Found"}`, distinguishable from any
+app-level error envelope.
 
 ### 3.7 Inspecting a stuck queue
 
@@ -272,10 +287,16 @@ recovery mechanism; there is nothing manual to do unless it keeps happening.
 ### 3.8 Docker Compose
 
 ```bash
-docker compose up                                   # db + api
-docker compose --profile tools run --rm migrate     # migrations
-docker compose --profile tools run --rm worker      # one batch drain
+docker compose up                                                    # db + api -- does NOT start the worker
+docker compose --profile tools run --rm migrate                      # migrations
+docker compose --profile tools run --rm fines-projection-worker      # one batch drain
 ```
+
+`fines-projection-worker` is gated behind `profiles: [tools]` in
+`docker-compose.yml`, so a plain `docker compose up` never starts it --
+anything enqueued via the API (job-runs, on-demand summaries) sits at
+`PENDING` until this is run separately, or in the deployed nightly
+Container Apps Job (§6.6).
 
 Compose hardcodes `mars:mars@db:5432/mars` for the app services, so set
 `POSTGRES_USER=mars`, `POSTGRES_PASSWORD=mars`, `POSTGRES_DB=mars` in the host
@@ -399,14 +420,15 @@ the Container Apps Job (§6).
      ┌────────▼─────────┐      ┌──────────────┐      ┌────────▼─────────┐
      │ PostgreSQL       │      │ Azure OpenAI │      │ Service Bus      │
      │ Flexible Server  │      │ deployment   │      │ (phase 2 only)   │
-     │ 5 schemas        │      │              │      │                  │
+     │ 4 schemas +      │      │              │      │                  │
+     │ public           │      │              │      │                  │
      └──────────────────┘      └──────────────┘      └──────────────────┘
 ```
 
-The 5 schemas: `common` (shared master/fulfillment data), `process` (shared
-job/agent/workflow backbone, used by both domains), `cmir`, `penalties`, and
-`langgraph` (LangGraph's own checkpoint tables, not app-managed). `public`
-holds nothing.
+The 4 dedicated schemas: `process` (shared job/agent/workflow backbone,
+used by both domains), `cmir`, `penalties`, and `langgraph` (LangGraph's
+own checkpoint tables, not app-managed). `public` holds the shared
+master/fulfillment data (unqualified, no dedicated schema of its own).
 
 Resource inventory:
 
@@ -530,11 +552,15 @@ az containerapp create \
 
 No `--command` — the image's default `CMD` already starts uvicorn.
 
-**`--min-replicas 1`, not 0.** Scale-to-zero looks attractive for an MVP, but
-on-demand summaries run in `BackgroundTasks` *inside this container*. A
-replica that scales away mid-generation strands the work. The recovery sweep
-does eventually pick it up on the next nightly run, but a user waiting on a
-summary sees PENDING until then.
+**`--min-replicas 1`, not 0.** Scale-to-zero saves cost for an MVP, but a
+cold replica adds real latency to whichever request wakes it. On-demand
+summary generation does **not** run inside this `backend` container at all
+(see §3.6) -- it's a queued `process.job_item`, claimed and executed later
+by the separate worker (the nightly Container Apps Job, or a manual
+`run_daily_batch.py --drain-only`), so scaling `backend` to zero cannot
+strand a summary mid-generation. It does mean a user waiting on a
+`PENDING` summary sees no progress until that worker actually runs, same as
+in local development.
 
 Grant the app pull access to ACR:
 

@@ -20,22 +20,20 @@ LLM cost, or re-summarizing one purchase order without re-seeding).
 
 Every response now comes wrapped in the `{success, message, data, error}`
 envelope (`app/core/envelope.py`), and `/orders/{order_id}/...` routes
-became `/purchase-orders/{purchase_order_id}/...` (`common.purchase_order`'s
-UUID surrogate id, not a business `order_id` string) -- see the approved
-plan §5.
+became flat `/penalties/...` routes with `purchase_order_id` (`common.
+purchase_order`'s UUID surrogate id, not a business `order_id` string) as
+a query param or body field, not a path segment.
 
 Penalty-projection-summary generation is a background job: a cache miss
 (or --force-regenerate) gets a `202` immediately, not a `200` with the
-summary already in it. Unlike the pre-restructure API, there is no
-per-(purchase_order, date) summary-poll endpoint any more --
-`?include=summary` is a pure read, nested under the projection-history
-resource instead, so this script polls
-`GET /purchase-orders/{id}/penalty-projections?include=summary` for the
-row matching `as_of_date`. That row only ever changes once a worker
-actually drains the queued regeneration job -- this script starts one
-itself (`python scripts/ops/run_daily_batch.py --drain-only`, subprocess,
-best-effort) before polling; before this pass no worker existed to do
-that at all (see `app.workers.penalty_projection`).
+summary already in it. This script polls the dedicated
+`GET /penalties/projections/summary?purchase_order_id=&as_of_date=` read
+route (`_helpers._poll_until_ready`, shared with
+`demo_penalty_projection_summary.py`/`demo_penalty_mitigation_summary.py`)
+until `status` leaves `PENDING`. That status only ever changes once a
+worker actually drains the queued regeneration job -- this script starts
+one itself (`python scripts/ops/run_daily_batch.py --drain-only`,
+subprocess, best-effort) before polling.
 
 The last stage needs real Azure OpenAI credentials in `.env`
 (AZURE_OPENAI_API_KEY/ENDPOINT/DEPLOYMENT_NAME) -- without them this still
@@ -54,11 +52,12 @@ Usage:
 import argparse
 import subprocess
 import sys
-import time
 from datetime import UTC, datetime
 
 import httpx
-from _helpers import POLL_INTERVAL_SECONDS, POLL_TIMEOUT_SECONDS, _auth_headers, _error_message
+from _helpers import POLL_TIMEOUT_SECONDS, _auth_headers, _error_message, _poll_until_ready
+
+_SUMMARY_PATH = "penalties/projections/summary"
 
 
 def _seed(base_url: str) -> None:
@@ -86,25 +85,6 @@ def _simulate(base_url: str) -> list[dict]:
             f"final total=${last_day['total_expected_penalty_amount']:,.2f} on {last_day['projection_date']}"
         )
     return scenarios
-
-
-def _poll_until_ready(base_url: str, purchase_order_id: str, as_of_date: str) -> dict | None:
-    deadline = time.monotonic() + POLL_TIMEOUT_SECONDS
-    headers = _auth_headers()
-    while time.monotonic() < deadline:
-        resp = httpx.get(
-            f"{base_url}/purchase-orders/{purchase_order_id}/penalty-projections",
-            params={"include": "summary"},
-            headers=headers,
-            timeout=30,
-        )
-        resp.raise_for_status()
-        rows = resp.json()["data"]
-        row = next((r for r in rows if r["projection_date"] == as_of_date), None)
-        if row is not None and row["summary_status"] not in (None, "PENDING"):
-            return row
-        time.sleep(POLL_INTERVAL_SECONDS)
-    return None
 
 
 def _start_drain_worker() -> subprocess.Popen | None:
@@ -143,15 +123,19 @@ def _summarize_all(base_url: str, scenarios: list[dict], force_regenerate: bool)
                 continue
             as_of_date = max(not_future)
             resp = httpx.post(
-                f"{base_url}/purchase-orders/{purchase_order_id}/penalty-projections/summary",
-                json={"as_of_date": as_of_date, "force_regenerate": force_regenerate},
+                f"{base_url}/{_SUMMARY_PATH}",
+                json={
+                    "purchase_order_id": purchase_order_id,
+                    "as_of_date": as_of_date,
+                    "force_regenerate": force_regenerate,
+                },
                 headers=_auth_headers(),
                 timeout=30,
             )
             if resp.status_code == 200:
                 summary = resp.json()["data"]["summary"]
             elif resp.status_code == 202:
-                row = _poll_until_ready(base_url, purchase_order_id, as_of_date)
+                row = _poll_until_ready(base_url, _SUMMARY_PATH, purchase_order_id, as_of_date)
                 if row is None:
                     print(
                         f"\n  [timeout] {purchase_order_id}: still PENDING after "
@@ -159,7 +143,7 @@ def _summarize_all(base_url: str, scenarios: list[dict], force_regenerate: bool)
                         file=sys.stderr,
                     )
                     continue
-                if row["summary_status"] == "FAILED":
+                if row["status"] == "FAILED":
                     print(f"\n  [failed] {purchase_order_id}: generation failed upstream", file=sys.stderr)
                     continue
                 summary = row["summary"]

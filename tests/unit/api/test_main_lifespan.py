@@ -29,7 +29,7 @@ class _FakeJobQueue:
         self.close_calls += 1
 
 
-class _FakeCmirRunService:
+class _FakeCmirService:
     """Stand-in passed to `create_app(service=...)` so lifespan's `if
     app.state.service is None: build_service()` branch is skipped --
     `build_service()` -> `Container.build()` opens a real Postgres-backed
@@ -41,7 +41,7 @@ class _FakeCmirRunService:
 
 
 class _FakePoValidationService:
-    """Same purpose as `_FakeCmirRunService`, for `app.state.po_service` /
+    """Same purpose as `_FakeCmirService`, for `app.state.po_service` /
     `build_po_validation_service()`."""
 
 
@@ -51,7 +51,7 @@ def test_lifespan_closes_the_job_queue_on_shutdown(monkeypatch: pytest.MonkeyPat
 
     from fastapi.testclient import TestClient
 
-    app = create_app(_FakeCmirRunService(), _FakePoValidationService())
+    app = create_app(_FakeCmirService(), _FakePoValidationService())
 
     with TestClient(app) as client:
         assert app.state.job_queue == (fake_queue, fake_queue)
@@ -75,7 +75,7 @@ def test_lifespan_builds_the_queue_once_and_reuses_it(monkeypatch: pytest.Monkey
 
     from fastapi.testclient import TestClient
 
-    app = create_app(_FakeCmirRunService(), _FakePoValidationService())
+    app = create_app(_FakeCmirService(), _FakePoValidationService())
 
     with TestClient(app) as client:
         client.get("/api/v1/health")

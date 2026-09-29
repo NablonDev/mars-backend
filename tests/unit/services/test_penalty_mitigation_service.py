@@ -20,6 +20,7 @@ from app.core.exceptions import BusinessRuleError, NotFoundError
 from app.services.penalties.mitigation.service import MitigationService
 from app.services.penalties.mitigation.types import ShortageCause
 from app.services.penalties.projection.service import ProjectionService
+from tests.conftest import make_retailer_agreement
 
 
 def _build_services(repos) -> tuple[ProjectionService, MitigationService]:
@@ -67,8 +68,9 @@ def _seed_shortage_order(repos, projection_service, po_number: str = "ORD-MIT"):
     )
     repos.penalty_rules.add_rule(
         rule_code=f"RULE-{po_number}-SHORT",
-        retailer_id=retailer["id"],
         violation_type="SHORT_SHIP",
+        penalty_category="SHORT_SHIP",
+        retailer_agreement_id=make_retailer_agreement(repos, retailer["id"]),
         calc_type="PER_UNIT",
         rate=4.0,
         threshold_pct=0.0,
@@ -234,17 +236,20 @@ def test_reconstructed_projection_result_handles_max_stacking(repos):
         material_id=material["id"],
         plant_id=plant["id"],
     )
+    retailer_agreement_id = make_retailer_agreement(repos, retailer["id"])
     repos.penalty_rules.add_rule(
         rule_code="RULE-MAX-SHORT",
-        retailer_id=retailer["id"],
         violation_type="SHORT_SHIP",
+        penalty_category="SHORT_SHIP",
+        retailer_agreement_id=retailer_agreement_id,
         calc_type="PER_UNIT",
         rate=4.0,
     )
     repos.penalty_rules.add_rule(
         rule_code="RULE-MAX-OTIF",
-        retailer_id=retailer["id"],
         violation_type="OTIF_LATE",
+        penalty_category="OTIF_LATE",
+        retailer_agreement_id=retailer_agreement_id,
         calc_type="FLAT_FEE",
         rate=500.0,
     )

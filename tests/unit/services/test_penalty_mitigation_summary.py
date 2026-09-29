@@ -18,7 +18,7 @@ from uuid import uuid4
 
 import pytest
 
-from app.agents.penalties.mitigation.prompts.v1 import PROMPT_VERSION
+from app.agents.penalties.mitigation.prompts.v2 import PROMPT_VERSION
 from app.core.exceptions import BusinessRuleError, ExternalServiceError, NotFoundError, ValidationError
 from app.models.enums import SummaryType
 from app.services.penalties.mitigation.summary_service import MitigationSummaryService
@@ -266,6 +266,25 @@ def test_get_status_raises_no_mitigation_summary_job_exists_when_never_posted(re
         service.get_status(purchase_order_id, as_of_date=date(2026, 8, 5))
 
 
+def test_get_status_falls_back_to_a_still_pending_prior_job_not_just_ready(repos):
+    """Shared `SummaryServiceBase.get_status` fallback -- see the mirroring
+    test in test_penalty_projection_summary.py. A job requested on an
+    earlier day that a worker never picked up (still PENDING) must still be
+    found and reported as PENDING when polled on a later day with no
+    as_of_date override."""
+    purchase_order_id = _seed_order(repos)
+    _seed_options(repos, purchase_order_id, date(2026, 8, 5))
+    fake_llm = FakeChatClient()
+    service = _build_service(repos, fake_llm)
+    service.get_or_schedule(purchase_order_id, as_of_date=date(2026, 8, 5))  # left PENDING, never run
+
+    job = service.get_status(purchase_order_id, as_of_date=date(2026, 8, 6))
+
+    assert job.status == "PENDING"
+    assert job.as_of_date == date(2026, 8, 5)
+    assert job.output is None
+
+
 def test_as_of_date_in_the_future_raises_invalid_as_of_date(repos):
     purchase_order_id = _seed_order(repos)
     _seed_options(repos, purchase_order_id, date(2026, 8, 5))
@@ -295,12 +314,12 @@ def test_v1_prompt_version_is_registered_on_first_use(repos):
     fake_llm = FakeChatClient()
     service = _build_service(repos, fake_llm)
 
-    assert PROMPT_VERSION == "v1"
+    assert PROMPT_VERSION == "v2"
 
     job = _schedule_and_run(service, purchase_order_id, as_of_date=date(2026, 8, 5))
 
     assert job.status == "READY"
-    assert job.output.prompt_version == "v1"
+    assert job.output.prompt_version == PROMPT_VERSION
     registered = repos.agent_registry.get_active("penalty_mitigation_summary")
     assert registered is not None
-    assert registered["prompt_version"] == "v1"
+    assert registered["prompt_version"] == PROMPT_VERSION

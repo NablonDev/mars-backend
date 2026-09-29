@@ -1,11 +1,4 @@
-"""Penalty-mitigation-exclusive seed data: mitigation inputs for the
-worked-example purchase orders.
-
-Was `app/services/seeding/fine_mitigation.py`. Rewritten against the
-Phase 2 `penalties.mitigation_input` repository -- keyed by
-`purchase_order_id` (a UUID surrogate) rather than the old business-string
-`order_id`, resolved here via `PurchaseOrderRepository.get_by_number`.
-"""
+"""Mitigation-input seeds for the worked-example purchase orders."""
 
 from __future__ import annotations
 
@@ -17,9 +10,7 @@ from app.services.seeding.scenario_data_mitigation import SEEDED_MITIGATION_INPU
 
 
 def _mitigation_to_seed_dict(inputs: Any) -> dict[str, Any]:
-    """Converts a `MitigationInputs` (from
-    `app.services.seeding.scenario_data_mitigation.SEEDED_MITIGATION_INPUTS`)
-    into `MitigationInputRepository.upsert_inputs` kwargs."""
+    """Convert a `MitigationInputs` fixture into `upsert_inputs` kwargs."""
     return {
         "purchase_order_number": inputs.order_id,
         "shortage_cause": inputs.shortage_cause.value,
@@ -34,17 +25,13 @@ def _mitigation_to_seed_dict(inputs: Any) -> dict[str, Any]:
     }
 
 
-# AMZ-778501 has no entry in SEEDED_MITIGATION_INPUTS -- deliberate, the
-# "not present" tier (MitigationInputRepository.get_inputs then returns
-# all-defaults).
 _MITIGATION_INPUTS = [_mitigation_to_seed_dict(inputs) for inputs in SEEDED_MITIGATION_INPUTS.values()]
 
 
 def seed(
     mitigation_inputs: MitigationInputRepository, purchase_orders: PurchaseOrderRepository
 ) -> dict[str, int]:
-    """Idempotent: safe to call repeatedly. Skips anything that already
-    exists rather than erroring on a duplicate key."""
+    """Seed mitigation inputs, skipping purchase orders that already have a row."""
     counts = {"mitigation_inputs": 0}
 
     existing_purchase_order_ids = set(mitigation_inputs.list_purchase_order_ids())

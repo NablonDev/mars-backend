@@ -3,7 +3,7 @@
 Proves that when the DB-persistence step fails immediately after a
 successful graph invoke/checkpoint write (LangGraph's PostgresSaver
 connection is autocommit=True -- Phase 1's finding -- so the checkpoint is
-already durably committed by this point), CmirRunService/PoValidationService:
+already durably committed by this point), CmirService/PoValidationService:
 
 - retry EXACTLY ONCE, with a completely fresh Session (never re-invoking
   the graph -- never re-running business logic),
@@ -43,7 +43,7 @@ from app.core.config import get_settings
 from app.core.container import Container
 from app.core.exceptions import ExternalServiceError
 from app.db.session import Database
-from app.services.cmir.run_service import CmirRunService
+from app.services.cmir.service import CmirService
 
 INJECTED_FAILURE_MESSAGE = "Injected DB-persistence failure (A.2 test)"
 
@@ -132,7 +132,7 @@ def _seed_cmir_thread_awaiting_approval(container: Container) -> tuple[UUID, str
             uow.graph = setup_graph
             yield uow
 
-    setup_service = CmirRunService(
+    setup_service = CmirService(
         email_reader=container.email_reader,
         repos_factory=container.cmir_repos,
         unit_of_work_factory=setup_uow_factory,
@@ -185,7 +185,7 @@ def test_db_persistence_succeeds_consistent_final_state(pg_database: Database) -
             uow.graph = resume_graph
             yield uow
 
-    service = CmirRunService(
+    service = CmirService(
         email_reader=container.email_reader,
         repos_factory=container.cmir_repos,
         unit_of_work_factory=uow_factory,
@@ -241,7 +241,7 @@ def test_first_db_persistence_fails_retry_succeeds(pg_database: Database) -> Non
 
         return _wrapper()
 
-    service = CmirRunService(
+    service = CmirService(
         email_reader=container.email_reader,
         repos_factory=instrumented_repos_factory,
         unit_of_work_factory=failing_once_uow_factory,
@@ -289,7 +289,7 @@ def test_first_db_persistence_fails_retry_also_fails_raises_workflow_state_corru
             repos.human_actions.apply_human_action = _boom
             yield repos
 
-    service = CmirRunService(
+    service = CmirService(
         email_reader=container.email_reader,
         repos_factory=always_failing_repos_factory,
         unit_of_work_factory=always_failing_uow_factory,
@@ -335,7 +335,7 @@ def test_cmir_real_hitl_flow_db_consistent_after_decision(pg_database: Database)
             uow.graph = resume_graph
             yield uow
 
-    service = CmirRunService(
+    service = CmirService(
         email_reader=container.email_reader,
         repos_factory=container.cmir_repos,
         unit_of_work_factory=uow_factory,

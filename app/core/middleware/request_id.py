@@ -14,6 +14,7 @@ _SAFE_REQUEST_ID = re.compile(r"\A[A-Za-z0-9.*:-]{1,64}\Z")
 
 
 def _inbound_request_id(scope: Scope) -> str | None:
+    """Return the inbound X-Request-ID header value if present and safe to reuse, else None."""
     candidate = Headers(scope=scope).get(REQUEST_ID_HEADER)
     if candidate and _SAFE_REQUEST_ID.fullmatch(candidate):
         return candidate
@@ -21,6 +22,8 @@ def _inbound_request_id(scope: Scope) -> str | None:
 
 
 class RequestIdMiddleware:
+    """ASGI middleware that assigns a request ID and echoes it back in the response header."""
+
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
@@ -35,6 +38,7 @@ class RequestIdMiddleware:
         token = set_request_id(request_id)
 
         async def send_with_request_id(message: Message) -> None:
+            """Forward the ASGI message, stamping the response start with the request ID header."""
             if message["type"] == "http.response.start":
                 MutableHeaders(scope=message)[REQUEST_ID_HEADER] = request_id
             await send(message)

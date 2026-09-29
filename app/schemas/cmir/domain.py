@@ -1,16 +1,4 @@
-"""Internal graph-state / value-object shapes for the CMIR domain (formerly
-the top half of the flat `app/schemas/cmir.py`).
-
-Framework-free except `Cmir` itself, which is a Pydantic model used as the
-in-memory/graph-state CMIR representation, not an API contract -- it flows
-through LangGraph state and gets reconstructed via `Cmir(**dict)` throughout
-`app/agents/cmir/nodes.py` and `app/services/cmir/run_service.py`. Kept
-verbatim from the pre-Phase-7b module: `app/agents/cmir/nodes.py`,
-`app/services/cmir/{validation,merge,extractor,run_service}.py`, and
-`app/services/email_reader.py` all import from here (via
-`app/schemas/cmir/__init__.py`'s re-export) and are out of this phase's
-scope.
-"""
+"""Internal graph-state and value-object shapes for the CMIR domain, not API contracts."""
 
 from __future__ import annotations
 
@@ -21,6 +9,8 @@ from pydantic import BaseModel, Field
 
 
 class CmirStatus(str, Enum):
+    """Review status of a CMIR record, derived from its content by `CmirValidator`."""
+
     PENDING_REVIEW = "pending_review"
     PENDING_HUMAN_ACTION = "pending_human_action"
     APPROVED = "approved"
@@ -38,10 +28,8 @@ MANDATORY_FIELDS: tuple[str, ...] = (
     "target_customer_material_ref",
 )
 
-# Every CMIR business-content field -- i.e. every field a reviewer can edit and every
-# field the SCD2 merge (app.services.cmir.merge) considers. Deliberately excludes
-# `status` and `missing_fields`, which are derived by CmirValidator from this
-# content, not part of it.
+# Every field a reviewer can edit and the SCD2 merge (app.services.cmir.merge) considers.
+# Excludes `status` and `missing_fields`, which CmirValidator derives from this content.
 CMIR_CONTENT_FIELDS: tuple[str, ...] = MANDATORY_FIELDS + (
     "target_grd_code",
     "effective_date",
@@ -50,6 +38,8 @@ CMIR_CONTENT_FIELDS: tuple[str, ...] = MANDATORY_FIELDS + (
 
 
 class Cmir(BaseModel):
+    """In-memory CMIR representation carried through LangGraph state, not an API contract."""
+
     sender_type: str = ""
     customer_identity: str = ""
     material_identity: str = Field(
@@ -67,7 +57,7 @@ class Cmir(BaseModel):
     target_customer_material_ref: str = Field(
         "",
         description=(
-            "The customer's own material number/reference as written in their email -- "
+            "The customer's own material number/reference as written in their email, "
             "e.g. a line labeled 'Customer Material', 'Cust Mat No', 'Customer Material "
             "Code', or similar."
         ),

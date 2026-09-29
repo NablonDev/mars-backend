@@ -1,11 +1,4 @@
-"""Register and re-export all ORM models so they are available through
-`app.models`.
-
-Four Postgres schemas: `common` (shared master/fulfillment data), `process`
-(shared job/agent/workflow backbone), `cmir` (CMIR-only), `penalties`
-(penalties-only). No tables in `public`. See docs/DATABASE.md and
-`app/db/base.py` for the schema constants.
-"""
+"""Register and re-export all ORM models."""
 
 from app.db.base import Base, TimestampMixin
 from app.models.cmir import (
@@ -25,29 +18,47 @@ from app.models.common import (
     OrderConfirmation,
     OrderConfirmationLine,
     Plant,
+    PoDeliveryChangeRequest,
     ProductionOrder,
     ProductionSchedule,
     PurchaseOrder,
     PurchaseOrderLine,
     Retailer,
+    RetailerAgreement,
     RetailerLocation,
     Shipment,
     Sku,
     StorageLocation,
     Warehouse,
 )
-from app.models.enums import AgentDomain, JobItemStatus, JobRunType, JobTaskType, SummaryStatus, SummaryType
+from app.models.enums import (
+    AgentDomain,
+    DisputeReasonCode,
+    DisputeStatus,
+    DisputeVerdict,
+    JobItemStatus,
+    JobRunType,
+    JobTaskType,
+    SummaryStatus,
+    SummaryType,
+    WorkflowThreadSubjectType,
+)
 from app.models.penalties import (
     ActualPenalty,
+    ExtractedPenaltyRule,
+    ExtractedPenaltyRuleAttribute,
+    ExtractedPenaltyRuleRevision,
     MitigationInput,
     MitigationOption,
+    PenaltyDispute,
+    PenaltyInterceptionLog,
     PenaltyJobItemContext,
     PenaltyJobRunContext,
     PenaltyProjection,
     PenaltyRule,
     PenaltyRuleTier,
     PenaltySummary,
-    PoDeliveryChangeRequest,
+    RulePublication,
 )
 from app.models.process import (
     Agent,
@@ -75,8 +86,14 @@ __all__ = [
     "Delivery",
     "DeliveryLine",
     "DemandException",
+    "DisputeReasonCode",
+    "DisputeStatus",
+    "DisputeVerdict",
     "EmailActionLog",
     "EmailEvent",
+    "ExtractedPenaltyRule",
+    "ExtractedPenaltyRuleAttribute",
+    "ExtractedPenaltyRuleRevision",
     "HumanAction",
     "JobItem",
     "JobItemStatus",
@@ -89,6 +106,8 @@ __all__ = [
     "MitigationOption",
     "OrderConfirmation",
     "OrderConfirmationLine",
+    "PenaltyDispute",
+    "PenaltyInterceptionLog",
     "PenaltyJobItemContext",
     "PenaltyJobRunContext",
     "PenaltyProjection",
@@ -103,7 +122,9 @@ __all__ = [
     "PurchaseOrder",
     "PurchaseOrderLine",
     "Retailer",
+    "RetailerAgreement",
     "RetailerLocation",
+    "RulePublication",
     "Shipment",
     "Sku",
     "StorageLocation",
@@ -113,4 +134,5 @@ __all__ = [
     "Warehouse",
     "WorkflowThread",
     "WorkflowThreadSubject",
+    "WorkflowThreadSubjectType",
 ]

@@ -3,7 +3,7 @@ No-server CLI: runs the penalty-mitigation-ranking service directly against
 the configured database (DATABASE_URL / .env), without needing `uvicorn`
 running. Kept for ad-hoc/local use and cron/Airflow-style scheduling where
 standing up an HTTP server just to run a batch job is unnecessary -- the
-API (`POST /api/v1/penalty-mitigations?projection_id={id}`) is the
+API (`POST /api/v1/penalties/mitigations`) is the
 equivalent for anything that should go through HTTP.
 
 Mitigation never computes a projection of its own: it reads the purchase
@@ -30,7 +30,7 @@ Examples:
 --with-summary additionally runs the penalty-mitigation-summary generation
 for each purchase order right after its mitigation ranking succeeds -- the
 same sequential guarantee as
-`POST /purchase-orders/{purchase_order_id}/penalty-mitigations/summary`,
+`POST /penalties/mitigations/summary`,
 for this no-HTTP-server path. Runs inline (no BackgroundTasks needed in a
 one-shot CLI process) and needs Azure OpenAI configured (AZURE_OPENAI_API_KEY/
 AZURE_OPENAI_ENDPOINT/AZURE_OPENAI_DEPLOYMENT_NAME).

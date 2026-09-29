@@ -1,7 +1,7 @@
 """Integration tests for the B (TOCTOU) narrow fix -- proves that when two
 concurrent requests race to resolve the SAME open human_action (the same
 pending decision on the same thread), against REAL Postgres, through the
-REAL CmirRunService/PoValidationService paths:
+REAL CmirService/PoValidationService paths:
 
 - exactly one succeeds
 - the other receives a clean, expected ConflictError/HTTP 409 -- not the
@@ -42,7 +42,7 @@ from app.core.config import get_settings
 from app.core.container import Container
 from app.core.exceptions import ConflictError, ExternalServiceError
 from app.db.session import Database
-from app.services.cmir.run_service import CmirRunService
+from app.services.cmir.service import CmirService
 
 
 def _connect_or_none() -> Database | None:
@@ -156,7 +156,7 @@ def test_cmir_concurrent_decisions_on_same_pending_action_one_wins_one_conflicts
             uow.graph = setup_graph
             yield uow
 
-    setup_service = CmirRunService(
+    setup_service = CmirService(
         email_reader=container.email_reader,
         repos_factory=container.cmir_repos,
         unit_of_work_factory=setup_uow_factory,
@@ -186,7 +186,7 @@ def test_cmir_concurrent_decisions_on_same_pending_action_one_wins_one_conflicts
                 uow.graph = graph
                 yield uow
 
-        service = CmirRunService(
+        service = CmirService(
             email_reader=container.email_reader,
             repos_factory=container.cmir_repos,
             unit_of_work_factory=uow_factory,

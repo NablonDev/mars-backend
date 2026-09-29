@@ -1,40 +1,4 @@
-"""Repository for `common` schema fulfillment facts: order confirmations,
-deliveries/shipments, production status, and demand exceptions. Was part of
-`app/repositories/order.py`.
-
-**Scope note (flagged, not silently resolved):** the old `OrderRepository`
-also exposed `build_snapshot()`, composing a single order's confirmed
-quantity/production status/shipment/demand-exception state into the
-`OrderSnapshot` dataclass the projection engine consumes
-(`app.services.fine_projection.types.OrderSnapshot`). That composition is
-NOT reimplemented here. Two real schema gaps block a faithful port and need
-a product decision before Phase 3 wires this up:
-
-1. `OrderSnapshot.unit_price` has no home in the new schema --
-   `purchase_order_line` carries no price/amount column at all (the ERP
-   redesign doesn't model pricing anywhere yet).
-2. `build_snapshot` was implicitly single-line-per-order; the new
-   header/line split means a real implementation must decide which line
-   (or which aggregation across lines) a projection is for.
-
-Every idempotent/historized read method below is still provided
-(latest-as-of-a-date lookups, full history, natural-key-checked fact
-writers) -- composing them into a new `build_snapshot` is Phase 3's call
-once those two gaps are resolved.
-
-**Idempotency re-derivation (see the approved plan's risk checklist item
-1):** `order_confirmation`, `delivery`, `shipment`, `production_order`, and
-`demand_exception` all kept an explicit unique business-key column
-(`confirmation_number`, `delivery_number`, `shipment_number`,
-`production_order_number`, `exception_id`) migrated over from the old
-schema, so their idempotent-insert pattern is unchanged in spirit.
-`order_confirmation_line`/`delivery_line` get DB-enforced idempotency from
-their new `UniqueConstraint`s. `production_schedule` alone has neither: it
-carries no business-key column at all in the new model. Its natural key is
-re-derived here as `(material_id, plant_id, status_at)` -- application-level
-check-then-insert only (no DB unique index backs it, same posture the old
-`production_id`-keyed check had before any DB constraint existed for it).
-"""
+"""Repository for common schema fulfillment facts."""
 
 from __future__ import annotations
 
@@ -42,7 +6,7 @@ from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -58,10 +22,12 @@ from app.models import (
 
 
 def _end_of_day(d: date) -> datetime:
+    """Return the last instant of `d`, for an inclusive as-of-date comparison against a timestamp column."""
     return datetime.combine(d, datetime.max.time())
 
 
 def _confirmation_to_dict(row: OrderConfirmation) -> dict:
+    """Serialize an OrderConfirmation row into a dict."""
     return {
         "id": row.id,
         "confirmation_number": row.confirmation_number,
@@ -72,6 +38,7 @@ def _confirmation_to_dict(row: OrderConfirmation) -> dict:
 
 
 def _confirmation_line_to_dict(row: OrderConfirmationLine) -> dict:
+    """Serialize an OrderConfirmationLine row into a dict."""
     return {
         "id": row.id,
         "order_confirmation_id": row.order_confirmation_id,
@@ -83,6 +50,7 @@ def _confirmation_line_to_dict(row: OrderConfirmationLine) -> dict:
 
 
 def _delivery_to_dict(row: Delivery) -> dict:
+    """Serialize a Delivery row into a dict."""
     return {
         "id": row.id,
         "delivery_number": row.delivery_number,
@@ -100,6 +68,7 @@ def _delivery_to_dict(row: Delivery) -> dict:
 
 
 def _delivery_line_to_dict(row: DeliveryLine) -> dict:
+    """Serialize a DeliveryLine row into a dict."""
     return {
         "id": row.id,
         "delivery_id": row.delivery_id,
@@ -111,6 +80,7 @@ def _delivery_line_to_dict(row: DeliveryLine) -> dict:
 
 
 def _shipment_to_dict(row: Shipment) -> dict:
+    """Serialize a Shipment row into a dict."""
     return {
         "id": row.id,
         "shipment_number": row.shipment_number,
@@ -128,6 +98,7 @@ def _shipment_to_dict(row: Shipment) -> dict:
 
 
 def _production_order_to_dict(row: ProductionOrder) -> dict:
+    """Serialize a ProductionOrder row into a dict."""
     return {
         "id": row.id,
         "production_order_number": row.production_order_number,
@@ -144,6 +115,7 @@ def _production_order_to_dict(row: ProductionOrder) -> dict:
 
 
 def _production_schedule_to_dict(row: ProductionSchedule) -> dict:
+    """Serialize a ProductionSchedule row into a dict."""
     return {
         "id": row.id,
         "production_order_id": row.production_order_id,
@@ -158,6 +130,7 @@ def _production_schedule_to_dict(row: ProductionSchedule) -> dict:
 
 
 def _demand_exception_to_dict(row: DemandException) -> dict:
+    """Serialize a DemandException row into a dict."""
     return {
         "id": row.id,
         "exception_id": row.exception_id,
@@ -168,16 +141,24 @@ def _demand_exception_to_dict(row: DemandException) -> dict:
 
 
 class FulfillmentRepository:
+    """Access layer for common schema fulfillment facts.
+
+    Covers order confirmations, deliveries, shipments, production orders and
+    schedules, and demand exceptions. Every `add_*` method goes through
+    `_insert_if_absent` on the fact's natural key, so re-ingesting the same fact is
+    a no-op.
+    """
+
     def __init__(self, session: Session) -> None:
         self._session = session
 
     def _insert_if_absent(self, model: type, filters: dict[str, Any], **fields: Any):
         """Insert a fact only when its natural key does not already exist.
 
-        `filters` is one or more equality conditions identifying the
-        natural key (a single unique column, or -- for production_schedule,
-        which has none -- a composite tuple checked at the application
-        level only)."""
+        `filters` holds the equality conditions identifying that key: a single
+        unique column, or a composite tuple enforced only in application code for
+        `production_schedule`, which has no unique constraint.
+        """
         conditions = [getattr(model, key) == value for key, value in filters.items()]
         existing = self._session.scalars(select(model).where(*conditions)).first()
         if existing is not None:
@@ -199,6 +180,7 @@ class FulfillmentRepository:
         confirmation_date: datetime,
         status: str | None = None,
     ) -> dict:
+        """Insert an order confirmation, keyed by `confirmation_number` (idempotent)."""
         row = self._insert_if_absent(
             OrderConfirmation,
             {"confirmation_number": confirmation_number},
@@ -216,6 +198,7 @@ class FulfillmentRepository:
         confirmed_delivery_date: date | None = None,
         cut_reason_code: str | None = None,
     ) -> dict:
+        """Insert an order confirmation line, keyed by (confirmation, PO line) (idempotent)."""
         row = self._insert_if_absent(
             OrderConfirmationLine,
             {
@@ -241,6 +224,7 @@ class FulfillmentRepository:
     def get_latest_confirmation_line_not_after(
         self, purchase_order_line_id: UUID, as_of_date: date
     ) -> dict | None:
+        """Fetch the latest confirmation line for a PO line as of a historical date, or None if none exist."""
         row = self._session.scalars(
             select(OrderConfirmationLine)
             .join(OrderConfirmation, OrderConfirmation.id == OrderConfirmationLine.order_confirmation_id)
@@ -258,6 +242,7 @@ class FulfillmentRepository:
     # ------------------------------------------------------------------
 
     def add_delivery(self, delivery_number: str, purchase_order_id: UUID, **fields: Any) -> dict:
+        """Insert a delivery, keyed by `delivery_number` (idempotent)."""
         row = self._insert_if_absent(
             Delivery, {"delivery_number": delivery_number}, purchase_order_id=purchase_order_id, **fields
         )
@@ -266,6 +251,7 @@ class FulfillmentRepository:
     def add_delivery_line(
         self, delivery_id: UUID, purchase_order_line_id: UUID, delivered_quantity: float, **fields: Any
     ) -> dict:
+        """Insert a delivery line, keyed by (delivery, PO line) (idempotent)."""
         row = self._insert_if_absent(
             DeliveryLine,
             {"delivery_id": delivery_id, "purchase_order_line_id": purchase_order_line_id},
@@ -275,6 +261,7 @@ class FulfillmentRepository:
         return _delivery_line_to_dict(row)
 
     def list_deliveries_for_purchase_order(self, purchase_order_id: UUID) -> list[dict]:
+        """List all deliveries for a PO, oldest first."""
         rows = self._session.scalars(
             select(Delivery)
             .where(Delivery.purchase_order_id == purchase_order_id)
@@ -289,6 +276,7 @@ class FulfillmentRepository:
         recorded_at: datetime,
         **fields: Any,
     ) -> dict:
+        """Insert a shipment, keyed by `shipment_number` (idempotent)."""
         row = self._insert_if_absent(
             Shipment,
             {"shipment_number": shipment_number},
@@ -299,14 +287,14 @@ class FulfillmentRepository:
         return _shipment_to_dict(row)
 
     def list_shipments_for_delivery(self, delivery_id: UUID) -> list[dict]:
+        """List all shipments for a delivery, oldest first."""
         rows = self._session.scalars(
             select(Shipment).where(Shipment.delivery_id == delivery_id).order_by(Shipment.recorded_at.asc())
         ).all()
         return [_shipment_to_dict(r) for r in rows]
 
     def list_shipments_for_purchase_order(self, purchase_order_id: UUID) -> list[dict]:
-        """Full shipment history for a PO, oldest first, across all of its
-        deliveries."""
+        """Return the full shipment history for a PO, oldest first, across all deliveries."""
         rows = self._session.scalars(
             select(Shipment)
             .join(Delivery, Delivery.id == Shipment.delivery_id)
@@ -315,9 +303,34 @@ class FulfillmentRepository:
         ).all()
         return [_shipment_to_dict(r) for r in rows]
 
+    def get_delivered_quantity_for_purchase_order_not_after(
+        self, purchase_order_id: UUID, as_of_date: date
+    ) -> float | None:
+        """Return the quantity actually delivered for a PO as of a historical date.
+
+        Sums `DeliveryLine.delivered_quantity` over deliveries whose
+        `actual_delivery_date` is set and not after `as_of_date`, so a delivery that
+        has not physically completed contributes nothing. Unlike
+        `get_latest_confirmation_line_not_after`, which returns the pre-delivery
+        promise, this is what shipped. Returns `None`, never `0.0`, when no line
+        qualifies: callers must read that as unknown, not as a confirmed zero.
+        """
+        total = self._session.scalar(
+            select(func.sum(DeliveryLine.delivered_quantity))
+            .select_from(DeliveryLine)
+            .join(Delivery, Delivery.id == DeliveryLine.delivery_id)
+            .where(
+                Delivery.purchase_order_id == purchase_order_id,
+                Delivery.actual_delivery_date.isnot(None),
+                Delivery.actual_delivery_date <= as_of_date,
+            )
+        )
+        return float(total) if total is not None else None
+
     def get_latest_shipment_for_purchase_order_not_after(
         self, purchase_order_id: UUID, as_of_date: date
     ) -> dict | None:
+        """Fetch the latest shipment for a PO as of a historical date, or None if none exist."""
         row = self._session.scalars(
             select(Shipment)
             .join(Delivery, Delivery.id == Shipment.delivery_id)
@@ -335,6 +348,7 @@ class FulfillmentRepository:
     # ------------------------------------------------------------------
 
     def add_production_order(self, production_order_number: str, **fields: Any) -> dict:
+        """Insert a production order, keyed by `production_order_number` (idempotent)."""
         row = self._insert_if_absent(
             ProductionOrder, {"production_order_number": production_order_number}, **fields
         )
@@ -351,6 +365,7 @@ class FulfillmentRepository:
         scheduled_start_at: datetime | None = None,
         scheduled_end_at: datetime | None = None,
     ) -> dict:
+        """Insert a production schedule snapshot, keyed by (material, plant, status_at) (idempotent)."""
         row = self._insert_if_absent(
             ProductionSchedule,
             {"material_id": material_id, "plant_id": plant_id, "status_at": status_at},
@@ -363,9 +378,11 @@ class FulfillmentRepository:
         return _production_schedule_to_dict(row)
 
     def list_production_schedule_for_material_plant(self, material_id: UUID, plant_id: UUID) -> list[dict]:
-        """Not purchase_order-scoped: a production line can serve multiple
-        orders that share the same (material_id, plant_id) -- see
-        app/models/common/production.py's ProductionSchedule docstring."""
+        """Return every schedule snapshot for a (material, plant) pair, oldest first.
+
+        Deliberately not PO-scoped: one production line can serve several orders
+        sharing the same material and plant.
+        """
         rows = self._session.scalars(
             select(ProductionSchedule)
             .where(ProductionSchedule.material_id == material_id, ProductionSchedule.plant_id == plant_id)
@@ -376,11 +393,10 @@ class FulfillmentRepository:
     def get_latest_production_schedule_not_after(
         self, material_id: UUID, plant_id: UUID, as_of_date: date
     ) -> dict | None:
-        # Tiebreaker on id: two rows can share the same status_at (a plant/
-        # material can serve more than one order, and independently
-        # authored demo/mock scenarios can write more than one status for
-        # the same material/plant/day). status_at alone doesn't
-        # disambiguate a tie; id does, deterministically.
+        """Fetch the latest production schedule for (material, plant) not after a date."""
+        # Two rows can share a status_at (a material/plant serves more than one
+        # order, and mock scenarios may write several statuses for one day), so id
+        # breaks the tie deterministically.
         row = self._session.scalars(
             select(ProductionSchedule)
             .where(
@@ -400,6 +416,7 @@ class FulfillmentRepository:
     def add_demand_exception(
         self, exception_id: str, purchase_order_line_id: UUID, flagged_date: date
     ) -> dict:
+        """Insert a demand exception, keyed by `exception_id` (idempotent)."""
         row = self._insert_if_absent(
             DemandException,
             {"exception_id": exception_id},
@@ -410,6 +427,7 @@ class FulfillmentRepository:
         return _demand_exception_to_dict(row)
 
     def list_demand_exceptions_for_line(self, purchase_order_line_id: UUID) -> list[dict]:
+        """List all demand exceptions for a PO line, oldest first."""
         rows = self._session.scalars(
             select(DemandException)
             .where(DemandException.purchase_order_line_id == purchase_order_line_id)
@@ -418,6 +436,7 @@ class FulfillmentRepository:
         return [_demand_exception_to_dict(r) for r in rows]
 
     def has_open_demand_exception_not_after(self, purchase_order_line_id: UUID, as_of_date: date) -> bool:
+        """Report whether a PO line has an unresolved demand exception flagged by `as_of_date`."""
         row = self._session.scalars(
             select(DemandException)
             .where(
@@ -434,9 +453,7 @@ class FulfillmentRepository:
     # ------------------------------------------------------------------
 
     def truncate_all(self) -> None:
-        """Deletes every fulfillment-fact row, in FK-safe child-before-
-        parent order. Must run before PurchaseOrderRepository.truncate_all()
-        clears purchase_order/purchase_order_line."""
+        """Delete every fulfillment fact, child before parent, ahead of PO truncation."""
         self._session.execute(delete(OrderConfirmationLine))
         self._session.execute(delete(OrderConfirmation))
         self._session.execute(delete(Shipment))
