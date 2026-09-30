@@ -162,8 +162,27 @@ penalty sub-domain raised it).
    calls `dispatch.execute_job` under a per-item deadline, classifies
    whatever it raises via `classify_failure`, and settles it
    (`ack`/`nack`/`dead_letter`) accordingly.
-6. Release the advisory lock; print a summary line; pick an exit code
-   (a DEAD item does not fail the run).
+6. `run_daily_timeline(...)` (`app/workers/penalty_timeline.py`) — the
+   event-driven fulfillment-timeline engine's own nightly step, run after the
+   legacy drain above on the same resolved business-timezone date (resolved
+   once via `app.utils.clock.business_today()` and passed explicitly to both
+   `enqueue_daily_run` and this step, so they can never diverge): builds
+   `TimelineProjectionService` from repositories inside `database.session()`
+   and calls `run_for_all_open`, which projects every OPEN/SHIPPED
+   fulfillment plan, prices risk, and maintains the plan's tracked
+   `timeline_alert` rows. Runs alongside the legacy engine above, unchanged —
+   see `docs/architecture/penalty-timeline-engine.md`. `--skip-timeline`
+   drops this step. **Runs on a full run and under `--timeline-only`
+   (steps 2–5 above are skipped in that mode, but the advisory lock from
+   step 1 is still taken); does not run under `--enqueue-only` or
+   `--drain-only`** — both are partial legacy operations, and this full
+   nightly step should not fire as a side effect of either. A raised
+   exception here is logged and printed but does not fail the run by itself
+   — same posture as a DEAD legacy item in step 5 — unless `--fail-on-dead`
+   is set.
+7. Release the advisory lock; print a summary line; pick an exit code
+   (a DEAD item, or a timeline-step failure, does not fail the run unless
+   `--fail-on-dead` is set).
 
 Per-item execute path (`dispatch.execute_job`): for `ORDER_RUN`, runs the
 projection (`ProjectionService.run_for_order`) then the summary

@@ -17,7 +17,9 @@ unqualified (no schema override on those models).
   `plant`/`storage_location`/`warehouse`, `retailer_location`, `carrier`)
   and fulfillment facts (`purchase_order`/`purchase_order_line`,
   `order_confirmation`/`*_line`, `delivery`/`*_line`/`shipment`,
-  `production_order`/`production_schedule`, `demand_exception`), used by
+  `production_order`/`production_schedule`, `demand_exception`,
+  `milestone_type`/`fulfillment_plan`/`*_line`/`fulfillment_milestone`/
+  `fulfillment_event` -- see "Fulfillment timeline tables" below), used by
   both the `cmir`/`po_validation` and `penalties` domains. These tables
   used to live in a dedicated `common` schema; that split was reversed --
   they now live in `public` like any unqualified SQLAlchemy model. Also
@@ -105,6 +107,7 @@ genuinely incremental revision added since, in FK-dependency order:
 | `1d92b65b8eb4` | `alembic/versions/1d92b65b8eb4_penalty_rule_extraction_schema_squash.py` | `retailer_agreement` table (public); `penalties.extracted_penalty_rule`, `.extracted_penalty_rule_attribute`, `.rule_publication` tables; `penalty_rule` gains `basis_type`, `applies_per`, `currency_code`; `process.workflow_thread_subject` drops its `email_event_id`/`purchase_order_line_id` FK columns and `ck_workflow_thread_subject_one_of`, replaced by `subject_type`/`subject_id` plus a plain composite index |
 | `ddf0ca3bea0e` | `alembic/versions/ddf0ca3bea0e_penalty_rule_extraction_engine_integration.py` | Schema-only expand: `penalty_rule` gains nullable `engine_family`, `penalty_category`, `metric_code`/`metric_denominator`, `retailer_agreement_id`, `extracted_rule_id`, `measurement_window_type`/`_length`/`_unit`, `rounding_convention`; `is_engine_priceable` (`NOT NULL DEFAULT true`); nullable `commitment_quantity`/`commitment_value`; nullable FKs to `retailer_agreement` and `extracted_penalty_rule`; and the `ck_penalty_rule_violation_type`/`ck_penalty_rule_engine_family` CHECKs. `penalty_projection` gains `skip_reason`; `penalty_rule_tier` gains nullable `tier_application`/`tier_basis` and widens `band_min`/`band_max`; `actual_penalty` gains `claim_facts`. No backfill, no `NOT NULL` enforcement beyond `is_engine_priceable`, no `purchase_order` index, `retailer_id` not yet dropped |
 | `d275022ac6a0` | `alembic/versions/d275022ac6a0_backfill_penalty_rule_extraction_engine_.py` | Contract half: backfills pre-existing `penalty_rule.penalty_category` to `'UNSPECIFIED_INTERNAL'`, backfills `retailer_agreement_id` via a placeholder `retailer_agreement` row per distinct `retailer_id` needing one, and backfills `penalty_rule_tier.tier_application`/`tier_basis` to `'CLIFF'`/`'SHORTFALL_PCT'` -- each verified NULL-free before its `NOT NULL` is enforced; creates `ix_purchase_order_retailer_order_date` via `CREATE INDEX CONCURRENTLY`; drops `penalty_rule.retailer_id` (its FK dropped first on Postgres); and creates `ix_retailer_agreement_retailer_id` to back the join that replaces it |
+| `6e9199719a2d` | `alembic/versions/6e9199719a2d_fulfillment_timeline_risk_and_quality_schema.py` | `milestone_type`, `fulfillment_plan`, `fulfillment_plan_line`, `fulfillment_milestone`, `fulfillment_event`, `quality_lot` tables (public); `penalties.fulfillment_risk` (gains nullable `calculation_detail` jsonb for persisted explanations behind projected penalties/Event timeline UI money explanations), `penalties.fulfillment_mitigation_option`, `penalties.timeline_alert` tables; `purchase_order` gains nullable `window_start`/`window_end`/`cancel_date`/`freight_term`; `material_master` gains nullable `standard_cost`/`qa_release_days`; `fulfillment_plan_line` gains nullable `shipped_quantity`. `penalties.timeline_alert` tracks one ops-lifecycle alert per `(fulfillment_plan_id, risk_type)`, carrying status/change-type, first/last-seen risk snapshots, and acknowledge/action/close audit fields |
 
 The five revisions above `11ce88f609e0` are a pre-release squash -- edited in
 place rather than chained, since there was no production data to preserve
@@ -163,6 +166,88 @@ ORM class, no migration, and no locked-in column design. They are
 deliberately **not** part of this schema; do not add them speculatively.
 If a future feature genuinely needs either, that's a new modeling
 decision, not a mechanical carry-forward from the draft doc.
+
+## Fulfillment timeline tables
+
+All of the following live unqualified in `public`
+(`mars_common/models/common/fulfillment.py`, re-exported from
+`app/models/common/`). They model the projection engine's future input:
+per-shipment milestone dates and an append-only trace of every change to
+them. Out of scope for this data model: projection logic, an SAP-like data
+generator, supply pegging, and any API surface.
+
+### `milestone_type` (`MilestoneType`)
+Reference row per fulfillment milestone (`ORDER_RECEIVED`,
+`GOODS_ISSUED`, `DELIVERED`, ...). `depends_on` holds prerequisite
+milestone codes, forming a dependency graph rather than a chain; a
+dependency whose `freight_term_scope` does not apply to a plan's freight
+term is ignored. `default_duration_days` is NULL on `DELIVERED`, whose
+duration comes from the plan's own `planned_transit_days` instead.
+
+### `fulfillment_plan` (`FulfillmentPlan`)
+One planned shipment of a purchase order -- the grain the milestone
+graph runs against. Most POs have one; a split creates another. Exists
+from order receipt; `delivery_id` is set once the SAP-style delivery is
+created.
+
+### `fulfillment_plan_line` (`FulfillmentPlanLine`)
+Planned line quantity within a fulfillment plan, matching a PO line.
+Keyed by `(fulfillment_plan_id, purchase_order_line_id)`.
+
+### `fulfillment_milestone` (`FulfillmentMilestone`)
+Current, mutable milestone state for a plan: `baseline_date` (first
+plan, never overwritten), `planned_date` (latest plan), `actual_date`.
+Keyed by `(fulfillment_plan_id, milestone_type_id)`. History of changes
+lives in `fulfillment_event`, not here -- this table carries no
+projected date; that output lives in the `penalties` schema.
+
+### `fulfillment_event` (`FulfillmentEvent`)
+Append-only trace of every change to a milestone or to upstream supply
+(production, QA, stock transfer, tender). `subject_id` is polymorphic
+(no FK) against whichever row `subject_type` names.
+
+### `quality_lot` (`QualityLot`)
+QA inspection lot for a batch of produced material, feeding the fulfillment
+risk projection's QA-hold input. `production_order_id` is nullable since a
+lot can arrive from stock rather than a tracked production run.
+
+## Penalty projection outputs (`penalties` schema)
+
+The following live in the `penalties` schema
+(`mars_common/models/penalties/fulfillment_risk.py`, re-exported from
+`app/models/penalties/`). They are the projection engine's output: a
+projected timeline or quantity breach per fulfillment plan and projection
+date, and the mitigation options that address it. Out of scope here: the
+engines that compute these rows.
+
+### `penalties.fulfillment_risk` (`FulfillmentRisk`)
+Projected breach for a fulfillment plan on a given projection date. Keyed
+by `(fulfillment_plan_id, projection_date, risk_type)`. `driver_event_id`
+points at the upstream `FulfillmentEvent` that caused the projected
+breach, when known. `calculation_detail` (nullable jsonb) is the persisted
+explanation of how the row's `projected_penalty_amount` was computed:
+`measured` (milestone/window/cancel-date/slack), `pricing` (stacking mode,
+unit cost/price, quantity, and one entry per rule considered -- rate,
+calc_type, chargeable days or shortfall quantity, and priced amount), and
+`supply` (on-hand/required/on-time/shortfall quantities, full-cover date,
+and cause), present only when the plan had a supply shortfall or a
+supply-driven delay.
+
+### `penalties.fulfillment_mitigation_option` (`FulfillmentMitigationOption`)
+Ranked mitigation action for a fulfillment plan's projected risk on a
+given date. Keyed by `(fulfillment_plan_id, projection_date, action_code)`.
+`addresses_risk_types` lists the `TimelineRiskType` values the action
+would resolve.
+
+### `penalties.timeline_alert` (`TimelineAlert`)
+Ops-facing alert tracked against a fulfillment plan's projected risk across
+engine runs, one tracked alert per `(fulfillment_plan_id, risk_type)`;
+uniqueness of the currently-tracked alert is enforced in code via
+`is_tracking`, not a database constraint. `status` moves
+`NEW -> ACKNOWLEDGED -> ACTION_TAKEN ->` terminal `RESOLVED` /
+`PENALTY_INCURRED` / `DISMISSED`. `change_type` records how the risk moved
+since `last_seen_date` on the most recent engine run
+(`NEW`/`WORSE`/`BETTER`/`SAME`). SLIPPING risk never creates an alert.
 
 ## CMIR / PO Validation tables
 

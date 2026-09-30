@@ -17,7 +17,16 @@ batch job queue -- every OPEN order, scheduled and run as a group -- see
 - **The scheduled daily run is `scripts/ops/run_daily_batch.py`**, executed
   as the Azure Container Apps Job on a nightly cron (§6.6). It both
   enqueues today's work *and* drains it in the same call -- nothing else
-  needs to run.
+  needs to run. On a full run, it also runs the event-driven
+  fulfillment-timeline projection (`TimelineProjectionService.run_for_all_open`,
+  see `app/workers/penalty_timeline.py`) for every OPEN/SHIPPED plan, on the
+  same resolved business-timezone date (`app.utils.clock.business_today()`,
+  resolved once and passed to both engines) -- the two engines run side by
+  side; see `docs/architecture/penalty-timeline-engine.md`. `--skip-timeline`
+  runs the legacy engine only. `--timeline-only` runs only the timeline step
+  (still under the same advisory lock, skipping every legacy step).
+  `--enqueue-only` and `--drain-only` are partial legacy operations and
+  **do not** trigger the timeline step either.
 - **`POST /api/v1/batches/runs` is not a substitute for the schedule.**
   Under the default `postgres` backend it only enqueues; nothing processes
   those rows until a drain happens (the same script, or the nightly job).

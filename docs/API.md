@@ -122,6 +122,10 @@ plain JSON array as `data`. Actual (post-delivery) penalties are a
 below, not nested under `/purchase-orders/{purchase_order_id}/...` like the
 facts above.
 
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/v1/purchase-orders/{purchase_order_id}/fulfillment-plans` | List fulfillment-plan headers for a PO (`404 PO_NOT_FOUND` if the PO doesn't exist). Plan detail (lines/milestones/events/risks/options) lives at `/api/v1/penalties/timeline/plans/{plan_id}` below, not here -- a plan has its own globally-meaningful id |
+
 ### Delivery-change requests
 
 A procurement/EDI concept (vendor delivery-date renegotiation, SAP
@@ -245,6 +249,23 @@ exactly one of the two shapes, never both, never neither (`422` otherwise).
 | GET | `/api/v1/penalties/mitigations/{mitigation_id}?include=summary` | Single mitigation option read (`404 MITIGATION_OPTION_NOT_FOUND`) |
 | POST | `/api/v1/penalties/mitigations/summary` (body: `purchase_order_id`, `as_of_date?`, `force_regenerate?`) | Trigger/poll the LLM mitigation-summary job (`200`/`202`, same contract as the projection summary above) |
 | GET | `/api/v1/penalties/mitigations/summary?purchase_order_id=&as_of_date=` | Dedicated pure-read poll for the same summary job (`200`, `status: null` if none was ever requested for this PO -- same convention as the projection-summary GET above; unknown `purchase_order_id` is still `404 PO_NOT_FOUND`) |
+
+### Fulfillment timeline
+
+The new event-driven penalty-projection engine (`app/services/penalties/timeline/`),
+coexisting with -- not replacing -- the probability-driven Projections/Mitigations
+engine above: it writes only its own `fulfillment_risk`/`fulfillment_mitigation_option`
+tables and never touches `penalty_projection`/`mitigation_option`.
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/api/v1/penalties/timeline/runs` (body: `projection_date?`) | Run `TimelineProjectionService.run_for_all_open` for every OPEN/SHIPPED fulfillment plan on one date (defaults to today), persist, and return the batch summary (`plans_evaluated`, `plans_skipped`, `skipped_plan_ids`, `status_counts`, `total_projected_penalty`) |
+| GET | `/api/v1/penalties/timeline/risks?projection_date=&status=&retailer_id=` | List fulfillment risks. Omitting `projection_date` narrows every plan first to its own latest projection date (same convention as `GET /penalties/projections`), then applies `status`/`retailer_id`; rows are ordered by highest `projected_penalty_amount` first, newest `projection_date` as the tiebreaker |
+| GET | `/api/v1/penalties/timeline/plans/{plan_id}` | One plan's header, lines, milestones, and full event history, plus its latest projection date's risks and mitigation options (`404 FULFILLMENT_PLAN_NOT_FOUND`). Each milestone's `projected_date` comes from that latest risk row's `projected_milestones` for the milestone's code, falling back to `planned_date` when the plan has never been projected (or the risk row is missing an entry for that code) |
+| GET | `/api/v1/purchase-orders/{purchase_order_id}/fulfillment-plans` | See "Purchase orders and fulfillment facts" above -- listed there since it hangs off the PO resource, not this one |
+
+`POST /api/v1/penalties/timeline/runs` and `GET /api/v1/penalties/timeline/plans/{plan_id}`
+never accept `?include=` -- there is no summary/mitigation-summary LLM job for this engine yet.
 
 ### Actual penalties
 
