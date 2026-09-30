@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -96,3 +97,114 @@ class PenaltyProjectionSummaryContext(BaseModel):
 
     # Only populated when order.order_status == "DELIVERED"
     actual_outcomes: list[ActualOutcome] | None = None
+
+
+# ---------------------------------------------------------------------------
+# Event-Driven Fulfillment Timeline Context Models (v3)
+# ---------------------------------------------------------------------------
+
+
+class TimelineLineContext(BaseModel):
+    """One line item on the fulfillment plan."""
+
+    material_code: str | None = None
+    material_description: str | None = None
+    planned_quantity: float
+    confirmed_quantity: float | None = None
+    shortfall_quantity: float = 0.0
+    unit_price: float | None = None
+
+
+class TimelineMilestoneContext(BaseModel):
+    """One dated milestone on the fulfillment timeline."""
+
+    code: str
+    name: str
+    sequence_no: int
+    owner_team: str | None = None
+    is_measurement_point: bool = False
+    baseline_date: date | None = None
+    planned_date: date | None = None
+    projected_date: date | None = None
+    actual_date: date | None = None
+    slip_days: int = 0
+
+
+class TimelineEventContext(BaseModel):
+    """One append-only event recorded on the plan."""
+
+    event_at: str
+    event_type: str
+    milestone_code: str | None = None
+    reason_code: str | None = None
+    old_value: str | None = None
+    new_value: str | None = None
+    source: str
+
+
+class TimelineRiskContext(BaseModel):
+    """One deterministic risk evaluated for the plan."""
+
+    projection_date: date | None = None
+    risk_type: str  # LATE, SHORT, NOT_DELIVERED, EARLY, ASN_LATE
+    status: str  # SLIPPING, PROJECTED_BREACH, BREACHED
+    days_off: int | None = None
+    shortfall_quantity: float | None = None
+    projected_penalty_amount: float
+    currency_code: str = "USD"
+    driver_milestone_code: str | None = None
+    driver_reason_code: str | None = None
+    calculation_detail: dict[str, Any] | None = None
+
+
+class TimelineOptionContext(BaseModel):
+    """One candidate mitigation option evaluated by the engine."""
+
+    action_code: str
+    owner_team: str | None = None
+    feasible: bool = True
+    infeasible_reason: str | None = None
+    action_cost: float = 0.0
+    penalty_before: float = 0.0
+    penalty_after: float = 0.0
+    net_saving: float = 0.0
+    act_by_date: date | None = None
+    confidence: str | None = "HIGH"
+    rank_no: int | None = 1
+    addresses_risk_types: list[str] = Field(default_factory=list)
+
+
+class TimelineAlertContext(BaseModel):
+    """One tracked alert for the plan."""
+
+    alert_id: str
+    risk_type: str
+    status: str
+    first_seen_date: date
+    last_seen_date: date
+
+
+class TimelineProjectionSummaryContext(BaseModel):
+    """Authoritative, grounded context for event-driven fulfillment timeline penalty & mitigation LLM reasoning (v3)."""
+
+    plan_id: str
+    plan_number: str
+    purchase_order_id: str
+    purchase_order_number: str
+    retailer_po_number: str | None = None
+    retailer_name: str
+    order_status: str
+    freight_term: str
+    window_start: date | None = None
+    window_end: date | None = None
+    cancel_date: date | None = None
+    carrier_name: str | None = None
+    warehouse_name: str | None = None
+    safety_buffer_days: int = 0
+    lines: list[TimelineLineContext] = Field(default_factory=list)
+    milestones: list[TimelineMilestoneContext] = Field(default_factory=list)
+    events: list[TimelineEventContext] = Field(default_factory=list)
+    latest_risks: list[TimelineRiskContext] = Field(default_factory=list)
+    options: list[TimelineOptionContext] = Field(default_factory=list)
+    active_alert: TimelineAlertContext | None = None
+    selected_risk_type: str | None = None

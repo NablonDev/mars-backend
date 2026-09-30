@@ -8,8 +8,9 @@ dispute tools when needed.
 from __future__ import annotations
 
 from datetime import date
+from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class DisputeOrderContext(BaseModel):
@@ -32,3 +33,11 @@ class DisputeSummaryContext(BaseModel):
     dispute_status: str
     analyzed_at: date
     order: DisputeOrderContext
+    rule_code: str | None = None
+    violation_family: str | None = None
+    required_delivery_date: str | None = None
+    actual_delivery_date: str | None = None
+    deadline: str | None = None
+    grace_period_days: int = 0
+    shortfall_units: float | None = None
+    telematics_events: list[dict[str, Any]] = Field(default_factory=list)
