@@ -46,7 +46,7 @@ from app.agents.penalties.dispute import (
     build_dispute_summary_tools,
 )
 from app.agents.penalties.dispute.agent import DisputeResolutionAgent
-from app.agents.penalties.dispute.prompts.v2 import PROMPT_VERSION, SYSTEM_PROMPT
+from app.agents.penalties.dispute.prompts.v3 import PROMPT_VERSION, SYSTEM_PROMPT
 from app.agents.providers.azure_openai import AzureOpenAIChatClient
 from app.core.config import get_settings
 from app.core.exceptions import BusinessRuleError, NotFoundError
@@ -280,6 +280,7 @@ class DisputeSummaryService(SummaryServiceBase[DisputeSummaryContext, DisputeSum
             str(purchase_order["retailer_id"]),
         )
         sku_description = self._resolve_sku_description(purchase_order["id"])
+        breakdown = dispute.get("analysis_breakdown") or {}
 
         return DisputeSummaryContext(
             dispute_number=dispute["dispute_number"],
@@ -295,6 +296,14 @@ class DisputeSummaryService(SummaryServiceBase[DisputeSummaryContext, DisputeSum
                 retailer_name=retailer_name,
                 sku_description=sku_description,
             ),
+            rule_code=breakdown.get("rule_code"),
+            violation_family=breakdown.get("violation_family"),
+            required_delivery_date=breakdown.get("required_delivery_date"),
+            actual_delivery_date=breakdown.get("actual_delivery_date"),
+            deadline=breakdown.get("deadline"),
+            grace_period_days=breakdown.get("grace_period_days", 0),
+            shortfall_units=breakdown.get("shortfall_units"),
+            telematics_events=breakdown.get("telematics_events", []),
         )
 
     def _compute_content_fingerprint(self, context: DisputeSummaryContext) -> str:

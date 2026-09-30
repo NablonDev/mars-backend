@@ -22,6 +22,8 @@ from uuid import UUID
 
 from app.core.exceptions import BusinessRuleError, ConflictError, NotFoundError, ValidationError
 from app.models.enums import DisputeStatus
+from app.repositories.common.fulfillment import FulfillmentRepository
+from app.repositories.common.fulfillment_timeline import FulfillmentTimelineRepository
 from app.repositories.common.purchase_order import PurchaseOrderRepository
 from app.repositories.common.retailer_agreement import RetailerAgreementRepository
 from app.repositories.penalties.dispute import PenaltyDisputeRepository
@@ -55,7 +57,9 @@ class DisputeResolutionService:
     disputes: PenaltyDisputeRepository
     actual_penalties: ActualPenaltyRepository
     rules: PenaltyRuleRepository
-    projection_service: ProjectionService
+    projection_service: ProjectionService | None = None
+    fulfillment: FulfillmentRepository | None = None
+    fulfillment_timeline: FulfillmentTimelineRepository | None = None
     # Only needed for a VOLUME_COMMITMENT dispute's actual-purchase-quantity lookup; every
     # other family works without it.
     retailer_agreements: RetailerAgreementRepository | None = None
@@ -186,23 +190,143 @@ class DisputeResolutionService:
         rule_row = max(matching, key=lambda r: r["effective_start_date"])
         rule_value = self.rules.get_rule_value(rule_row["id"])
 
-        fulfillment = self.projection_service.fulfillment
-        # order_qty, unit_price, and required_delivery_date reuse the projection
-        # engine's snapshot assembly, which is safe because a dispute always
-        # runs after delivery is final. snapshot.confirmed_qty is deliberately
-        # unused: it comes from order_confirmation, the pre-delivery promise,
-        # not the final delivered quantity a dispute must adjudicate on.
-        snapshot = self.projection_service.build_snapshot(dispute["purchase_order_id"], as_of_date)
-        delivered_qty = fulfillment.get_delivered_quantity_for_purchase_order_not_after(
-            dispute["purchase_order_id"], as_of_date
+        # Resolve order lines and header facts directly from PurchaseOrderRepository
+        lines = self.purchase_orders.list_lines(dispute["purchase_order_id"])
+        if not lines:
+            raise BusinessRuleError(
+                code="NO_ACTIVE_RULES",
+                message=f"Purchase order {dispute['purchase_order_id']} has no lines to dispute.",
+            )
+        order_qty = round(sum(line["ordered_quantity"] for line in lines))
+        unit_price = (
+            sum(line["ordered_quantity"] * line["unit_price"] for line in lines) / order_qty
+            if order_qty > 0
+            else 0.0
         )
-        shipment = fulfillment.get_latest_shipment_for_purchase_order_not_after(
-            dispute["purchase_order_id"], as_of_date
+        # Resolve delivery facts and telematics proof:
+        # Check event-driven fulfillment timeline first
+        delivered_qty: float | None = None
+        actual_delivery_date: date | None = None
+        timeline_target_date: date | None = None
+        telematics_events: list[dict] = []
+
+        if self.fulfillment_timeline is not None:
+            plans = self.fulfillment_timeline.list_plans_for_purchase_order(dispute["purchase_order_id"])
+            if plans:
+                primary_plan = plans[0]
+                milestones = self.fulfillment_timeline.list_milestones(primary_plan["id"])
+                ms_type_to_code = {
+                    m["milestone_type_id"]: m["code"]
+                    for m in milestones
+                    if "milestone_type_id" in m and "code" in m
+                }
+                freight_term = (
+                    primary_plan.get("freight_term") or purchase_order.get("freight_term") or "PREPAID"
+                ).upper()
+                target_code = "READY_FOR_PICKUP" if freight_term == "COLLECT" else "DELIVERED"
+
+                target_milestone = next(
+                    (m for m in milestones if m["code"] == target_code and m["actual_date"] is not None),
+                    None,
+                )
+                if target_milestone is None:
+                    target_milestone = next(
+                        (m for m in milestones if m["code"] == "DELIVERED" and m["actual_date"] is not None),
+                        None,
+                    )
+                if target_milestone is not None:
+                    actual_delivery_date = target_milestone["actual_date"]
+
+                ref_milestone = next((m for m in milestones if m["code"] == target_code), None)
+                if ref_milestone is None:
+                    ref_milestone = next((m for m in milestones if m["code"] == "DELIVERED"), None)
+                if ref_milestone is not None:
+                    timeline_target_date = ref_milestone.get("baseline_date") or ref_milestone.get(
+                        "planned_date"
+                    )
+
+                plan_lines = self.fulfillment_timeline.list_plan_lines(primary_plan["id"])
+                if plan_lines:
+                    shipped_total = sum(pl.get("shipped_quantity") or 0 for pl in plan_lines)
+                    if shipped_total > 0:
+                        delivered_qty = float(shipped_total)
+                    elif any(pl.get("confirmed_quantity") is not None for pl in plan_lines):
+                        delivered_qty = float(sum(pl.get("confirmed_quantity") or 0 for pl in plan_lines))
+
+                for ev in self.fulfillment_timeline.list_events(primary_plan["id"]):
+                    ms_code = ms_type_to_code.get(ev.get("milestone_type_id"))
+                    ev_type = ev.get("event_type")
+                    if (
+                        ev_type
+                        in (
+                            "GATE_ARRIVAL",
+                            "DELIVERY_COMPLETED",
+                            "CARRIER_STATUS_UPDATE",
+                            "ASN_SENT",
+                            "CARRIER_APPOINTMENT_CONFIRMED",
+                            "PLAN_CHANGED",
+                            "REJECTED",
+                        )
+                        or ev.get("reason_code")
+                        or (
+                            ev_type == "COMPLETED"
+                            and ms_code in ("DELIVERED", "ASN_SENT", "LOADED", "GOODS_ISSUED")
+                        )
+                    ):
+                        ev_at = ev.get("event_at")
+                        event_at_str = (
+                            ev_at.isoformat()
+                            if ev_at is not None and hasattr(ev_at, "isoformat")
+                            else (str(ev_at) if ev_at is not None else None)
+                        )
+                        label = (
+                            f"{ms_code}_{ev_type}"
+                            if ms_code and ev_type in ("COMPLETED", "PLAN_CHANGED")
+                            else ev_type
+                        )
+                        telematics_events.append(
+                            {
+                                "event_type": label,
+                                "event_at": event_at_str,
+                                "source": ev.get("source"),
+                                "source_reference": ev.get("source_reference"),
+                                "reason_code": ev.get("reason_code"),
+                            }
+                        )
+
+        raw_delivery_date = (
+            purchase_order.get("current_delivery_date")
+            or purchase_order.get("requested_delivery_date")
+            or purchase_order.get("window_end")
+            or purchase_order.get("window_start")
+            or timeline_target_date
         )
-        actual_delivery_date = shipment["actual_delivery_date"] if shipment is not None else None
+        if raw_delivery_date is None:
+            raise BusinessRuleError(
+                code="INVALID_PURCHASE_ORDER",
+                message=f"Purchase order {dispute['purchase_order_id']} is missing delivery dates.",
+            )
+        required_delivery_date: date = (
+            date.fromisoformat(raw_delivery_date) if isinstance(raw_delivery_date, str) else raw_delivery_date
+        )
+
+        # Fall back to legacy fulfillment repository if not resolved from timeline
+        fulfillment = self.fulfillment or (
+            self.projection_service.fulfillment if self.projection_service else None
+        )
+        if fulfillment is not None:
+            if delivered_qty is None:
+                delivered_qty = fulfillment.get_delivered_quantity_for_purchase_order_not_after(
+                    dispute["purchase_order_id"], as_of_date
+                )
+            if actual_delivery_date is None:
+                shipment = fulfillment.get_latest_shipment_for_purchase_order_not_after(
+                    dispute["purchase_order_id"], as_of_date
+                )
+                actual_delivery_date = shipment["actual_delivery_date"] if shipment is not None else None
 
         # claim_facts is the only claim-supplied input; every other DisputeFacts field
-        # below is Mars-derived (from the snapshot, the rule row, or a repository), never
+        # below is Mars-derived (from the lines, the rule row, or a repository), never
         # read from claim_facts even when one happens to carry a same-named key.
         claim_facts = actual_penalty.get("claim_facts") or {}
         actual_purchase_quantity = None
@@ -212,16 +336,16 @@ class DisputeResolutionService:
             )
 
         facts = DisputeFacts(
-            order_qty=snapshot.order_qty,
-            unit_price=snapshot.unit_price,
+            order_qty=order_qty,
+            unit_price=unit_price,
             delivered_qty=delivered_qty,
-            required_delivery_date=snapshot.requested_delivery_date,
+            required_delivery_date=required_delivery_date,
             actual_delivery_date=actual_delivery_date,
             grace_period_days=rule_row["grace_period_days"],
             defect_units=claim_facts.get("defect_units"),
             defect_rate_pct=claim_facts.get("defect_rate_pct"),
             replacement_cost_paid=claim_facts.get("replacement_cost_paid"),
-            original_cost=snapshot.order_qty * snapshot.unit_price,
+            original_cost=order_qty * unit_price,
             occurrence_count=claim_facts.get("occurrence_count"),
             storage_days=claim_facts.get("storage_days"),
             committed_quantity=rule_value.commitment_quantity,
@@ -249,12 +373,16 @@ class DisputeResolutionService:
             "calc_type": rule_row["calc_type"],
             "violation_family": calc_trace.get("violation_family"),
             "as_of_date": as_of_date.isoformat(),
-            # Audit trail (4g) proving the claim-supplied/Mars-derived authority boundary:
-            # which DisputeFacts keys this specific dispute's measure function read from
-            # the claim vs from Mars's own records. See DisputeFamilyKeys/
-            # FAMILY_REQUIRED_KEYS in app.services.penalties.dispute.types.
             "claim_supplied_keys": calc_trace.get("claim_supplied_keys", []),
             "mars_derived_keys": calc_trace.get("mars_derived_keys", []),
+            "required_delivery_date": facts.required_delivery_date.isoformat(),
+            "actual_delivery_date": (
+                facts.actual_delivery_date.isoformat() if facts.actual_delivery_date is not None else None
+            ),
+            "deadline": deadline.isoformat() if deadline is not None else None,
+            "grace_period_days": facts.grace_period_days,
+            "shortfall_units": calc_trace.get("shortfall_units"),
+            "telematics_events": telematics_events,
             "facts": {
                 "order_qty": facts.order_qty,
                 "unit_price": facts.unit_price,
