@@ -23,7 +23,7 @@ import pytest
 from langchain_core.messages import ToolMessage
 
 from app.agents.penalties.projection import PenaltyProjectionSummaryOutput
-from app.agents.penalties.projection.prompts.v2 import PROMPT_VERSION
+from app.agents.penalties.projection.prompts.v3 import PROMPT_VERSION
 from app.core.exceptions import BusinessRuleError, ExternalServiceError, NotFoundError, ValidationError
 from app.models.enums import SummaryType
 from app.services.penalties.projection import ProjectionResult, ViolationProjection
@@ -1150,7 +1150,7 @@ def test_v1_prompt_version_is_registered_on_first_use(repos):
     fake_llm = FakeChatClient()
     service = _build_service(repos, fake_llm)
 
-    assert PROMPT_VERSION == "v2"
+    assert PROMPT_VERSION == "v3"
 
     job = _schedule_and_run(service, purchase_order_id, as_of_date=date(2026, 8, 5))
 

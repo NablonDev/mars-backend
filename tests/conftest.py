@@ -53,6 +53,7 @@ from app.repositories.cmir.email import EmailRepository
 from app.repositories.cmir.job_context import CmirJobItemContextRepository, CmirJobRunContextRepository
 from app.repositories.common.delivery_change_request import PoDeliveryChangeRequestRepository
 from app.repositories.common.fulfillment import FulfillmentRepository
+from app.repositories.common.fulfillment_timeline import FulfillmentTimelineRepository
 from app.repositories.common.master_data import MasterDataRepository
 from app.repositories.common.purchase_order import PurchaseOrderRepository
 from app.repositories.common.retailer_agreement import RetailerAgreementRepository
@@ -109,6 +110,7 @@ def repos(db_session):
         retailer_agreements=RetailerAgreementRepository(db_session),
         purchase_orders=PurchaseOrderRepository(db_session),
         fulfillment=FulfillmentRepository(db_session),
+        fulfillment_timeline=FulfillmentTimelineRepository(db_session),
         penalty_rules=PenaltyRuleRepository(db_session),
         penalty_projections=PenaltyProjectionRepository(db_session),
         actual_penalties=ActualPenaltyRepository(db_session),

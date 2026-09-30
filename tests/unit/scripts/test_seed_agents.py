@@ -26,8 +26,10 @@ def test_agent_seeds_cover_all_documented_rows():
     assert keys == {
         ("penalty_projection_summary", "v1"),
         ("penalty_projection_summary", "v2"),
+        ("penalty_projection_summary", "v3"),
         ("penalty_mitigation_summary", "v1"),
         ("penalty_mitigation_summary", "v2"),
+        ("penalty_mitigation_summary", "v3"),
         ("penalty_dispute_summary", "v1"),
         ("penalty_dispute_summary", "v2"),
         ("penalty_rule_extractor", "v2"),
