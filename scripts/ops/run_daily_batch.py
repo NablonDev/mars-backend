@@ -16,14 +16,29 @@ Sequence: acquire a Postgres advisory lock -> reclaim stale job_item rows
 rows (see app.workers.penalty_projection) -> sweep the mitigation-summary
 side (see app.workers.penalty_mitigation) -> expire stale PO
 delivery-change requests -> enqueue today's ORDER_RUN items -> drain the
-queue -> release the lock -> print a summary.
+queue -> run the event-driven fulfillment-timeline projection (see
+app.workers.penalty_timeline; runs alongside the legacy engine above,
+unchanged -- docs/architecture/penalty-timeline-engine.md) -> release the
+lock -> print a summary.
+
+`--skip-timeline` runs the legacy steps only, no timeline step.
+`--timeline-only` is the mirror: skip every legacy step (reclaim, sweeps,
+enqueue, drain) but still take the advisory lock and run the timeline step.
+The two are mutually exclusive. The timeline step runs on a full run and
+under `--timeline-only`; it does not run under `--enqueue-only` or
+`--drain-only` -- both are partial legacy operations, and the timeline step
+is a full nightly step of its own, not something a partial legacy run
+should trigger as a side effect.
 
 Exit-code semantics: see docs/JOB-QUEUE-WALKTHROUGH.md §4.1 -- in short,
 exit 0 whenever the run completed (even with DEAD items, or because a
 previous run's lock was still held), non-zero only on genuine
 infrastructure failure.
 `--fail-on-dead` restores the old "exit non-zero if anything died"
-behavior for CI/ad-hoc use.
+behavior for CI/ad-hoc use. A timeline-step failure is treated the same
+way as a DEAD legacy item: logged and printed, but it only fails the run
+(exit 1) under `--fail-on-dead` -- one engine's failure should not block
+the other's already-committed nightly work.
 
 Examples:
     python scripts/ops/run_daily_batch.py
@@ -33,6 +48,8 @@ Examples:
     python scripts/ops/run_daily_batch.py --drain-only
     python scripts/ops/run_daily_batch.py --dry-run
     python scripts/ops/run_daily_batch.py --fail-on-dead
+    python scripts/ops/run_daily_batch.py --skip-timeline
+    python scripts/ops/run_daily_batch.py --timeline-only
 """
 
 import argparse
@@ -50,6 +67,7 @@ from app.db.session import Database
 from app.queue.factory import build_job_queue
 from app.repositories.common.purchase_order import PurchaseOrderRepository
 from app.repositories.process.job_queue import JobQueueRepository
+from app.utils.clock import business_today
 from app.workers.loop import process_jobs
 from app.workers.penalty_mitigation import sweep_stranded_pending_mitigation_summaries
 from app.workers.penalty_projection import (
@@ -57,6 +75,7 @@ from app.workers.penalty_projection import (
     sweep_expired_po_delivery_change_requests,
     sweep_stranded_pending_projection_summaries,
 )
+from app.workers.penalty_timeline import run_daily_timeline
 
 logger = logging.getLogger(__name__)
 
@@ -106,9 +125,23 @@ def _parse_args() -> argparse.Namespace:
         "--fail-on-dead",
         action="store_true",
         help=(
-            "Exit non-zero if any item ended DEAD this run (old default behavior). "
-            "Off by default -- a DEAD item should not fail/retry the whole "
-            "Container Apps Job."
+            "Exit non-zero if any item ended DEAD this run (old default behavior), or if the "
+            "timeline projection step raised. Off by default -- neither should fail/retry the "
+            "whole Container Apps Job."
+        ),
+    )
+    timeline_group = parser.add_mutually_exclusive_group()
+    timeline_group.add_argument(
+        "--skip-timeline",
+        action="store_true",
+        help="Run the legacy steps only; skip the event-driven timeline projection step",
+    )
+    timeline_group.add_argument(
+        "--timeline-only",
+        action="store_true",
+        help=(
+            "Skip every legacy step (reclaim, sweeps, enqueue, drain) but still take the "
+            "advisory lock and run only the event-driven timeline projection step"
         ),
     )
     return parser.parse_args()
@@ -119,6 +152,11 @@ def main() -> int:
     projection_date = datetime.strptime(args.date, "%Y-%m-%d").date() if args.date else None  # noqa: DTZ007
 
     settings = get_settings()
+    # Resolved once, up front, via the shared `business_today()` helper, so the
+    # legacy enqueue and the timeline step are guaranteed to receive the exact
+    # same date -- passed explicitly to both, rather than letting each resolve
+    # its own "today" independently.
+    resolved_projection_date = projection_date or business_today()
     if args.concurrency is not None:
         settings.job_queue.worker_concurrency = args.concurrency
 
@@ -145,6 +183,13 @@ def main() -> int:
             f"[dry-run] would enqueue {purchase_order_count} ORDER_RUN item(s); "
             "no lock taken, nothing written."
         )
+        if args.skip_timeline:
+            print("[dry-run] --skip-timeline: timeline projection would not run.")
+        else:
+            print(
+                f"[dry-run] would run the timeline projection for {resolved_projection_date}; "
+                "no lock taken, nothing written."
+            )
         return 0
 
     job_dispatcher, job_source = build_job_queue(settings, database)
@@ -171,109 +216,144 @@ def main() -> int:
             )
             return 0
 
-        reclaimed = job_source.reclaim_stale(settings.job_queue.visibility_timeout_seconds)
-        if reclaimed:
-            logger.info("Reclaimed %s stale job_item(s).", reclaimed)
+        dead_total = 0
+        if not args.timeline_only:
+            reclaimed = job_source.reclaim_stale(settings.job_queue.visibility_timeout_seconds)
+            if reclaimed:
+                logger.info("Reclaimed %s stale job_item(s).", reclaimed)
 
-        # Runs regardless of --enqueue-only/--drain-only: a recovered row
-        # becomes an ordinary PENDING job_item, picked up by whichever
-        # phase actually drains (see app.workers.penalty_projection).
-        sweep_result = sweep_stranded_pending_projection_summaries(job_dispatcher, database, settings)
-        if sweep_result.recovered_count:
-            logger.info(
-                "Recovered %s stranded PENDING penalty-projection-summary ledger row(s) (job_run_id=%s).",
-                sweep_result.recovered_count,
-                sweep_result.job_run_id,
+            # Runs regardless of --enqueue-only/--drain-only: a recovered row
+            # becomes an ordinary PENDING job_item, picked up by whichever
+            # phase actually drains (see app.workers.penalty_projection).
+            sweep_result = sweep_stranded_pending_projection_summaries(job_dispatcher, database, settings)
+            if sweep_result.recovered_count:
+                logger.info(
+                    "Recovered %s stranded PENDING penalty-projection-summary ledger row(s) (job_run_id=%s).",
+                    sweep_result.recovered_count,
+                    sweep_result.job_run_id,
+                )
+            print(
+                f"Recovery sweep: recovered {sweep_result.recovered_count} stranded PENDING summary row(s)."
             )
-        print(f"Recovery sweep: recovered {sweep_result.recovered_count} stranded PENDING summary row(s).")
 
-        # Same durability gap, mitigation-summary side (see
-        # app.workers.penalty_mitigation) -- mitigation itself is on-demand only (no
-        # nightly ORDER_RUN-equivalent for it), so this only ever finds
-        # something if a mitigation-summary request crashed between its
-        # ledger write and its job_item write.
-        mitigation_sweep_result = sweep_stranded_pending_mitigation_summaries(
-            job_dispatcher, database, settings
-        )
-        if mitigation_sweep_result.recovered_count:
-            logger.info(
-                "Recovered %s stranded PENDING penalty-mitigation-summary ledger row(s) (job_run_id=%s).",
-                mitigation_sweep_result.recovered_count,
-                mitigation_sweep_result.job_run_id,
+            # Same durability gap, mitigation-summary side (see
+            # app.workers.penalty_mitigation) -- mitigation itself is on-demand only (no
+            # nightly ORDER_RUN-equivalent for it), so this only ever finds
+            # something if a mitigation-summary request crashed between its
+            # ledger write and its job_item write.
+            mitigation_sweep_result = sweep_stranded_pending_mitigation_summaries(
+                job_dispatcher, database, settings
             )
-        print(
-            f"Recovery sweep: recovered {mitigation_sweep_result.recovered_count} stranded "
-            "PENDING mitigation-summary row(s)."
-        )
-
-        # Expire PENDING PO delivery-change requests past their SLA and
-        # re-trigger projection for each affected purchase order (see
-        # app.workers.penalty_projection.sweep_expired_po_delivery_change_requests).
-        # No job_dispatcher involved -- the status flip and re-trigger happen
-        # inline, no LLM call needed.
-        po_delivery_change_sweep_result = sweep_expired_po_delivery_change_requests(database)
-        if po_delivery_change_sweep_result.recovered_count:
-            logger.info(
-                "Expired %s stale PO delivery-change request(s).",
-                po_delivery_change_sweep_result.recovered_count,
+            if mitigation_sweep_result.recovered_count:
+                logger.info(
+                    "Recovered %s stranded PENDING penalty-mitigation-summary ledger row(s) (job_run_id=%s).",
+                    mitigation_sweep_result.recovered_count,
+                    mitigation_sweep_result.job_run_id,
+                )
+            print(
+                f"Recovery sweep: recovered {mitigation_sweep_result.recovered_count} stranded "
+                "PENDING mitigation-summary row(s)."
             )
-        print(
-            f"Recovery sweep: expired {po_delivery_change_sweep_result.recovered_count} stale "
-            "PO delivery-change request(s)."
-        )
 
-        if not args.drain_only:
-            result = enqueue_daily_run(
-                job_dispatcher,
+            # Expire PENDING PO delivery-change requests past their SLA and
+            # re-trigger projection for each affected purchase order (see
+            # app.workers.penalty_projection.sweep_expired_po_delivery_change_requests).
+            # No job_dispatcher involved -- the status flip and re-trigger happen
+            # inline, no LLM call needed.
+            po_delivery_change_sweep_result = sweep_expired_po_delivery_change_requests(database)
+            if po_delivery_change_sweep_result.recovered_count:
+                logger.info(
+                    "Expired %s stale PO delivery-change request(s).",
+                    po_delivery_change_sweep_result.recovered_count,
+                )
+            print(
+                f"Recovery sweep: expired {po_delivery_change_sweep_result.recovered_count} stale "
+                "PO delivery-change request(s)."
+            )
+
+            if not args.drain_only:
+                result = enqueue_daily_run(
+                    job_dispatcher,
+                    database,
+                    settings,
+                    projection_date=resolved_projection_date,
+                    stacking_mode_override=args.stacking_mode,
+                )
+                print(
+                    f"Enqueued job_run_id={result.job_run_id}: {result.enqueued_count} new "
+                    f"ORDER_RUN item(s) of {result.purchase_order_count} OPEN purchase order(s)."
+                )
+                if result.no_open_orders_note:
+                    print(f"WARNING: {result.no_open_orders_note}")
+
+            if args.enqueue_only:
+                return 0
+
+            llm_config = LLMConfig.from_settings(settings)
+            llm = AzureOpenAIChatClient(
+                llm_config,
+                max_retries=llm_config.max_retries,
+                timeout_seconds=llm_config.timeout_seconds,
+            )
+            summary = process_jobs(
+                job_source,
                 database,
                 settings,
-                projection_date=projection_date,
-                stacking_mode_override=args.stacking_mode,
+                llm,
+                mode="drain",
+                # Already reclaimed above, right after taking the lock.
+                reclaim_stale_first=False,
             )
+
             print(
-                f"Enqueued job_run_id={result.job_run_id}: {result.enqueued_count} new "
-                f"ORDER_RUN item(s) of {result.purchase_order_count} OPEN purchase order(s)."
+                f"Drain complete: succeeded={summary.succeeded} nacked={summary.nacked} "
+                f"dead_lettered={summary.dead_lettered} dead_via_exhaustion={summary.dead_via_exhaustion} "
+                f"dead_total={summary.dead_total} abandoned={summary.abandoned} "
+                f"released={summary.released} rate_limit_hits={summary.rate_limit_hits}"
             )
-            if result.no_open_orders_note:
-                print(f"WARNING: {result.no_open_orders_note}")
+            dead_total = summary.dead_total
 
-        if args.enqueue_only:
-            return 0
+            if dead_total > 0:
+                # DEAD is terminal -- a
+                # successful run with failures, not a failed run: exit 0
+                # unless the caller opted into --fail-on-dead.
+                print(
+                    f"{dead_total} item(s) ended DEAD this run (terminal -- will not be "
+                    f"retried by re-running the job). See job_item.last_error_code via "
+                    f"GET /job-runs/{{job_run_id}}/items?status=DEAD for detail."
+                )
 
-        llm_config = LLMConfig.from_settings(settings)
-        llm = AzureOpenAIChatClient(
-            llm_config,
-            max_retries=llm_config.max_retries,
-            timeout_seconds=llm_config.timeout_seconds,
-        )
-        summary = process_jobs(
-            job_source,
-            database,
-            settings,
-            llm,
-            mode="drain",
-            # Already reclaimed above, right after taking the lock.
-            reclaim_stale_first=False,
-        )
+        timeline_failed = False
+        # Runs on a full run and under --timeline-only; --enqueue-only already
+        # returned above, and --drain-only is excluded explicitly here -- both
+        # are partial legacy operations and should not trigger this full
+        # nightly step as a side effect (controller ruling, see docstring).
+        run_timeline_step = not args.skip_timeline and (args.timeline_only or not args.drain_only)
+        if run_timeline_step:
+            try:
+                timeline_summary = run_daily_timeline(database, resolved_projection_date)
+            except Exception:
+                # Same "don't fail the whole run for one engine's failure" posture
+                # as a DEAD legacy item, above -- the legacy engine's already-
+                # committed nightly work should not be blocked by this one.
+                timeline_failed = True
+                logger.exception(
+                    "Timeline projection step failed for projection_date=%s", resolved_projection_date
+                )
+                print(
+                    f"Timeline projection step failed for projection_date={resolved_projection_date}: "
+                    "see logs for the traceback."
+                )
+            else:
+                print(
+                    f"Timeline projection: plans_evaluated={timeline_summary.plans_evaluated} "
+                    f"plans_skipped={timeline_summary.plans_skipped} "
+                    f"status_counts={timeline_summary.status_counts} "
+                    f"total_projected_penalty={timeline_summary.total_projected_penalty}"
+                )
 
-        print(
-            f"Drain complete: succeeded={summary.succeeded} nacked={summary.nacked} "
-            f"dead_lettered={summary.dead_lettered} dead_via_exhaustion={summary.dead_via_exhaustion} "
-            f"dead_total={summary.dead_total} abandoned={summary.abandoned} "
-            f"released={summary.released} rate_limit_hits={summary.rate_limit_hits}"
-        )
-
-        if summary.dead_total > 0:
-            # DEAD is terminal -- a
-            # successful run with failures, not a failed run: exit 0
-            # unless the caller opted into --fail-on-dead.
-            print(
-                f"{summary.dead_total} item(s) ended DEAD this run (terminal -- will not be "
-                f"retried by re-running the job). See job_item.last_error_code via "
-                f"GET /job-runs/{{job_run_id}}/items?status=DEAD for detail."
-            )
-            if args.fail_on_dead:
-                return 1
+        if args.fail_on_dead and (dead_total > 0 or timeline_failed):
+            return 1
 
         return 0
     finally:
