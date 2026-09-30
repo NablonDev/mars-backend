@@ -182,6 +182,16 @@ class MasterDataRepository:
         row = self._session.scalars(select(Retailer).where(Retailer.retailer_code == retailer_code)).first()
         return _retailer_to_dict(row) if row is not None else None
 
+    def get_retailer_by_name(self, retailer_name: str) -> dict | None:
+        """Fetch a retailer by its exact `retailer_name`, or None if not found.
+
+        Lets a seeder reuse an already-seeded retailer row (e.g. one created
+        by another seed script under its own code) instead of creating a
+        duplicate under a synthetic code.
+        """
+        row = self._session.scalars(select(Retailer).where(Retailer.retailer_name == retailer_name)).first()
+        return _retailer_to_dict(row) if row is not None else None
+
     def list_retailers(self) -> list[dict]:
         """List every retailer, in no guaranteed order."""
         rows = self._session.scalars(select(Retailer)).all()
@@ -255,6 +265,8 @@ class MasterDataRepository:
         follow_up_material_id: UUID | None = None,
         source_system: str | None = None,
         last_synced_at: datetime | None = None,
+        standard_cost: float | None = None,
+        qa_release_days: int | None = None,
     ) -> dict:
         """Create a material_master row and return it as a dict.
 
@@ -276,6 +288,8 @@ class MasterDataRepository:
             follow_up_material_id=follow_up_material_id,
             source_system=source_system,
             last_synced_at=last_synced_at,
+            standard_cost=standard_cost,
+            qa_release_days=qa_release_days,
         )
         self._session.add(row)
         self._session.flush()
@@ -439,4 +453,26 @@ class MasterDataRepository:
         self._session.execute(delete(Carrier))
         self._session.execute(delete(Plant))
         self._session.execute(delete(Retailer))
+        self._session.flush()
+
+    def delete_seed_data(
+        self,
+        material_code_prefix: str,
+        plant_code_prefix: str,
+        carrier_code_prefix: str,
+        retailer_code_prefix: str,
+    ) -> None:
+        """Delete every material/plant/carrier/retailer row matching these code prefixes.
+
+        Scoped by code, never by name: a retailer reused by name (not
+        created under `retailer_code_prefix`) is never touched. Callers
+        must first clear anything that FK-references these rows (penalty
+        rules, retailer agreements, purchase orders and their dependents).
+        """
+        material_ids = select(Material.id).where(Material.material_code.like(f"{material_code_prefix}%"))
+        self._session.execute(delete(MaterialMaster).where(MaterialMaster.material_id.in_(material_ids)))
+        self._session.execute(delete(Material).where(Material.material_code.like(f"{material_code_prefix}%")))
+        self._session.execute(delete(Plant).where(Plant.plant_code.like(f"{plant_code_prefix}%")))
+        self._session.execute(delete(Carrier).where(Carrier.carrier_code.like(f"{carrier_code_prefix}%")))
+        self._session.execute(delete(Retailer).where(Retailer.retailer_code.like(f"{retailer_code_prefix}%")))
         self._session.flush()

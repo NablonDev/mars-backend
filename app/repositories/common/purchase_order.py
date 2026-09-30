@@ -48,6 +48,10 @@ def _purchase_order_to_dict(row: PurchaseOrder) -> dict:
         "current_delivery_date": row.current_delivery_date,
         "current_required_ship_date": row.current_required_ship_date,
         "negotiation_status": row.negotiation_status,
+        "window_start": row.window_start,
+        "window_end": row.window_end,
+        "cancel_date": row.cancel_date,
+        "freight_term": row.freight_term,
     }
 
 
@@ -341,4 +345,14 @@ class PurchaseOrderRepository:
         """Delete both PO tables; every FK-referencing table must be cleared first."""
         self._session.execute(delete(PurchaseOrderLine))
         self._session.execute(delete(PurchaseOrder))
+        self._session.flush()
+
+    def delete_seed_data(self, purchase_order_number_prefix: str) -> None:
+        """Delete every PO/line row whose `purchase_order_number` matches this prefix."""
+        po_like = f"{purchase_order_number_prefix}%"
+        po_ids = select(PurchaseOrder.id).where(PurchaseOrder.purchase_order_number.like(po_like))
+        self._session.execute(
+            delete(PurchaseOrderLine).where(PurchaseOrderLine.purchase_order_id.in_(po_ids))
+        )
+        self._session.execute(delete(PurchaseOrder).where(PurchaseOrder.purchase_order_number.like(po_like)))
         self._session.flush()
