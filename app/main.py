@@ -33,30 +33,6 @@ from app.services.po_validation.service import PoValidationService
 logger = logging.getLogger(__name__)
 
 
-async def _run_ontology_materialize_loop(interval_seconds: int) -> None:
-    """Rebuilds the ontology graph once immediately (so the first request
-    after startup doesn't see an empty graph), then again every
-    `interval_seconds` until cancelled at shutdown. Runs `rebuild` (a
-    blocking, synchronous function) on a worker thread via `asyncio.to_thread`
-    so it never blocks the event loop the API is also using.
-
-    `Container.build()` is called from inside the loop, not once up front,
-    and inside the same try/except as the rebuild itself: like
-    `build_service()`/`build_po_validation_service()` above, it opens a real
-    Postgres-backed checkpointer, which tests deliberately avoid triggering
-    by injecting fake services (see tests/unit/api/test_main_lifespan.py) --
-    doing the build here means a Postgres-less environment logs and retries
-    next interval instead of failing app startup outright.
-    """
-    while True:
-        try:
-            container = Container.build()
-            await asyncio.to_thread(materialize_job.rebuild, container)
-        except Exception:
-            logger.exception("Ontology graph rebuild failed; will retry next interval.")
-        await asyncio.sleep(interval_seconds)
-
-
 def create_app(
     service: CmirService | None = None,
     po_service: PoValidationService | None = None,
@@ -85,7 +61,7 @@ def create_app(
         # it's safe and cheap to run unconditionally, synchronously, before
         # anything else starts. Deliberately allowed to raise and crash
         # startup here (unlike the periodic rebuild's own call to the same
-        # function, wrapped in _run_ontology_materialize_loop's try/except)
+        # function, wrapped in materialize_job.run_forever's try/except)
         # -- there is no "last known-good graph" yet to fall back to on the
         # very first run, so starting with the mapping silently broken
         # would be worse than refusing to start at all.
@@ -111,7 +87,7 @@ def create_app(
             app.state.ontology_insert_service = build_ontology_insert_service()
 
         ontology_task = asyncio.create_task(
-            _run_ontology_materialize_loop(resolved.ontology.refresh_interval_seconds)
+            materialize_job.run_forever(resolved.ontology.refresh_interval_seconds)
         )
         try:
             yield

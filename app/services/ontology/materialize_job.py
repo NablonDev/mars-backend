@@ -12,6 +12,7 @@ I/O-bound waiting worth `await`ing, so the caller runs it on a thread (see
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
@@ -36,11 +37,11 @@ def rebuild(container: Container) -> Graph:
     -- it needs no live connection, so a broken mapping is caught for free
     on every cycle without an extra round trip. If it raises
     `MappingValidationError`, this function raises too (uncaught here on
-    purpose): `app.main._run_ontology_materialize_loop` already wraps every
-    call to `rebuild()` in a try/except that logs and retries next
-    interval -- exactly the "keep serving the last known-good graph, never
-    publish a broken one" behavior this needs, with no new state-management
-    mechanism required beyond the atomic swap `Container` already does.
+    purpose): `run_forever` already wraps every call to `rebuild()` in a
+    try/except that logs and retries next interval -- exactly the "keep
+    serving the last known-good graph, never publish a broken one" behavior
+    this needs, with no new state-management mechanism required beyond the
+    atomic swap `Container` already does.
     """
     started = time.monotonic()
     validate_mapping()
@@ -71,3 +72,28 @@ def rebuild(container: Container) -> Graph:
         time.monotonic() - started,
     )
     return graph
+
+
+async def run_forever(interval_seconds: int) -> None:
+    """Rebuilds the ontology graph once immediately (so the first request
+    after startup doesn't see an empty graph), then again every
+    `interval_seconds` until cancelled at shutdown. Runs `rebuild` (a
+    blocking, synchronous function) on a worker thread via `asyncio.to_thread`
+    so it never blocks the event loop the API is also using.
+
+    `Container.build()` is called from inside the loop, not once up front,
+    and inside the same try/except as the rebuild itself: like
+    `build_service()`/`build_po_validation_service()` in `app.main`, it opens
+    a real Postgres-backed checkpointer, which tests deliberately avoid
+    triggering by injecting fake services (see
+    tests/unit/api/test_main_lifespan.py) -- doing the build here means a
+    Postgres-less environment logs and retries next interval instead of
+    failing app startup outright.
+    """
+    while True:
+        try:
+            container = Container.build()
+            await asyncio.to_thread(rebuild, container)
+        except Exception:
+            logger.exception("Ontology graph rebuild failed; will retry next interval.")
+        await asyncio.sleep(interval_seconds)
