@@ -140,6 +140,7 @@ def _seed_shortage_dispute_scenario(
     claimed_amount: float = 80.0,
     rate: float = 5.0,
     actual_penalty_amount: float | None = None,
+    rule_effective_start: date = date(2026, 1, 1),
 ):
     """Real, final shortfall = order_qty - delivered_qty = 10 units; at
     rate=5.0/unit that computes to $50 -- callers vary `claimed_amount` to
@@ -149,7 +150,7 @@ def _seed_shortage_dispute_scenario(
     differs from the dispute's own `claimed_amount`. Returns
     (purchase_order_id, actual_penalty_id)."""
     purchase_order_id, line_id, _retailer_id = _seed_order(
-        repos, po_number, violation_type="SHORT_SHIP", rate=rate
+        repos, po_number, violation_type="SHORT_SHIP", rate=rate, rule_effective_start=rule_effective_start
     )
     _seed_delivery(repos, purchase_order_id, line_id, delivered_qty, charge_date)
 
@@ -328,9 +329,9 @@ def test_analyze_pay_full_undercharge_records_negative_delta(repos):
     assert analyzed["delta_amount"] == -30.0
 
 
-def test_analyze_raises_no_matching_rule_when_no_rule_effective_on_charge_date(repos):
+def test_analyze_raises_no_matching_rule_when_no_rule_effective_on_due_or_charge_date(repos):
     _purchase_order_id, actual_penalty_id = _seed_shortage_dispute_scenario(
-        repos, charge_date=date(2025, 1, 1)
+        repos, charge_date=date(2025, 1, 1), rule_effective_start=date(2027, 1, 1)
     )
     service = _build_service(repos)
     dispute = service.open_dispute(actual_penalty_id, "AMOUNT_INCORRECT", 80.0)
@@ -343,6 +344,21 @@ def test_analyze_raises_no_matching_rule_when_no_rule_effective_on_charge_date(r
     unchanged = service.get(dispute["id"])
     assert unchanged["dispute_status"] == "OPEN"
     assert unchanged["computed_amount"] is None
+
+
+def test_analyze_applies_rule_effective_on_delivery_due_date_even_if_deducted_earlier(repos):
+    # The rule starts 2026-01-01, after the 2025 deduction date but before the PO's due date:
+    # the contract version in force on the obligation date governs, not the deduction date.
+    _purchase_order_id, actual_penalty_id = _seed_shortage_dispute_scenario(
+        repos, charge_date=date(2025, 1, 1), rule_effective_start=date(2026, 1, 1)
+    )
+    service = _build_service(repos)
+    dispute = service.open_dispute(actual_penalty_id, "AMOUNT_INCORRECT", 80.0)
+
+    analyzed = service.analyze(dispute["id"])
+
+    assert analyzed["dispute_status"] == "ANALYZED"
+    assert analyzed["computed_amount"] == 50.0
 
 
 def test_analyze_raises_insufficient_data_when_no_delivery_recorded(repos):

@@ -116,12 +116,15 @@ def test_unit_amount_falls_back_to_unit_price_when_unit_cost_is_none():
     assert result.penalty_amount == 500.0  # rate(1) * qty(10) * unit_price(50), no unit_cost available
 
 
-def test_unit_amount_uses_unit_cost_by_default():
-    rule = _rule("R12", "OTIF_LATE", calc_type=CalcType.PERCENT_OF_PO, rate=1.0)
+def test_unit_amount_ignores_standard_cost_whatever_the_basis_type():
+    # A retailer's "cost of goods" is what it pays Mars (the PO price); Mars's own
+    # standard cost must never change a penalty.
     basis = PricingBasis(quantity=10.0, unit_cost=8.0, unit_price=50.0)
-    result = price_risk("LATE", "PROJECTED_BREACH", 1, None, basis, [rule], "SUM")
+    for basis_type in (None, "COST_OF_GOODS", "PO_VALUE"):
+        rule = _rule("R12", "OTIF_LATE", calc_type=CalcType.PERCENT_OF_PO, rate=1.0, basis_type=basis_type)
+        result = price_risk("LATE", "PROJECTED_BREACH", 1, None, basis, [rule], "SUM")
 
-    assert result.penalty_amount == 80.0  # rate(1) * qty(10) * unit_cost(8)
+        assert result.penalty_amount == 500.0  # rate(1) * qty(10) * unit_price(50)
 
 
 def test_stacking_mode_sum_adds_all_priced_rules():
@@ -129,7 +132,7 @@ def test_stacking_mode_sum_adds_all_priced_rules():
     rule_b = _rule("RB", "OTIF_LATE", calc_type=CalcType.PERCENT_OF_PO, rate=2.0)
     result = price_risk("LATE", "PROJECTED_BREACH", 1, None, BASIS, [rule_a, rule_b], "SUM")
 
-    assert result.penalty_amount == 3000.0  # (1*100*10) + (2*100*10)
+    assert result.penalty_amount == 6000.0  # (1*100*20) + (2*100*20), PO unit price
 
 
 def test_stacking_mode_max_takes_the_larger_priced_rule():
@@ -137,7 +140,7 @@ def test_stacking_mode_max_takes_the_larger_priced_rule():
     rule_b = _rule("RB", "OTIF_LATE", calc_type=CalcType.PERCENT_OF_PO, rate=2.0)
     result = price_risk("LATE", "PROJECTED_BREACH", 1, None, BASIS, [rule_a, rule_b], "MAX")
 
-    assert result.penalty_amount == 2000.0
+    assert result.penalty_amount == 4000.0
 
 
 def test_unrecognized_stacking_mode_raises_value_error():
@@ -166,7 +169,7 @@ def test_rule_breakdown_has_one_entry_per_considered_rule_for_a_timing_risk():
     assert charge.calc_type == "PER_UNIT"
     assert charge.rate == 2.0
     assert charge.basis_type is None
-    assert charge.unit_amount == 10.0  # unit_cost preferred over unit_price
+    assert charge.unit_amount == 20.0  # PO unit price, never the cheaper unit_cost
     assert charge.quantity == 100.0
     assert charge.shortfall_quantity is None
     assert charge.days_off == 3
@@ -197,3 +200,38 @@ def test_rule_breakdown_uses_fallback_basis_and_reports_shortfall_for_shortage_r
     assert charge.days_off is None
     assert charge.chargeable_days is None
     assert charge.amount == 10.0
+
+
+def test_breach_with_no_matching_rule_says_so_instead_of_reading_as_a_forgiven_fine():
+    # A retailer whose contract has no ASN clause: the breach is real but nothing can price it.
+    unrelated = _rule("R-OTIF", "OTIF_LATE", rate=2.0)
+    result = price_risk("ASN_LATE", "PROJECTED_BREACH", 5, None, BASIS, [unrelated], "SUM")
+
+    assert result.penalty_amount == 0.0
+    assert result.status == "SLIPPING"
+    assert result.rule_breakdown == ()
+    assert result.zero_reason == "NO_APPLICABLE_RULE"
+
+
+def test_breach_inside_grace_is_a_different_zero_than_no_rule():
+    rule = _rule("R-GRACE", "OTIF_LATE", rate=2.0, grace_period_days=3)
+    result = price_risk("LATE", "PROJECTED_BREACH", 2, None, BASIS, [rule], "SUM")
+
+    assert result.penalty_amount == 0.0
+    assert result.status == "SLIPPING"
+    assert len(result.rule_breakdown) == 1
+    assert result.zero_reason == "WITHIN_GRACE_OR_THRESHOLD"
+
+
+def test_a_charged_breach_has_no_zero_reason():
+    result = price_risk("LATE", "PROJECTED_BREACH", 3, None, BASIS, [_rule("R1", "OTIF_LATE")], "SUM")
+
+    assert result.penalty_amount > 0
+    assert result.zero_reason is None
+
+
+def test_breached_with_no_rule_stays_breached_but_still_says_no_rule():
+    result = price_risk("NOT_DELIVERED", "BREACHED", 4, None, BASIS, [], "SUM")
+
+    assert result.status == "BREACHED"
+    assert result.zero_reason == "NO_APPLICABLE_RULE"

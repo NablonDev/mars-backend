@@ -1,5 +1,6 @@
 """Tests for the pure plan-assessment adapter (RED before assessment.py existed)."""
 
+from dataclasses import replace
 from datetime import date
 
 import pytest
@@ -54,6 +55,19 @@ def test_assess_plan_prices_short_alongside_timing_risk():
     assert "SHORT" in risk_types
     short = next(r for r in assessment.priced_risks if r.risk_type == "SHORT")
     assert short.penalty_amount == pytest.approx(15.0)
+
+
+def test_assess_plan_does_not_price_short_on_top_of_not_delivered():
+    # Past the cancel date the whole plan is NOT_DELIVERED (full quantity through the shortage
+    # rules); a SHORT on the same goods would charge the retailer's shortage rule twice.
+    plan = replace(_plan(as_of=date(2026, 1, 10), window_end=date(2026, 1, 5)), cancel_date=date(2026, 1, 7))
+    rule = _rule("R-SHORT", "SHORT_SHIP", rate=1.5)
+
+    assessment = assess_plan(definitions(), plan, 10.0, "PROJECTED_BREACH", BASIS, [rule], "SUM")
+
+    risk_types = [r.risk_type for r in assessment.priced_risks]
+    assert risk_types == ["NOT_DELIVERED"]
+    assert assessment.priced_risks[0].penalty_amount == pytest.approx(150.0)  # 100 units x 1.5
 
 
 def test_assess_plan_reports_no_risks_when_on_track():

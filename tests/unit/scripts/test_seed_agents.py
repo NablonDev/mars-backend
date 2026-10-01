@@ -32,6 +32,7 @@ def test_agent_seeds_cover_all_documented_rows():
         ("penalty_mitigation_summary", "v3"),
         ("penalty_dispute_summary", "v1"),
         ("penalty_dispute_summary", "v2"),
+        ("penalty_dispute_summary", "v3"),
         ("penalty_rule_extractor", "v2"),
         ("penalty_rule_screening", "v2"),
         ("penalty_rule_classification", "v2"),

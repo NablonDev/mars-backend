@@ -179,3 +179,42 @@ def test_short_row_gets_a_supply_block():
 
     short_row = next(r for r in rows if r["risk_type"] == "SHORT")
     assert short_row["calculation_detail"]["supply"] is not None
+
+
+def _late_plan() -> PlanTimelineInput:
+    return PlanTimelineInput(
+        plan_id="PLAN-NR",
+        freight_term="PREPAID",
+        planned_transit_days=2,
+        window_start=date(2026, 1, 1),
+        window_end=date(2026, 1, 5),
+        cancel_date=None,
+        milestones=(),
+        as_of=date(2026, 1, 10),
+    )
+
+
+def _row_for(plan: PlanTimelineInput, rules: list[PenaltyRule]) -> dict:
+    assessment = assess_plan(definitions(), plan, 0.0, None, BASIS, rules, "SUM")
+    rows = _assembler().build_risk_rows(
+        uuid4(), uuid4(), plan, assessment, 0.0, None, None, {}, BASIS, "SUM", {}, POOL_CONTENTION_OUTCOME
+    )
+    return next(r for r in rows if r["risk_type"] == "LATE")
+
+
+def test_late_row_with_no_live_rule_records_that_no_rule_applied():
+    row = _row_for(_late_plan(), rules=[])
+
+    assert row["status"] == "SLIPPING"
+    assert row["projected_penalty_amount"] == 0.0
+    assert row["calculation_detail"]["pricing"]["zero_reason"] == "NO_APPLICABLE_RULE"
+    assert row["calculation_detail"]["pricing"]["rules"] == []
+
+
+def test_late_row_that_is_charged_has_no_zero_reason():
+    rule = PenaltyRule(rule_id="R1", violation_type="OTIF_LATE", calc_type=CalcType.PER_UNIT, rate=2.0)
+
+    row = _row_for(_late_plan(), rules=[rule])
+
+    assert row["projected_penalty_amount"] > 0
+    assert row["calculation_detail"]["pricing"]["zero_reason"] is None
