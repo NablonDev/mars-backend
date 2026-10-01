@@ -53,7 +53,9 @@ _AMAZON_RULES = (
         "rate": 0.03,
         "penalty_category": "SHORT",
         "basis_type": "SHORTFALL_VALUE",
-        "threshold_pct": 0.0,
+        # SHORTFALL_VALUE reads threshold_pct as a minimum fill rate, so 1.0 charges any shortfall
+        # (0.0 would mean "a fill rate below 0%", which can never happen).
+        "threshold_pct": 1.0,
     },
     {
         "rule_code": "TL-RULE-AMZ-ASN",

@@ -19,6 +19,7 @@ from app.repositories.common.fulfillment_timeline import FulfillmentTimelineRepo
 from app.repositories.common.master_data import MasterDataRepository
 from app.repositories.common.purchase_order import PurchaseOrderRepository
 from app.repositories.common.retailer_agreement import RetailerAgreementRepository
+from app.repositories.penalties.dispute import PenaltyDisputeRepository
 from app.repositories.penalties.fulfillment_risk import FulfillmentRiskRepository
 from app.repositories.penalties.rule import PenaltyRuleRepository
 from app.repositories.penalties.timeline_alert import TimelineAlertRepository
@@ -50,6 +51,7 @@ class TimelineSimulator:
         self.timeline = FulfillmentTimelineRepository(session)
         self.risks = FulfillmentRiskRepository(session)
         self.alerts = TimelineAlertRepository(session)
+        self.disputes = PenaltyDisputeRepository(session)
         self.master_data = MasterDataRepository(session)
         self.purchase_orders = PurchaseOrderRepository(session)
         self.rules = PenaltyRuleRepository(session)
@@ -108,7 +110,7 @@ class TimelineSimulator:
 
         Deletion order respects every foreign key: alerts (by plan), risks/
         options (by PO), plans/milestones/events/production-orders/QA-lots,
-        purchase orders, penalty rules, retailer agreements (by the
+        disputes/actual penalties/summaries (by PO), purchase orders, penalty rules, retailer agreements (by the
         agreement's own contract code, never by retailer id), then plants/
         materials/carriers/retailers -- the last step only ever removes a
         `TL-`-coded retailer, so a retailer reused by name from other seed
@@ -117,6 +119,7 @@ class TimelineSimulator:
         self.alerts.delete_seed_data(_SEED_PREFIX)
         self.risks.delete_seed_data(_SEED_PREFIX)
         self.timeline.delete_seed_data(_SEED_PREFIX, _SEED_PREFIX, _SEED_PREFIX)
+        self.disputes.delete_seed_data(_SEED_PREFIX)
         self.purchase_orders.delete_seed_data(_SEED_PREFIX)
         self.rules.delete_seed_data(_SEED_PREFIX)
         self.retailer_agreements.delete_seed_data(_SEED_PREFIX)

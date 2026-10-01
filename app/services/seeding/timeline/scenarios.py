@@ -84,7 +84,9 @@ _PREPAID = "PREPAID"
 _COLLECT = "COLLECT"
 
 
-def _normal_prepaid(code: str, retailer_code: str, material_code: str, plant_code: str) -> ScenarioDefinition:
+def _normal_prepaid(
+    code: str, retailer_code: str, material_code: str, plant_code: str, unit_price: float = 20.0
+) -> ScenarioDefinition:
     return ScenarioDefinition(
         code=code,
         retailer_code=retailer_code,
@@ -93,7 +95,7 @@ def _normal_prepaid(code: str, retailer_code: str, material_code: str, plant_cod
         window_start_offset=-2,
         window_end_offset=2,
         planned_transit_days=2,
-        lines=(ScenarioLine(material_code, plant_code, 100.0, 20.0),),
+        lines=(ScenarioLine(material_code, plant_code, 100.0, unit_price),),
         initial_on_hand={(material_code, plant_code): 200.0},
     )
 
@@ -322,7 +324,7 @@ SCENARIOS: tuple[ScenarioDefinition, ...] = (
             ),
         ),
     ),
-    _normal_prepaid("TL-S12", _WALMART, _ROYAL_CANIN, _JOPLIN),
+    _normal_prepaid("TL-S12", _WALMART, _ROYAL_CANIN, _JOPLIN, unit_price=55.0),  # Royal Canin: $55.00 a unit
     ScenarioDefinition(
         code="TL-S13",
         retailer_code=_AMAZON,
