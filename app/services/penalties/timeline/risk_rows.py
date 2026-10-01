@@ -32,6 +32,11 @@ from app.services.penalties.timeline.types import (
 
 _SHORT_TOLERANCE = 1e-6
 
+# Stamped on every risk row's `calculation_detail`. Bump it whenever projection, supply,
+# pricing, or mitigation semantics change, so a number that moves between runs can be told
+# apart from one that moved because the engine did.
+ENGINE_VERSION = "2"
+
 # risk_type values a row's supply block can apply to outright; every other risk_type still
 # gets one if its driver_milestone_code is MATERIAL_AVAILABLE (see `_supply_detail`).
 _SUPPLY_RISK_TYPES = {"SHORT", "NOT_DELIVERED"}
@@ -302,6 +307,8 @@ class RiskRowAssembler:
         """
         rule_breakdown = priced.rule_breakdown if priced is not None else ()
         return {
+            "engine_version": ENGINE_VERSION,
+            "data_freshness": self._data_freshness(plan_input),
             "measured": {
                 "milestone_code": result.measured_milestone_code,
                 "projected_date": _iso(result.projected_measured_date),
@@ -312,6 +319,8 @@ class RiskRowAssembler:
             },
             "pricing": {
                 "stacking_mode": stacking_mode,
+                # Why this breach priced to $0 (NO_APPLICABLE_RULE or WITHIN_GRACE_OR_THRESHOLD), else None.
+                "zero_reason": priced.zero_reason if priced is not None else None,
                 "unit_cost": _round_money(basis.unit_cost),
                 "unit_price": _round_money(basis.unit_price),
                 # `quantity` here is `basis.quantity` (unrounded); each rule's own
@@ -322,6 +331,26 @@ class RiskRowAssembler:
             },
             "supply": self._supply_detail(outcome, cause_source_types, risk_type, driver_milestone_code),
         }
+
+    def _data_freshness(self, plan_input: PlanTimelineInput) -> dict:
+        """Milestones whose planned date has passed with no actual recorded, as of the run date.
+
+        The projection assumes each such milestone completes today. That is a guess, not a
+        fact, so the numbers downstream of it are only as fresh as the upstream feed; this
+        makes the gap visible instead of letting a silent feed outage read as a live plan.
+        """
+        overdue = []
+        for state in plan_input.milestones:
+            due = state.planned_date or state.baseline_date
+            if state.actual_date is None and due is not None and due < plan_input.as_of:
+                overdue.append(
+                    {
+                        "code": state.code,
+                        "due_date": due.isoformat(),
+                        "days_overdue": (plan_input.as_of - due).days,
+                    }
+                )
+        return {"overdue_without_actual": overdue}
 
     def _rule_charge_dict(self, charge: RuleCharge, rule_codes: dict[str, str]) -> dict:
         """One `RuleCharge` as a JSON-safe dict, `rule_code` filled in from the resolved map."""
@@ -339,6 +368,7 @@ class RiskRowAssembler:
             "grace_period_days": charge.grace_period_days,
             "chargeable_days": charge.chargeable_days,
             "amount": charge.amount,
+            "threshold_pct": charge.threshold_pct,
         }
 
     def _supply_detail(
