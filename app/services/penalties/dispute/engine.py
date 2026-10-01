@@ -34,6 +34,7 @@ from app.services.penalties.dispute.types import (
     FAMILY_REQUIRED_KEYS,
     DisputeCalculation,
     DisputeFacts,
+    DisputeFamilyKeys,
     DisputeVerdict,
     InsufficientDataForDisputeError,
     UnsupportedDisputeCalcError,
@@ -54,6 +55,11 @@ from app.services.penalties.projection.types import (
 #: floating-point noise, not a genuine dispute. Same 1-cent convention as the
 #: `round(..., 2)` applied to money fields throughout this codebase.
 ROUNDING_TOLERANCE = 0.01
+
+ASN_LATE_VIOLATION_TYPE = "ASN_LATE"
+_ASN_REQUIRED_KEYS = DisputeFamilyKeys(
+    claim_supplied_keys=(), mars_derived_keys=("asn_sent_date", "goods_issued_date")
+)
 
 _MeasureFn = Callable[[PenaltyRule, DisputeFacts], tuple[float, dict]]
 
@@ -206,6 +212,8 @@ def _require_family_keys(rule: PenaltyRule, facts: DisputeFacts, family: str) ->
     requirement = FAMILY_REQUIRED_KEYS.get(family)
     if requirement is None:
         return
+    if family == ENGINE_FAMILY_DELAY and _is_asn_rule(rule):
+        requirement = _ASN_REQUIRED_KEYS
     missing = [
         key
         for key in (*requirement.claim_supplied_keys, *requirement.mars_derived_keys)
@@ -230,7 +238,13 @@ def _price_shortage_family(rule: PenaltyRule, facts: DisputeFacts) -> tuple[floa
 
 
 def _price_delay_family(rule: PenaltyRule, facts: DisputeFacts) -> tuple[float, dict]:
-    """DELAY: reuses `price_delay_penalty` against the real, final delivery date."""
+    """DELAY: reuses `price_delay_penalty` against the real, final delivery date.
+
+    An `ASN_LATE` rule is a delay rule too (same pricing function), but what is "late" differs:
+    the ASN against goods issue, not the delivery against the required date.
+    """
+    if _is_asn_rule(rule):
+        return _price_asn_late(rule, facts)
     assert facts.actual_delivery_date is not None  # guarded by _require_family_keys
     deadline = compute_deadline(facts)
     is_late = facts.actual_delivery_date > deadline
@@ -257,6 +271,38 @@ def _price_delay_family(rule: PenaltyRule, facts: DisputeFacts) -> tuple[float, 
         "claim_supplied_keys": [],
         "mars_derived_keys": ["actual_delivery_date"],
     }
+
+
+def _is_asn_rule(rule: PenaltyRule) -> bool:
+    return rule.violation_type == ASN_LATE_VIOLATION_TYPE
+
+
+def _price_asn_late(rule: PenaltyRule, facts: DisputeFacts) -> tuple[float, dict]:
+    """ASN_LATE: days between goods issue and ASN send, after grace, via `price_delay_penalty`.
+
+    Mirrors the projection engine, where an ASN is late when `ASN_SENT` lands after
+    `GOODS_ISSUED` and the charged days are that gap minus the rule's grace period.
+    """
+    assert facts.asn_sent_date is not None  # guarded by _require_family_keys
+    assert facts.goods_issued_date is not None
+    gap_days = (facts.asn_sent_date - facts.goods_issued_date).days
+    days_late = max(0, gap_days - facts.grace_period_days)
+    trace = {
+        "violation_family": "DELAY",
+        "goods_issued_date": facts.goods_issued_date,
+        "asn_sent_date": facts.asn_sent_date,
+        "days_late": days_late,
+        "is_late": days_late > 0,
+        "claim_supplied_keys": [],
+        "mars_derived_keys": ["asn_sent_date", "goods_issued_date"],
+    }
+    if days_late == 0:
+        return 0.0, trace
+    try:
+        amount = price_delay_penalty(rule, facts.order_qty, facts.unit_price, days_late)
+    except NotImplementedError as exc:
+        raise UnsupportedDisputeCalcError(str(exc)) from exc
+    return amount, trace
 
 
 def _price_quality(rule: PenaltyRule, facts: DisputeFacts) -> tuple[float, dict]:

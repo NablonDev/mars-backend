@@ -281,6 +281,15 @@ class ActualPenaltyRepository:
         self._session.flush()
         return _actual_penalty_to_dict(row)
 
+    def set_dispute_status(self, actual_penalty_id: UUID, dispute_status: str) -> dict:
+        """Set the charge's `dispute_status` (NONE, DISPUTED, WAIVED, UPHELD); raises `ValueError` if unknown."""
+        row = self._session.get(ActualPenalty, actual_penalty_id)
+        if row is None:
+            raise ValueError(f"No actual_penalty found with id={actual_penalty_id!r}")
+        row.dispute_status = dispute_status
+        self._session.flush()
+        return _actual_penalty_to_dict(row)
+
     def list_actual_penalties(self, purchase_order_id: UUID | None = None) -> list[dict]:
         """List actual penalties for one PO, or across all POs when the filter is omitted."""
         query = select(ActualPenalty)
