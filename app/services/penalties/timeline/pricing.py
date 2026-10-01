@@ -22,6 +22,11 @@ _TIMING_RULE_TYPES = {
     "ASN_LATE": (("ASN_LATE",), ()),
 }
 _SHORTAGE_VIOLATION_TYPES = ("SHORT_SHIP", "FILL_RATE")
+
+# Why a breach priced to $0. A breach with no matching contract rule must never read the same as a
+# breach the contract forgives, so the two are recorded as different reasons.
+NO_APPLICABLE_RULE = "NO_APPLICABLE_RULE"  # no live, priceable rule covers this kind of breach
+WITHIN_GRACE_OR_THRESHOLD = "WITHIN_GRACE_OR_THRESHOLD"  # rules exist but grace or a threshold absorbs it
 _SHORTAGE_RISK_TYPES = {"SHORT", "NOT_DELIVERED"}
 
 
@@ -57,6 +62,8 @@ class RuleCharge:
     chargeable_days: int | None
     amount: float
     rule_code: str | None = None
+    # A shortage grace band (fraction of ordered quantity), for display: the units it forgives.
+    threshold_pct: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -66,6 +73,7 @@ class PricedRisk:
     penalty_amount: float
     priced_rule_ids: tuple[str, ...]
     rule_breakdown: tuple[RuleCharge, ...] = ()
+    zero_reason: str | None = None  # set only when the breach priced to $0
 
 
 @dataclass(frozen=True)
@@ -94,7 +102,9 @@ def price_risk(
     `NOT_DELIVERED` always prices the full `basis.quantity` as the shortfall,
     ignoring `shortfall_quantity`. A `PROJECTED_BREACH` risk that prices to
     0.0 (inside grace, or no applicable rule matched) is reported back as
-    `SLIPPING`; a `BREACHED` risk that prices to 0.0 stays `BREACHED`.
+    `SLIPPING`; a `BREACHED` risk that prices to 0.0 stays `BREACHED`. Either way
+    `zero_reason` says which: `NO_APPLICABLE_RULE` (no live rule covers this breach, so
+    nothing was priced) or `WITHIN_GRACE_OR_THRESHOLD` (rules exist and charge nothing).
     """
     applicable_rules = _select_rules(risk_type, rules)
     charges = []
@@ -111,12 +121,16 @@ def price_risk(
     )
 
     downgraded_status = "SLIPPING" if total == 0.0 and status == "PROJECTED_BREACH" else status
+    zero_reason = None
+    if total == 0.0:
+        zero_reason = NO_APPLICABLE_RULE if not applicable_rules else WITHIN_GRACE_OR_THRESHOLD
     return PricedRisk(
         risk_type=risk_type,
         status=downgraded_status,
         penalty_amount=round(total, 2),
         priced_rule_ids=priced_rule_ids,
         rule_breakdown=tuple(charges),
+        zero_reason=zero_reason,
     )
 
 
@@ -144,7 +158,7 @@ def _resolve_context(
     basis: PricingBasis,
 ) -> _PricingContext:
     """Resolve the shared inputs one rule prices a risk against, and records for its `RuleCharge`."""
-    unit_amount = _unit_amount(rule, basis)
+    unit_amount = _unit_amount(basis)
     order_qty = round(basis.quantity)
 
     if risk_type in _SHORTAGE_RISK_TYPES:
@@ -193,19 +207,20 @@ def _build_rule_charge(
         grace_period_days=rule.grace_period_days,
         chargeable_days=ctx.chargeable_days,
         amount=round(raw_amount, 2),
+        threshold_pct=rule.threshold_pct,
     )
 
 
-def _unit_amount(rule: PenaltyRule, basis: PricingBasis) -> float:
-    """Resolve the per-unit price a rule prices against.
+def _unit_amount(basis: PricingBasis) -> float:
+    """Resolve the per-unit price every rule prices against: the PO line price.
 
-    `PO_VALUE`-basis rules price off the PO line price; every other rule
-    prices off standard cost when known, falling back to the PO line price
-    otherwise.
+    A retailer's "cost of goods" is what it pays Mars, which is the PO line
+    price, so Mars's internal standard cost never enters a penalty. This is
+    the same unit price the dispute engine uses, so a projected penalty and
+    its later dispute recompute agree. `basis.unit_cost` is carried for
+    display in `calculation_detail` only.
     """
-    if rule.basis_type == "PO_VALUE":
-        return basis.unit_price
-    return basis.unit_cost if basis.unit_cost is not None else basis.unit_price
+    return basis.unit_price
 
 
 def _combine(amounts: Sequence[float], stacking_mode: str) -> float:

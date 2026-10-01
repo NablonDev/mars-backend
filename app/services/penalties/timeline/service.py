@@ -292,7 +292,8 @@ class TimelineProjectionService:
     def _pricing_basis(self, enriched_lines: list[dict]) -> PricingBasis:
         """Quantity-weighted unit price/cost across a plan's lines.
 
-        `unit_cost` is None unless every line has a known `standard_cost`.
+        Penalties price off `unit_price` only. `unit_cost` (None unless every
+        line has a known `standard_cost`) is informational, for display.
         """
         quantity = sum(line["planned_quantity"] for line in enriched_lines)
         if quantity <= 0:

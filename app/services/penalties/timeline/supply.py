@@ -52,6 +52,8 @@ class DemandCoverage:
     cause_available_date: date | None = None
     cause_baseline_date: date | None = None
     on_hand: float = 0.0
+    # Date of the latest late bucket this demand drew from, even if it was only partly covered.
+    last_late_date: date | None = None
 
 
 @dataclass(frozen=True)
@@ -159,6 +161,7 @@ def _allocate_one(demand: SupplyDemand, buckets: list[_Bucket], on_hand: float) 
         cause_available_date=cause_available_date,
         cause_baseline_date=cause_baseline_date,
         on_hand=on_hand,
+        last_late_date=last_late_date,
     )
 
 
@@ -253,7 +256,11 @@ def _build_plan_outcome(plan_id: str, lines: Sequence[DemandCoverage]) -> PlanSu
             cause_baseline_date=cause_baseline_date,
         )
 
-    covered_dates = [line.full_cover_date for line in lines if line.full_cover_date is not None]
+    # Nothing arrives on time and some quantity is never covered. What does arrive late still
+    # ships late, so the plan is pushed to the latest late arrival it draws on; only the
+    # never-covered quantity is SHORT. (Without this, partly covered lines would drop their
+    # late units from both the LATE and the SHORT risk.)
+    covered_dates = [line.last_late_date for line in lines if line.last_late_date is not None]
     return PlanSupplyOutcome(
         plan_id=plan_id,
         shortfall_quantity=sum(line.uncovered_quantity for line in lines),
