@@ -9,7 +9,7 @@ POGraphState.
 from __future__ import annotations
 
 import functools
-from typing import Literal
+from typing import Any, Literal
 
 from langgraph.types import interrupt
 
@@ -18,6 +18,23 @@ from app.repositories.cmir.cmir_record import CmirRecordRepository
 from app.repositories.common.master_data import MasterDataRepository
 from app.repositories.common.purchase_order import PurchaseOrderRepository
 from app.repositories.process.workflow import ProcessingErrorRepository
+
+
+def _normalize_po_line(po_line: dict[str, Any]) -> dict[str, Any]:
+    """Back-compat shim for LangGraph checkpoints written before the
+    customer_id/customer_material_code -> retailer_code/retailer_material_code
+    rename (approved final naming refactor). New checkpoints only ever
+    contain the new keys (PoValidationService._run_po_line has been updated
+    to write them) -- this only fires for threads that were already parked
+    at an interrupt before the rename and are now being resumed, so their
+    stored `po_line` state still has the old key names. Does not mutate the
+    database or the persisted checkpoint row itself; only normalizes the
+    in-memory dict for this node invocation's read."""
+    if "retailer_code" not in po_line and "customer_id" in po_line:
+        po_line["retailer_code"] = po_line["customer_id"]
+    if "retailer_material_code" not in po_line and "customer_material_code" in po_line:
+        po_line["retailer_material_code"] = po_line["customer_material_code"]
+    return po_line
 
 
 def _capture_errors(error_type: str):
@@ -87,10 +104,19 @@ class PoValidationNodes:
         Writes sap_material_number and cmir_match_found to state so
         route_after_cmir_validation can send the graph to check_material_master
         when a mapping was found, or to human_manual_cmir_entry when it wasn't.
+
+        `retailer_code`/`retailer_material_code` are read from graph state (the
+        application-level vocabulary, populated at ingest -- see
+        PoValidationService._run_po_line), not from any purchase_order_line
+        column directly -- the DB stores the same values under
+        common.retailer.retailer_code / purchase_order_line.retailer_material_code
+        instead. `_normalize_po_line` is a back-compat shim for threads whose
+        checkpoint predates the customer_id/customer_material_code ->
+        retailer_code/retailer_material_code rename.
         """
-        po_line = state["po_line"]
+        po_line = _normalize_po_line(state["po_line"])
         match = self._cmir_repository.find_latest_for_customer_material(
-            po_line["customer_id"], po_line["customer_material_code"]
+            po_line["retailer_code"], po_line["retailer_material_code"]
         )
         if match is None:
             return {"sap_material_number": None, "cmir_match_found": False}
@@ -135,15 +161,15 @@ class PoValidationNodes:
         Reached when validate_against_cmir found no existing mapping. The resume value
         supplies sap_material_number and an optional description for create_cmir_record.
         """
-        po_line = state["po_line"]
+        po_line = _normalize_po_line(state["po_line"])
         answer = interrupt(
             {
                 "reason": "manual_cmir_entry",
                 "po_line_id": state["po_line_id"],
                 "po_number": po_line["po_number"],
                 "po_line_number": po_line["po_line_number"],
-                "customer_id": po_line["customer_id"],
-                "customer_material_code": po_line["customer_material_code"],
+                "retailer_code": po_line["retailer_code"],
+                "retailer_material_code": po_line["retailer_material_code"],
             }
         )
         return {
@@ -160,32 +186,66 @@ class PoValidationNodes:
         """
         material = state["material"]
         po_line = state["po_line"]
-        # follow_up_material_id is a FK to common.material.id, a plant-agnostic identity
-        # rather than a per-plant SAP material number, and MasterDataRepository can only
-        # look up by sap_material_number. It is surfaced stringified so the use_substitute
-        # path still round-trips; resolving it at this plant remains an open gap.
+        # material_master.follow_up_material_id is a FK to common.material.id (a
+        # plant-agnostic material identity), not a per-plant SAP material number
+        # (see app.models.common.material.MaterialMaster) -- resolved here via
+        # MasterDataRepository.find_material_master_by_material_id(material_id,
+        # plant_id), which didn't exist until this fix. Previously this was
+        # surfaced as the raw stringified UUID under
+        # "suggested_substitute_material_code" -- not just a display gap:
+        # PoValidationService.submit_qty_mismatch_decision's `_require_material`
+        # call validates that value as a `sap_material_number`, so accepting the
+        # old suggestion as-is would have failed validation. Resolving it here
+        # to the real SAP number (plus description/available_quantity for the
+        # UI) fixes that and gives a genuinely submittable suggestion.
         follow_up_material_id = material.get("follow_up_material_id")
+        suggested_substitute_material_code: str | None = None
+        suggested_substitute_description: str | None = None
+        suggested_substitute_available_quantity: float | None = None
+        # Display-only: common.material.material_code, distinct from
+        # suggested_substitute_material_code above (which stays the real,
+        # submittable sap_material_number -- unchanged). Never used for
+        # resubmission, only so the UI can show the substitute's real
+        # business material code alongside its SAP number and quantity.
+        suggested_substitute_business_material_code: str | None = None
+        if follow_up_material_id:
+            substitute_master = self._master_data_repository.find_material_master_by_material_id(
+                follow_up_material_id, material["plant_id"]
+            )
+            if substitute_master is not None:
+                suggested_substitute_material_code = substitute_master["sap_material_number"]
+                suggested_substitute_description = substitute_master.get("description")
+                suggested_substitute_available_quantity = substitute_master.get("available_quantity")
+                suggested_substitute_business_material_code = substitute_master.get("material_code")
+            # else: the follow-up material has no master record at this same
+            # plant -- genuinely no honest suggestion to offer, stays None
+            # rather than falling back to the raw UUID.
+
         answer = interrupt(
             {
                 "reason": "qty_mismatch_decision",
                 "po_line_id": state["po_line_id"],
                 "candidate": {
                     "sap_material_number": material["sap_material_number"],
-                    "plant_id": material["plant_id"],
+                    # CandidateInfo (app/schemas/po_validation/threads.py) requires a
+                    # human-readable "plant" code, not the plant_id UUID material.plant_id
+                    # carries -- po_line["plant"] is the same plant_code string the
+                    # ingest payload/get_or_create_plant already established
+                    # (service.py::_run_po_line), so no repository lookup is needed here.
+                    "plant": po_line["plant"],
                     "available_quantity": material["available_quantity"],
                     "shortfall": po_line["order_quantity"] - material["available_quantity"],
-                    "suggested_substitute_material_code": (
-                        str(follow_up_material_id) if follow_up_material_id else None
-                    ),
+                    "suggested_substitute_material_code": suggested_substitute_material_code,
+                    "suggested_substitute_description": suggested_substitute_description,
+                    "suggested_substitute_available_quantity": suggested_substitute_available_quantity,
+                    "suggested_substitute_business_material_code": suggested_substitute_business_material_code,
                 },
             }
         )
         decision = answer["decision"]
         result: POGraphState = {"decision": decision}
         if decision == "use_substitute":
-            substitute = answer.get("substitute_material_code") or (
-                str(follow_up_material_id) if follow_up_material_id else None
-            )
+            substitute = answer.get("substitute_material_code") or suggested_substitute_material_code
             result["sap_material_number"] = substitute
         return result
 
@@ -198,14 +258,17 @@ class PoValidationNodes:
         Requires sap_material_number; raises ValueError otherwise, which _capture_errors
         turns into a routed SYSTEM_ERROR. The graph then re-runs check_material_master.
         """
-        po_line = state["po_line"]
+        po_line = _normalize_po_line(state["po_line"])
         sap_material_number = state["sap_material_number"]
         if sap_material_number is None:
             raise ValueError("create_cmir_record reached with no sap_material_number recorded")
+        # cmir.cmir_record's own columns (customer_identity/target_customer_material_ref)
+        # are CMIR-domain terminology, out of scope for the retailer_code/
+        # retailer_material_code rename -- only the PO-side source values change name.
         self._cmir_repository.create_manual_mapping(
-            customer_identity=po_line["customer_id"],
+            customer_identity=po_line["retailer_code"],
             material_identity=sap_material_number,
-            target_customer_material_ref=po_line["customer_material_code"],
+            target_customer_material_ref=po_line["retailer_material_code"],
             description=state.get("manual_entry_description", ""),
         )
         return {}

@@ -6,6 +6,7 @@ from datetime import date, datetime
 from uuid import UUID
 
 from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -132,6 +133,9 @@ class MasterDataRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
+    def _is_postgres(self) -> bool:
+        return self._session.bind is not None and self._session.bind.dialect.name == "postgresql"
+
     # ------------------------------------------------------------------
     # Retailer
     # ------------------------------------------------------------------
@@ -181,6 +185,67 @@ class MasterDataRepository:
         """Fetch a retailer by its natural key `retailer_code`, or None if not found."""
         row = self._session.scalars(select(Retailer).where(Retailer.retailer_code == retailer_code)).first()
         return _retailer_to_dict(row) if row is not None else None
+
+    def get_or_create_retailer(
+        self,
+        retailer_code: str,
+        retailer_name: str,
+        priority_tier: str | None,
+        stacking_mode: str = "SUM",
+        source_system: str | None = None,
+        extension_min_lead_days: int = 2,
+        extension_response_sla_hours: int = 48,
+        extension_penalty_threshold: float = 0.0,
+    ) -> dict:
+        """Atomic get-or-create for `common.retailer`, keyed on `retailer_code`
+        (`ix_retailer_retailer_code`, unique) -- for PO-validation ingestion
+        (`PoValidationService._ingest_one_line`), which needs "the row for
+        this code, creating it on first sight" and must never raise on a
+        concurrent creator winning the race.
+
+        Distinct from `add_retailer` (unconditional insert, used by the
+        direct `POST /retailers` admin route) -- that method and
+        `get_retailer_by_code` are unchanged by this method's existence.
+
+        Uses `INSERT ... ON CONFLICT (retailer_code) DO NOTHING` + a
+        re-SELECT, the same precedent already used in
+        `app.repositories.process.job_queue.JobQueueRepository.enqueue_many`.
+        On a non-Postgres engine (the SQLite unit-test fixture), falls back
+        to a plain check-then-insert -- safe only for a single-threaded
+        caller, identical caveat to that existing precedent; the real
+        concurrency guarantee is the Postgres unique index.
+        """
+        if self._is_postgres():
+            stmt = pg_insert(Retailer).values(
+                retailer_code=retailer_code,
+                retailer_name=retailer_name,
+                priority_tier=priority_tier,
+                stacking_mode=stacking_mode,
+                source_system=source_system,
+                extension_min_lead_days=extension_min_lead_days,
+                extension_response_sla_hours=extension_response_sla_hours,
+                extension_penalty_threshold=extension_penalty_threshold,
+            )
+            stmt = stmt.on_conflict_do_nothing(index_elements=["retailer_code"])
+            self._session.execute(stmt)
+            self._session.flush()
+            return _retailer_to_dict(
+                self._session.scalars(select(Retailer).where(Retailer.retailer_code == retailer_code)).one()
+            )
+
+        existing = self.get_retailer_by_code(retailer_code)
+        if existing is not None:
+            return existing
+        return self.add_retailer(
+            retailer_code,
+            retailer_name,
+            priority_tier,
+            stacking_mode,
+            source_system,
+            extension_min_lead_days,
+            extension_response_sla_hours,
+            extension_penalty_threshold,
+        )
 
     def list_retailers(self) -> list[dict]:
         """List every retailer, in no guaranteed order."""
@@ -237,9 +302,26 @@ class MasterDataRepository:
         rows = self._session.scalars(select(Material)).all()
         return [_material_to_dict(r) for r in rows]
 
+    def list_material_rows(self) -> list[Material]:
+        """Every `Material`, as raw ORM objects -- for bulk consumers that
+        need full attribute access (e.g. the ontology materialize job's
+        `OntologyBuilder`), not the narrower dict shape `list_materials`
+        returns for API responses."""
+        return list(self._session.scalars(select(Material)).all())
+
     def get_material_by_code(self, material_code: str) -> dict | None:
         """Fetch a material by its natural key `material_code`, or None if not found."""
         row = self._session.scalars(select(Material).where(Material.material_code == material_code)).first()
+        return _material_to_dict(row) if row is not None else None
+
+    def get_material_by_id(self, material_id: UUID) -> dict | None:
+        """Reverse of `get_material_by_code` -- needed wherever only a FK
+        value (e.g. `MaterialMaster.follow_up_material_id`) is on hand and
+        the caller needs that Material's own natural key back for display,
+        not just its id (see `app/agents/ontology_update/nodes.py`'s
+        `build_proposal`, which shows a proposal's *current* value by
+        material_code, not by opaque UUID)."""
+        row = self._session.get(Material, material_id)
         return _material_to_dict(row) if row is not None else None
 
     def add_material_master(
@@ -286,6 +368,49 @@ class MasterDataRepository:
         rows = self._session.scalars(select(MaterialMaster)).all()
         return [_material_master_to_dict(r) for r in rows]
 
+    def list_material_master_rows(self) -> list[MaterialMaster]:
+        """Every `MaterialMaster`, as raw ORM objects -- see
+        `list_material_rows`'s docstring for why this exists alongside the
+        dict-returning `list_material_masters`."""
+        return list(self._session.scalars(select(MaterialMaster)).all())
+
+    def list_material_masters_for_material(self, material_id: UUID) -> list[dict]:
+        """Every `MaterialMaster` row for one `Material`, across every plant
+        it has stock at. `MaterialMaster` is one row per `(material_id,
+        plant_id)` (`uq_material_master_material_plant`) -- a material with
+        rows at more than one plant has no single unambiguous
+        `MaterialMaster` to resolve to from the material code alone. This
+        is exactly the read a caller needs to detect that ambiguity (return
+        `clarification_required` rather than guessing a plant) before
+        attempting any write; see `app/agents/ontology_update/nodes.py`."""
+        rows = self._session.scalars(
+            select(MaterialMaster).where(MaterialMaster.material_id == material_id)
+        ).all()
+        return [_material_master_to_dict(r) for r in rows]
+
+    def update_material_master_follow_up(
+        self, *, material_master_id: UUID, follow_up_material_id: UUID | None
+    ) -> dict | None:
+        """Set an existing `MaterialMaster` row's `follow_up_material_id` --
+        the only write this repository has for `material_master` beyond the
+        unconditional-insert `add_material_master`. Identifies the row by
+        its own primary key (already resolved by the caller, e.g.
+        `app.agents.ontology_update.nodes.resolve_target`, which is what
+        disambiguates plant scoping *before* any write is attempted) rather
+        than re-deriving it from `(material_id, plant_id)` here.
+
+        Returns `None` if no such row exists (caller's job to treat that as
+        an error, not this method's -- it stays a pure, honest "did this
+        write happen" signal). `TimestampMixin.updated_at` bumps itself via
+        the column's own `onupdate=func.now()`; nothing here sets it by hand.
+        """
+        row = self._session.get(MaterialMaster, material_master_id)
+        if row is None:
+            return None
+        row.follow_up_material_id = follow_up_material_id
+        self._session.flush()
+        return _material_master_to_dict(row)
+
     def find_material_master(self, sap_material_number: str, plant_id: UUID) -> dict | None:
         """Fetch a material_master by SAP number and plant, or None if not found."""
         row = self._session.scalars(
@@ -295,6 +420,37 @@ class MasterDataRepository:
             )
         ).first()
         return _material_master_to_dict(row) if row is not None else None
+
+    def find_material_master_by_material_id(self, material_id: UUID, plant_id: UUID) -> dict | None:
+        """Resolve a `MaterialMaster.follow_up_material_id` (a `common.material.id`)
+        to its real, plant-specific SAP number/description/available quantity --
+        `uq_material_master_material_plant` makes `(material_id, plant_id)` unique,
+        so this is a direct lookup, not a guess. Used by
+        `app/agents/po_validation/nodes.py::human_qty_mismatch_decision` so the
+        qty-mismatch candidate's suggested substitute is a real, submittable SAP
+        material number instead of the raw `follow_up_material_id` UUID (which
+        `_require_material` cannot match against any `sap_material_number` --
+        see that call site's history for the bug this fixes, not just a display
+        gap).
+
+        Also joins `common.material` for `material_code` -- the business-facing
+        code (distinct from `sap_material_number`, which is per-plant/logistics)
+        -- so the UI can show the substitute's real material code, not just its
+        SAP number."""
+        row = self._session.execute(
+            select(MaterialMaster, Material.material_code)
+            .join(Material, Material.id == MaterialMaster.material_id)
+            .where(
+                MaterialMaster.material_id == material_id,
+                MaterialMaster.plant_id == plant_id,
+            )
+        ).first()
+        if row is None:
+            return None
+        master_row, material_code = row
+        result = _material_master_to_dict(master_row)
+        result["material_code"] = material_code
+        return result
 
     # ------------------------------------------------------------------
     # Plant / StorageLocation / Warehouse
@@ -314,10 +470,39 @@ class MasterDataRepository:
         row = self._session.scalars(select(Plant).where(Plant.plant_code == plant_code)).first()
         return _plant_to_dict(row) if row is not None else None
 
+    def get_or_create_plant(
+        self, plant_code: str, plant_name: str | None = None, country_code: str | None = None
+    ) -> dict:
+        """Atomic get-or-create for `common.plant`, keyed on `plant_code`
+        (`ix_plant_plant_code`, unique) -- see `get_or_create_retailer`'s
+        docstring for the full rationale/precedent; `add_plant`/
+        `get_plant_by_code` are unchanged."""
+        if self._is_postgres():
+            stmt = pg_insert(Plant).values(
+                plant_code=plant_code, plant_name=plant_name, country_code=country_code
+            )
+            stmt = stmt.on_conflict_do_nothing(index_elements=["plant_code"])
+            self._session.execute(stmt)
+            self._session.flush()
+            return _plant_to_dict(
+                self._session.scalars(select(Plant).where(Plant.plant_code == plant_code)).one()
+            )
+
+        existing = self.get_plant_by_code(plant_code)
+        if existing is not None:
+            return existing
+        return self.add_plant(plant_code, plant_name, country_code)
+
     def list_plants(self) -> list[dict]:
         """List every plant, in no guaranteed order."""
         rows = self._session.scalars(select(Plant)).all()
         return [_plant_to_dict(r) for r in rows]
+
+    def list_plant_rows(self) -> list[Plant]:
+        """Every `Plant`, as raw ORM objects -- see `list_material_rows`'s
+        docstring for why this exists alongside the dict-returning
+        `list_plants`."""
+        return list(self._session.scalars(select(Plant)).all())
 
     def add_storage_location(
         self, plant_id: UUID, storage_location_code: str, storage_location_name: str | None = None

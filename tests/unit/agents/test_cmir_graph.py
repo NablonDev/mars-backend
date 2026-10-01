@@ -20,13 +20,16 @@ class FakeTraceRepo:
 
 
 class FakeEmailReader:
-    def __init__(self) -> None:
+    def __init__(self, *, fail_mark_as_read: bool = False) -> None:
         self.marked_read = []
+        self._fail_mark_as_read = fail_mark_as_read
 
     def fetch_unread(self, **kwargs):
         return []
 
     def mark_as_read(self, imap_id):
+        if self._fail_mark_as_read:
+            raise RuntimeError("STORE command error: BAD [b'Could not parse command']")
         self.marked_read.append(imap_id)
 
 
@@ -103,8 +106,10 @@ def _email_payload(**overrides):
 
 
 class CmirWorkflowGraphTests(unittest.TestCase):
-    def _build(self, *, current=None, conflict: bool = False, extractor_cmir: Cmir):
-        self.email_reader = FakeEmailReader()
+    def _build(
+        self, *, current=None, conflict: bool = False, extractor_cmir: Cmir, fail_mark_as_read: bool = False
+    ):
+        self.email_reader = FakeEmailReader(fail_mark_as_read=fail_mark_as_read)
         self.email_repository = FakeEmailRepository()
         self.cmir_repository = FakeCmirRepository(current=current, conflict=conflict)
         self.action_log = FakeActionLogRepository()
@@ -286,6 +291,33 @@ class CmirWorkflowGraphTests(unittest.TestCase):
 
         self.assertEqual(len(self.cmir_repository.inserted), 0)
         self.assertIn("imap-1", self.email_reader.marked_read)
+
+    def test_approval_still_commits_when_marking_email_read_fails(self) -> None:
+        """Regression guard: mark_email_read runs last on every decision path,
+        in the same graph.invoke() call (and DB transaction) as the approval
+        that already committed in an earlier node -- an IMAP failure here
+        (stale/reused sequence number, deleted message, transient network
+        issue, ...) must not roll back a reviewer's already-recorded
+        decision. Previously this raised and aborted the whole graph.invoke(),
+        which meant the approval was silently never persisted."""
+        complete_cmir = Cmir(
+            sender_type="external",
+            customer_identity="Acme Manufacturing Ltd",
+            material_identity="Polyethylene Resin PE-200",
+            intent_phrase="update",
+            existing_cmir_ref="CMIR-1",
+            brand="AcmePlast",
+            site="Site 12",
+            target_customer_material_ref="ACME-PE200-STD",
+        )
+        graph = self._build(current=None, extractor_cmir=complete_cmir, fail_mark_as_read=True)
+
+        graph.invoke(self._initial_state("t6"), config=self._config("t6"))
+        state = graph.invoke(Command(resume={"decision": "approve"}), config=self._config("t6"))
+
+        self.assertNotIn(INTERRUPT_KEY, state)
+        self.assertEqual(len(self.cmir_repository.inserted), 1)
+        self.assertEqual([], self.email_reader.marked_read)
 
 
 if __name__ == "__main__":

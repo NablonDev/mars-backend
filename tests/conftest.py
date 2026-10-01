@@ -224,6 +224,20 @@ class _FakePoValidationService:
     the `po_validation_service` fixture below."""
 
 
+class _FakeOntologyUpdateRunService:
+    """Same purpose as `_FakeCmirService`, for
+    `app.state.ontology_update_service` / the `ontology_update_service`
+    fixture below -- `build_ontology_update_service()` -> `Container.build()`
+    opens the same real Postgres-backed checkpointer, which no test using
+    these fixtures should ever need."""
+
+
+class _FakeOntologyInsertRunService:
+    """Same purpose as `_FakeCmirService`, for
+    `app.state.ontology_insert_service` / the `ontology_insert_service`
+    fixture below."""
+
+
 @pytest.fixture
 def cmir_service() -> object:
     """Default fake for `app.state.service` -- override this fixture (same
@@ -241,7 +255,31 @@ def po_validation_service() -> object:
 
 
 @pytest.fixture
-def app(database: Database, cmir_service: object, po_validation_service: object):
+def ontology_update_service() -> object:
+    """Default fake for `app.state.ontology_update_service` -- override
+    this fixture (same name) in a test module to supply a fake
+    implementing the `OntologyUpdateRunService` methods your test's routes
+    actually call; see `tests/unit/api/test_api_ontology_update.py`."""
+    return _FakeOntologyUpdateRunService()
+
+
+@pytest.fixture
+def ontology_insert_service() -> object:
+    """Default fake for `app.state.ontology_insert_service` -- override
+    this fixture (same name) in a test module to supply a fake
+    implementing the `OntologyInsertRunService` methods your test's routes
+    actually call; see `tests/unit/api/test_api_ontology_insert.py`."""
+    return _FakeOntologyInsertRunService()
+
+
+@pytest.fixture
+def app(
+    database: Database,
+    cmir_service: object,
+    po_validation_service: object,
+    ontology_update_service: object,
+    ontology_insert_service: object,
+):
     """A real `create_app()` FastAPI app, wired to the SQLite `database`
     fixture instead of a Postgres-backed lifespan.
 
@@ -259,7 +297,12 @@ def app(database: Database, cmir_service: object, po_validation_service: object)
     from app.api.dependencies import get_job_queue, get_llm_client, require_internal_api_key
     from app.main import create_app
 
-    test_app = create_app(service=cmir_service, po_service=po_validation_service)
+    test_app = create_app(
+        service=cmir_service,
+        po_service=po_validation_service,
+        ontology_update_service=ontology_update_service,
+        ontology_insert_service=ontology_insert_service,
+    )
     test_app.state.database = database
 
     test_app.dependency_overrides[require_internal_api_key] = lambda: None

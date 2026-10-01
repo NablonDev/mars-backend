@@ -1,0 +1,85 @@
+@prefix mars: <https://ontology.mars-cmir.nablon.ai/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+# Shared vocabulary for the CMIR <-> Material Master traceability graph.
+#
+# Descriptive only -- classes and properties, no OWL restrictions or
+# equivalence/disjointness axioms. Nothing here is meant to be interpreted
+# by a DL reasoner; a reasoning/inference layer over this same vocabulary
+# is a deferred, separate piece of work. `succeededBy` is asserted per
+# discontinued MaterialMaster row and walked transitively at query time via
+# a SPARQL 1.1 property path (`mars:succeededBy*`), not via an OWL
+# `owl:TransitiveProperty` axiom.
+
+mars:CmirRecord a owl:Class ;
+    rdfs:label "CMIR Record" ;
+    rdfs:comment "A current (is_current = true) customer-material mapping resolved from an inbound email." .
+
+mars:Material a owl:Class ;
+    rdfs:label "Material" ;
+    rdfs:comment "Plant-agnostic material identity (common.material)." .
+
+mars:MaterialMaster a owl:Class ;
+    rdfs:label "Material Master" ;
+    rdfs:comment "Per-plant material/stock detail (common.material_master); one row per (material, plant)." .
+
+mars:Plant a owl:Class ;
+    rdfs:label "Plant" ;
+    rdfs:comment "A manufacturing/distribution plant (common.plant)." .
+
+mars:referencesMaterial a owl:ObjectProperty ;
+    rdfs:label "references material" ;
+    rdfs:domain mars:CmirRecord ;
+    rdfs:range mars:Material ;
+    rdfs:comment "Links a CMIR record to the internal Material its material_identity resolves to." .
+
+mars:hasPlantRecord a owl:ObjectProperty ;
+    rdfs:label "has plant record" ;
+    rdfs:domain mars:Material ;
+    rdfs:range mars:MaterialMaster ;
+    rdfs:comment "Links a Material to one of its per-plant MaterialMaster rows." .
+
+mars:locatedAtPlant a owl:ObjectProperty ;
+    rdfs:label "located at plant" ;
+    rdfs:domain mars:MaterialMaster ;
+    rdfs:range mars:Plant .
+
+mars:succeededBy a owl:ObjectProperty ;
+    rdfs:label "succeeded by" ;
+    rdfs:domain mars:MaterialMaster ;
+    rdfs:range mars:Material ;
+    rdfs:comment "From MaterialMaster.follow_up_material_id -- the Material that replaces a discontinued MaterialMaster row." .
+
+mars:brand a owl:DatatypeProperty ;
+    rdfs:domain mars:CmirRecord ;
+    rdfs:range xsd:string .
+
+mars:site a owl:DatatypeProperty ;
+    rdfs:domain mars:CmirRecord ;
+    rdfs:range xsd:string .
+
+mars:customerIdentity a owl:DatatypeProperty ;
+    rdfs:domain mars:CmirRecord ;
+    rdfs:range xsd:string .
+
+mars:targetCustomerMaterialRef a owl:DatatypeProperty ;
+    rdfs:domain mars:CmirRecord ;
+    rdfs:range xsd:string .
+
+mars:materialCode a owl:DatatypeProperty ;
+    rdfs:domain mars:Material ;
+    rdfs:range xsd:string .
+
+mars:plantCode a owl:DatatypeProperty ;
+    rdfs:domain mars:Plant ;
+    rdfs:range xsd:string .
+
+mars:sapMaterialNumber a owl:DatatypeProperty ;
+    rdfs:domain mars:MaterialMaster ;
+    rdfs:range xsd:string .
+
+mars:discontinuationIndicator a owl:DatatypeProperty ;
+    rdfs:domain mars:MaterialMaster ;
+    rdfs:range xsd:string .

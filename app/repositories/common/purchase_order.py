@@ -7,6 +7,7 @@ from datetime import date
 from uuid import UUID
 
 from sqlalchemy import delete, func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import ConflictError, NotFoundError
@@ -86,6 +87,9 @@ class PurchaseOrderRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
+    def _is_postgres(self) -> bool:
+        return self._session.bind is not None and self._session.bind.dialect.name == "postgresql"
+
     def _get_row(self, purchase_order_id: UUID) -> PurchaseOrder | None:
         """Fetch the ORM row for a purchase order id, or None if not found."""
         return self._session.get(PurchaseOrder, purchase_order_id)
@@ -126,6 +130,41 @@ class PurchaseOrderRepository:
         """Fetch a purchase order by its business number, or None if not found."""
         row = self._get_row_by_number(purchase_order_number)
         return _purchase_order_to_dict(row) if row is not None else None
+
+    def get_or_create_purchase_order(self, purchase_order_number: str, **fields) -> dict:
+        """Atomic get-or-create for `common.purchase_order`, keyed on
+        `purchase_order_number` (`ix_purchase_order_purchase_order_number`,
+        unique) -- for PO-validation ingestion only
+        (`PoValidationService._ingest_one_line`).
+
+        Deliberately separate from `create_purchase_order`: that method
+        keeps its existing hard-create contract unchanged (raises
+        `ConflictError(PO_ALREADY_EXISTS)` for a caller that wants to fail
+        on a duplicate) -- this method never raises for the normal
+        concurrent-ingestion case, resolving to whichever row exists
+        (already there, or the winner of a concurrent create) either way.
+        Uses `INSERT ... ON CONFLICT (purchase_order_number) DO NOTHING` +
+        re-SELECT, same precedent as
+        `MasterDataRepository.get_or_create_retailer`/`get_or_create_plant`.
+        On non-Postgres (SQLite unit tests), falls back to a plain
+        check-then-insert -- safe only single-threaded, same caveat as
+        those methods; the real concurrency guarantee is the Postgres
+        unique index.
+        """
+        if self._is_postgres():
+            stmt = pg_insert(PurchaseOrder).values(purchase_order_number=purchase_order_number, **fields)
+            stmt = stmt.on_conflict_do_nothing(index_elements=["purchase_order_number"])
+            self._session.execute(stmt)
+            self._session.flush()
+            return _purchase_order_to_dict(self._get_row_by_number(purchase_order_number))
+
+        existing = self.get_by_number(purchase_order_number)
+        if existing is not None:
+            return existing
+        row = PurchaseOrder(purchase_order_number=purchase_order_number, **fields)
+        self._session.add(row)
+        self._session.flush()
+        return _purchase_order_to_dict(row)
 
     def require_purchase_order(self, purchase_order_id: UUID) -> dict:
         """Fetch a purchase order by id, raising `NotFoundError` if it doesn't exist."""
@@ -227,6 +266,51 @@ class PurchaseOrderRepository:
         row = self._get_line_row(purchase_order_line_id)
         return _purchase_order_line_to_dict(row) if row is not None else None
 
+    def get_or_create_line(
+        self, purchase_order_id: UUID, line_number: str, ordered_quantity: float, **fields
+    ) -> dict:
+        """Atomic get-or-create for `common.purchase_order_line`, keyed on
+        `(purchase_order_id, line_number)` (`uq_purchase_order_line_po_line_number`,
+        unique) -- for PO-validation ingestion only.
+
+        First-write-wins/idempotent by design: a duplicate submission of the
+        same `(purchase_order_id, line_number)` -- whether sequential or a
+        genuine concurrent race -- returns the EXISTING row unchanged;
+        `ordered_quantity`/`**fields` are only used the first time this pair
+        is seen and are never used to overwrite already-stored line data on
+        a later call. Distinct from `add_line` (unconditional insert),
+        which is unchanged. Same Postgres `ON CONFLICT ... DO NOTHING` +
+        re-SELECT / SQLite check-then-insert-fallback shape as the other
+        three `get_or_create_*` methods.
+        """
+        if self._is_postgres():
+            stmt = pg_insert(PurchaseOrderLine).values(
+                purchase_order_id=purchase_order_id,
+                line_number=line_number,
+                ordered_quantity=ordered_quantity,
+                **fields,
+            )
+            stmt = stmt.on_conflict_do_nothing(index_elements=["purchase_order_id", "line_number"])
+            self._session.execute(stmt)
+            self._session.flush()
+            row = self._session.scalars(
+                select(PurchaseOrderLine).where(
+                    PurchaseOrderLine.purchase_order_id == purchase_order_id,
+                    PurchaseOrderLine.line_number == line_number,
+                )
+            ).one()
+            return _purchase_order_line_to_dict(row)
+
+        existing = self._session.scalars(
+            select(PurchaseOrderLine).where(
+                PurchaseOrderLine.purchase_order_id == purchase_order_id,
+                PurchaseOrderLine.line_number == line_number,
+            )
+        ).first()
+        if existing is not None:
+            return _purchase_order_line_to_dict(existing)
+        return self.add_line(purchase_order_id, line_number, ordered_quantity, **fields)
+
     def update_line_status(self, purchase_order_line_id: UUID, line_status: str) -> None:
         """Set a PO line's `line_status`, raising `NotFoundError` if the line is unknown."""
         row = self._get_line_row(purchase_order_line_id)
@@ -247,6 +331,43 @@ class PurchaseOrderRepository:
             .order_by(PurchaseOrderLine.line_number.asc())
         ).all()
         return [_purchase_order_line_to_dict(r) for r in rows]
+
+    def list_recent_lines(self, limit: int = 5) -> list[dict]:
+        """Most recently created PO lines across all purchase orders, for the
+        CMIR Intelligence Module's "PO Audit Trail" panel -- no existing query
+        lists lines across POs (list_lines is scoped to one purchase_order_id),
+        so this is a new, real, read-only query: no schema change, real
+        columns only. `func.coalesce(line.requested_delivery_date,
+        po.current_delivery_date, po.requested_delivery_date)` picks the same
+        "effective delivery date" precedence _purchase_order_to_dict's own
+        current_delivery_date comment documents (falls back when the line
+        itself doesn't carry its own date)."""
+        rows = self._session.execute(
+            select(
+                PurchaseOrder.purchase_order_number,
+                PurchaseOrderLine.retailer_material_code,
+                PurchaseOrderLine.ordered_quantity,
+                PurchaseOrderLine.line_status,
+                func.coalesce(
+                    PurchaseOrderLine.requested_delivery_date,
+                    PurchaseOrder.current_delivery_date,
+                    PurchaseOrder.requested_delivery_date,
+                ).label("delivery_date"),
+            )
+            .join(PurchaseOrder, PurchaseOrder.id == PurchaseOrderLine.purchase_order_id)
+            .order_by(PurchaseOrderLine.created_at.desc())
+            .limit(limit)
+        ).all()
+        return [
+            {
+                "purchase_order_number": r.purchase_order_number,
+                "retailer_material_code": r.retailer_material_code,
+                "ordered_quantity": float(r.ordered_quantity),
+                "line_status": r.line_status,
+                "delivery_date": r.delivery_date,
+            }
+            for r in rows
+        ]
 
     def list_lines_by_status(
         self,

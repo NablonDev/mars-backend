@@ -89,8 +89,8 @@ def test_create_purchase_order_lines_returns_accepted_batch(client):
                 {
                     "po_number": "PO-1",
                     "po_line_number": "10",
-                    "customer_id": "CUST-1",
-                    "customer_material_code": "ACME-MAT-1",
+                    "retailer_code": "CUST-1",
+                    "retailer_material_code": "ACME-MAT-1",
                     "plant": "1000",
                     "order_quantity": 100,
                 }
@@ -174,3 +174,15 @@ def test_list_purchase_order_lines_for_unknown_order_returns_404(client):
 
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "PO_NOT_FOUND"
+
+
+def test_po_audit_trail_returns_the_most_recent_line_first(client, purchase_order_with_line):
+    response = client.get("/api/v1/po-audit-trail", params={"limit": 5})
+
+    assert response.status_code == 200, response.text
+    items = response.json()["data"]
+    assert len(items) >= 1
+    assert items[0]["po_number"] == "PO-POV-001"
+    assert items[0]["quantity"] == 100
+    assert items[0]["status"] == "OPEN"
+    assert items[0]["delivery_date"] == "2026-08-10"

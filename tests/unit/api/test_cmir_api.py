@@ -54,6 +54,68 @@ class FakeCmirService:
             "updated_at": None,
         }
 
+    def get_health_snapshot(self, *, stale_days=180, attention_limit=50):
+        return {
+            "total_current": 2,
+            "healthy_current": 1,
+            "unhealthy_breakdown": [
+                {"category": "stale_validation", "count": 1},
+                {"category": "missing_required_field", "count": 0},
+                {"category": "duplicate_row", "count": 0},
+            ],
+            "creation_trend": [{"month": "2026-09", "count": 2}],
+            "needing_attention": [
+                {
+                    "id": "11111111-1111-1111-1111-111111111111",
+                    "customer_identity": "Acme Manufacturing Ltd",
+                    "target_customer_material_ref": "ACME-PE200-STD",
+                    "target_grd_code": "GRD-1",
+                    "brand": "AcmePlast",
+                    "site": "Site A",
+                    "valid_from": "2026-01-01T00:00:00+00:00",
+                    "reasons": ["stale_validation"],
+                }
+            ],
+        }
+
+    def get_health_trend(self, *, months=6, stale_days=180):
+        return [
+            {"month": "2026-08", "total": 2, "healthy": 1},
+            {"month": "2026-09", "total": 3, "healthy": 2},
+        ]
+
+    def list_pending_emails(self, *, limit=50):
+        return [
+            {
+                "id": "33333333-3333-3333-3333-333333333333",
+                "sender": "customer@example.com",
+                "subject": "Update CMIR mapping",
+                "raw_content": "Please update our material reference.",
+                "queue_status": "queued",
+                "queued_at": "2026-09-25T00:00:00+00:00",
+                "processing_started_at": None,
+                "queue_delivery_count": 0,
+                "created_at": "2026-09-25T00:00:00+00:00",
+            }
+        ]
+
+    def process_pending_email(self, email_id):
+        return {"stage": "COMPLETED_APPROVED", "email_id": str(email_id)}
+
+    def get_housekeeping_audit_log(self, *, limit=10):
+        return [
+            {
+                "id": "22222222-2222-2222-2222-222222222222",
+                "timestamp": "2026-09-24T00:00:00+00:00",
+                "action": "Create",
+                "customer_identity": "Acme Manufacturing Ltd",
+                "target_grd_code": "GRD-1",
+                "target_customer_material_ref": "ACME-PE200-STD",
+                "executed_by": None,
+                "outcome": None,
+            }
+        ]
+
 
 @pytest.fixture
 def cmir_service():
@@ -91,3 +153,59 @@ def test_process_queued_email_wraps_result_in_envelope(client):
     assert response.status_code == 200, response.text
     body = response.json()["data"]
     assert body["stage"] == "COMPLETED_APPROVED"
+
+
+def test_get_cmir_health_returns_envelope_wrapped_snapshot(client):
+    response = client.get("/api/v1/cmir-records/health")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["success"] is True
+    data = body["data"]
+    assert data["total_current"] == 2
+    assert data["healthy_current"] == 1
+    assert data["needing_attention"][0]["reasons"] == ["stale_validation"]
+
+
+def test_get_cmir_health_trend_returns_envelope_wrapped_points(client):
+    response = client.get("/api/v1/cmir-records/health-trend")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["success"] is True
+    data = body["data"]
+    assert data[-1]["month"] == "2026-09"
+    assert data[-1]["total"] == 3
+    assert data[-1]["healthy"] == 2
+
+
+def test_list_pending_emails_returns_envelope_wrapped_queue(client):
+    response = client.get("/api/v1/cmir/email-events/pending")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["success"] is True
+    assert body["data"][0]["sender"] == "customer@example.com"
+    assert body["data"][0]["queue_status"] == "queued"
+
+
+def test_process_pending_email_returns_envelope_wrapped_result(client):
+    response = client.post(
+        "/api/v1/cmir/email-events/33333333-3333-3333-3333-333333333333/process"
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["success"] is True
+    assert body["data"]["stage"] == "COMPLETED_APPROVED"
+
+
+def test_get_cmir_housekeeping_audit_log_returns_envelope_wrapped_entries(client):
+    response = client.get("/api/v1/cmir-records/housekeeping-audit-log")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["success"] is True
+    data = body["data"]
+    assert data[0]["action"] == "Create"
+    assert data[0]["executed_by"] is None

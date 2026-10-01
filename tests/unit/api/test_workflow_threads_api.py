@@ -16,6 +16,7 @@ from uuid import UUID
 import pytest
 
 from app.core.exceptions import NotFoundError
+from app.schemas.cmir import CMIR_CONTENT_FIELDS
 
 THREAD_CMIR = UUID("11111111-1111-1111-1111-111111111111")
 THREAD_PO = UUID("22222222-2222-2222-2222-222222222222")
@@ -69,9 +70,11 @@ class FakeCmirService:
     def get_snapshot(self, thread_id):
         # Domain-agnostic-permissive at the repository level -- succeeds
         # regardless of which domain actually owns the thread (see
-        # `app/api/v1/workflow_threads.py`'s docstring).
+        # `app/api/v1/workflow_threads.py`'s docstring). `editable_fields` is
+        # required on `CmirThreadSnapshotResponse` (F2) -- omitting it here
+        # would 500 every CMIR-snapshot test via a pydantic ValidationError.
         base = self.get_stage(thread_id)
-        return {**base, "history": []}
+        return {**base, "history": [], "editable_fields": list(CMIR_CONTENT_FIELDS)}
 
     def list_runs(self, *, view="threads", status=None, stage=None, agent_id=None, limit=50, cursor=None):
         return {"items": [_cmir_stage_dict(), _po_stage_dict()], "next_cursor": None}
@@ -107,7 +110,7 @@ class FakePoValidationService:
             "po_line_id": "66666666-6666-6666-6666-666666666666",
             "po_number": "PO-1",
             "po_line_number": "10",
-            "customer_material_code": "ACME-MAT-1",
+            "retailer_material_code": "ACME-MAT-1",
             "order_quantity": 100,
             "stage": "AWAITING_QTY_MISMATCH_DECISION",
             "candidate": {
@@ -203,6 +206,15 @@ def test_get_workflow_thread_include_snapshot_falls_back_to_cmir_service_for_cmi
     snapshot = response.json()["data"]["snapshot"]
     assert snapshot["id"] == str(THREAD_CMIR)
     assert snapshot["history"] == []
+
+
+def test_get_workflow_thread_snapshot_includes_editable_fields(client):
+    response = client.get(f"/api/v1/workflow-threads/{THREAD_CMIR}", params={"include": "snapshot"})
+
+    assert response.status_code == 200, response.text
+    snapshot = response.json()["data"]["snapshot"]
+    assert set(snapshot["editable_fields"]) == set(CMIR_CONTENT_FIELDS)
+    assert len(snapshot["editable_fields"]) == 11
 
 
 def test_get_workflow_thread_rejects_unknown_include_value(client):
