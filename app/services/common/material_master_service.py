@@ -71,9 +71,7 @@ class MaterialMasterService:
             "material_master_id": str(material_master["id"]),
         }
 
-    def update_replacement_material(
-        self, *, material_master_id: UUID, replacement_material_id: UUID
-    ) -> dict:
+    def update_replacement_material(self, *, material_master_id: UUID, replacement_material_id: UUID) -> dict:
         """Set `material_master_id`'s `succeededBy` target (physically,
         `follow_up_material_id`) to `replacement_material_id`.
 

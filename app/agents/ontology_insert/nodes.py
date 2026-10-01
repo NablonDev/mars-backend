@@ -172,13 +172,13 @@ class OntologyInsertNodes:
             {
                 "reason": "missing_required_fields",
                 "missing_fields": state["missing_fields"],
-                "message": (
-                    f"Please provide a value for each of: {', '.join(state['missing_fields'])}."
-                ),
+                "message": (f"Please provide a value for each of: {', '.join(state['missing_fields'])}."),
             }
         )
         details = answer.get("details") or {}
-        updates = {field: value for field, value in details.items() if field in _PROPERTY_TO_STATE_FIELD.values()}
+        updates = {
+            field: value for field, value in details.items() if field in _PROPERTY_TO_STATE_FIELD.values()
+        }
         return cast(OntologyInsertState, updates)
 
     def check_for_conflicts(self, state: OntologyInsertState) -> OntologyInsertState:
@@ -220,7 +220,9 @@ class OntologyInsertNodes:
             plant=NewEntityRef(plant_code=state["plant_code"], reused_existing=reused_plant),
             material_master=NewEntityRef(sap_material_number=state["sap_material_number"]),
             relationship=ProposalRelationship(
-                name=relationship["name"], target_entity=relationship["target_entity"], kind=relationship["kind"]
+                name=relationship["name"],
+                target_entity=relationship["target_entity"],
+                kind=relationship["kind"],
             ),
             summary=(
                 f"Create material {state['material_code']!r} with a MaterialMaster row "

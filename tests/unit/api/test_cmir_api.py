@@ -190,9 +190,7 @@ def test_list_pending_emails_returns_envelope_wrapped_queue(client):
 
 
 def test_process_pending_email_returns_envelope_wrapped_result(client):
-    response = client.post(
-        "/api/v1/cmir/email-events/33333333-3333-3333-3333-333333333333/process"
-    )
+    response = client.post("/api/v1/cmir/email-events/33333333-3333-3333-3333-333333333333/process")
 
     assert response.status_code == 200, response.text
     body = response.json()

@@ -112,7 +112,11 @@ class OntologyBuilder:
         # needs to worry about ordering between entities.
         for rel in RELATIONSHIPS:
             self._add_relationship_triples(
-                graph, rel, rows_by_entity=rows_by_entity, id_to_iri=id_to_iri, key_value_to_iri=key_value_to_iri
+                graph,
+                rel,
+                rows_by_entity=rows_by_entity,
+                id_to_iri=id_to_iri,
+                key_value_to_iri=key_value_to_iri,
             )
 
     def _add_entity_row(self, graph: Graph, entity: EntityMapping, row: Any) -> URIRef:

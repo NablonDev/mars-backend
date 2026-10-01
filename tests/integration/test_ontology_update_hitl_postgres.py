@@ -117,7 +117,9 @@ def _invoke(pg_database: Database, checkpointer, thread_id: str, payload):
         md = MasterDataRepository(session)
         service = MaterialMasterService(master_data_repository=md)
         nodes = OntologyUpdateNodes(
-            context_service=OntologyContextService(), master_data_repository=md, material_master_service=service
+            context_service=OntologyContextService(),
+            master_data_repository=md,
+            material_master_service=service,
         )
         graph = build_ontology_update_graph(nodes, checkpointer, _NoOpTraceRepo())
         return graph.invoke(payload, config={"configurable": {"thread_id": thread_id}})

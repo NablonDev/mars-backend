@@ -58,7 +58,7 @@ class GmailImapReader:
         # ingest and a human's HITL decision, is not a rare edge case. A UID
         # is a stable, permanent identifier for this message that survives
         # across sessions and mailbox changes.
-        status, data = mail.uid("search", None, *search_terms)
+        status, data = mail.uid("search", "", *search_terms)
 
         if status != "OK":
             mail.logout()

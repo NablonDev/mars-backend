@@ -202,7 +202,9 @@ class OntologyUpdateNodes:
                 material_master_id=str(material_master["id"]),
             ),
             relationship=ProposalRelationship(
-                name=relationship["name"], target_entity=relationship["target_entity"], kind=relationship["kind"]
+                name=relationship["name"],
+                target_entity=relationship["target_entity"],
+                kind=relationship["kind"],
             ),
             current_value=current_value,
             new_value=ProposalMaterialRef(

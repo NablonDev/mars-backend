@@ -34,7 +34,7 @@ from app.agents.penalties.mitigation import (
     build_penalty_mitigation_summary_tools,
 )
 from app.agents.penalties.mitigation.agent import PenaltyMitigationAgent
-from app.agents.penalties.mitigation.prompts.v2 import PROMPT_VERSION, SYSTEM_PROMPT
+from app.agents.penalties.mitigation.prompts.v3 import PROMPT_VERSION, SYSTEM_PROMPT
 from app.agents.providers.azure_openai import AzureOpenAIChatClient
 from app.core.exceptions import BusinessRuleError, NotFoundError, ValidationError
 from app.models.enums import JobTaskType, SummaryType

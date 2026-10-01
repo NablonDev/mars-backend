@@ -133,7 +133,9 @@ def _start_thread_awaiting(
     )
     service = _build_service(repos, graph)
     with service._unit_of_work_factory() as uow:
-        result = service._process_email_thread(uow, "batch-1", {"placeholder": True}, existing_email_id=email_id)
+        result = service._process_email_thread(
+            uow, "batch-1", {"placeholder": True}, existing_email_id=email_id
+        )
     return service, graph, result["id"]
 
 
@@ -356,9 +358,7 @@ _EMAIL = {
 
 def test_thread_creation_stores_email_in_latest_snapshot(repos) -> None:
     email_id = _new_email(repos)
-    service, _graph, thread_id = _start_thread_awaiting(
-        repos, "approval_required", email_id, email=_EMAIL
-    )
+    service, _graph, thread_id = _start_thread_awaiting(repos, "approval_required", email_id, email=_EMAIL)
 
     latest_snapshot = service.get_stage(thread_id)["metadata_json"]["latest_snapshot"]
 
@@ -399,7 +399,9 @@ def test_latest_snapshot_email_tolerates_none_email_state(repos) -> None:
     service = _build_service(repos, graph)
 
     with service._unit_of_work_factory() as uow:
-        result = service._process_email_thread(uow, "batch-1", {"placeholder": True}, existing_email_id=email_id)
+        result = service._process_email_thread(
+            uow, "batch-1", {"placeholder": True}, existing_email_id=email_id
+        )
 
     latest_snapshot = service.get_stage(result["id"])["metadata_json"]["latest_snapshot"]
     assert latest_snapshot["email"] == {"sender": None, "subject": None, "source_message_id": None}
@@ -456,9 +458,7 @@ def test_terminal_resume_keeps_email_in_latest_snapshot(repos) -> None:
 
 def test_update_draft_carries_forward_stored_email(repos) -> None:
     email_id = _new_email(repos)
-    service, _graph, thread_id = _start_thread_awaiting(
-        repos, "approval_required", email_id, email=_EMAIL
-    )
+    service, _graph, thread_id = _start_thread_awaiting(repos, "approval_required", email_id, email=_EMAIL)
 
     service.update_draft(
         thread_id,
@@ -496,9 +496,7 @@ def test_update_draft_omits_email_when_none_stored(repos) -> None:
 
 def test_batch_id_stays_sibling_of_latest_snapshot(repos) -> None:
     email_id = _new_email(repos)
-    service, _graph, thread_id = _start_thread_awaiting(
-        repos, "approval_required", email_id, email=_EMAIL
-    )
+    service, _graph, thread_id = _start_thread_awaiting(repos, "approval_required", email_id, email=_EMAIL)
 
     metadata_json = service.get_stage(thread_id)["metadata_json"]
 

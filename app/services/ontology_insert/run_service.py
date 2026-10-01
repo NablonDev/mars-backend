@@ -43,7 +43,9 @@ _APPROVAL_NODE = "human_approval"
 
 
 class OntologyInsertRunService:
-    def __init__(self, *, unit_of_work_factory: Callable[[], AbstractContextManager[SimpleNamespace]]) -> None:
+    def __init__(
+        self, *, unit_of_work_factory: Callable[[], AbstractContextManager[SimpleNamespace]]
+    ) -> None:
         self._unit_of_work_factory = unit_of_work_factory
 
     @staticmethod

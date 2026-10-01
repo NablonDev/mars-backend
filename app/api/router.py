@@ -24,6 +24,7 @@ from app.api.v1.penalties import (
     projections,
     rule_extraction,
     rules,
+    timeline,
 )
 
 router = APIRouter()
@@ -42,6 +43,7 @@ protected_router.include_router(delivery_change_requests.router)
 protected_router.include_router(rules.router)
 protected_router.include_router(rule_extraction.router)
 protected_router.include_router(projections.router)
+protected_router.include_router(timeline.router)
 protected_router.include_router(mitigations.router)
 protected_router.include_router(actual_penalties.router)
 protected_router.include_router(disputes.router)

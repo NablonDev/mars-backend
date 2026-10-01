@@ -64,6 +64,20 @@ class RetailerAgreementRepository:
         row = self._session.get(RetailerAgreement, retailer_agreement_id)
         return _retailer_agreement_to_dict(row) if row is not None else None
 
+    def get_by_contract_code(self, contract_code: str) -> dict | None:
+        """Fetch the retailer agreement with this exact `contract_code`, or None if not found."""
+        row = self._session.scalars(
+            select(RetailerAgreement).where(RetailerAgreement.contract_code == contract_code)
+        ).first()
+        return _retailer_agreement_to_dict(row) if row is not None else None
+
+    def get_by_document_sha256(self, document_sha256: str) -> dict | None:
+        """Fetch the retailer agreement with this exact `document_sha256`, or None if not found."""
+        row = self._session.scalars(
+            select(RetailerAgreement).where(RetailerAgreement.document_sha256 == document_sha256)
+        ).first()
+        return _retailer_agreement_to_dict(row) if row is not None else None
+
     def list_for_retailer(self, retailer_id: UUID) -> list[dict]:
         """Return every retailer agreement for one retailer."""
         rows = self._session.scalars(
@@ -74,6 +88,19 @@ class RetailerAgreementRepository:
     def truncate_all(self) -> None:
         """Delete every retailer agreement; callers must first clear anything that FK-references it."""
         self._session.execute(delete(RetailerAgreement))
+        self._session.flush()
+
+    def delete_seed_data(self, contract_code_prefix: str) -> None:
+        """Delete every agreement whose own `contract_code` matches this prefix.
+
+        Scoped by the agreement's own contract code, not its retailer: a
+        seeder-owned agreement can be attached to a reused (non-prefixed)
+        retailer, and must still be deleted on reset without touching that
+        retailer.
+        """
+        self._session.execute(
+            delete(RetailerAgreement).where(RetailerAgreement.contract_code.like(f"{contract_code_prefix}%"))
+        )
         self._session.flush()
 
     def get_effective_for_retailer(self, retailer_id: UUID, as_of_date: date) -> dict | None:

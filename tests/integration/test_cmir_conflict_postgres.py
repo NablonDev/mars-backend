@@ -110,7 +110,11 @@ def test_submit_decision_conflict_commits_bookkeeping_to_real_postgres(pg_databa
             {
                 "__interrupt__": [
                     _FakeInterrupt(
-                        {"reason": "approval_required", "email_id": str(email_id), "cmir": {"brand": "Brand A"}}
+                        {
+                            "reason": "approval_required",
+                            "email_id": str(email_id),
+                            "cmir": {"brand": "Brand A"},
+                        }
                     )
                 ],
                 "email_id": email_id,
@@ -138,7 +142,9 @@ def test_submit_decision_conflict_commits_bookkeeping_to_real_postgres(pg_databa
     )
 
     with service._unit_of_work_factory() as uow:
-        result = service._process_email_thread(uow, "batch-a1-conflict", {"placeholder": True}, existing_email_id=email_id)
+        result = service._process_email_thread(
+            uow, "batch-a1-conflict", {"placeholder": True}, existing_email_id=email_id
+        )
     thread_id: UUID = result["id"]
 
     stage = service.get_stage(thread_id)
@@ -167,9 +173,7 @@ def test_submit_decision_conflict_commits_bookkeeping_to_real_postgres(pg_databa
             text("SELECT status FROM process.workflow_thread WHERE id = :id"), {"id": thread_id}
         ).scalar()
         action_status = verify.execute(
-            text(
-                "SELECT status FROM process.human_action WHERE id = :id"
-            ),
+            text("SELECT status FROM process.human_action WHERE id = :id"),
             {"id": pending_before["id"]},
         ).scalar()
         agent_run_status = verify.execute(

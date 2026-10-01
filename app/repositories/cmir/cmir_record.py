@@ -155,9 +155,7 @@ class CmirRecordRepository:
         stale_cutoff = datetime.now(UTC) - timedelta(days=stale_days)
         trend_cutoff = datetime.now(UTC) - timedelta(days=180)
 
-        current_rows = self._session.scalars(
-            select(CmirRecord).where(CmirRecord.is_current.is_(True))
-        ).all()
+        current_rows = self._session.scalars(select(CmirRecord).where(CmirRecord.is_current.is_(True))).all()
 
         # Reuse the same expression object for select/group_by/order_by --
         # three separate func.date_trunc(...) calls each bind "month" as a
@@ -348,7 +346,10 @@ class CmirRecordRepository:
                     WorkflowThreadSubject.subject_id,
                 ).where(
                     (
-                        (WorkflowThreadSubject.subject_type == WorkflowThreadSubjectType.PURCHASE_ORDER_LINE.value)
+                        (
+                            WorkflowThreadSubject.subject_type
+                            == WorkflowThreadSubjectType.PURCHASE_ORDER_LINE.value
+                        )
                         & WorkflowThreadSubject.subject_id.in_(po_line_ids)
                     )
                     | (
@@ -389,6 +390,8 @@ class CmirRecordRepository:
                 thread_id_by_po_line.get(row.purchase_order_line_id)
                 if row.purchase_order_line_id
                 else thread_id_by_email_event.get(row.email_event_id)
+                if row.email_event_id
+                else None
             )
             latest_action = latest_action_by_thread.get(thread_id) if thread_id else None
             entries.append(

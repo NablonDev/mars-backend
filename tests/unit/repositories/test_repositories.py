@@ -88,6 +88,72 @@ def test_add_rule_via_repository_persists_tiers(repos):
     assert rules[0].tiers[1].rate == 0.08
 
 
+def test_list_rules_for_retailer_effective_on_filters_by_date_and_engine_priceable(repos):
+    retailer = repos.master_data.add_retailer("RET-EFF", "Retailer Effective", None, "SUM")
+    agreement_id = make_retailer_agreement(repos, retailer["id"])
+
+    repos.penalty_rules.add_rule(
+        rule_code="RULE-IN-WINDOW",
+        violation_type="OTIF_LATE",
+        penalty_category="LATE",
+        retailer_agreement_id=agreement_id,
+        calc_type="PER_UNIT",
+        rate=1.0,
+        effective_start_date=date(2026, 1, 1),
+        effective_end_date=date(2026, 12, 31),
+    )
+    repos.penalty_rules.add_rule(
+        rule_code="RULE-NOT-YET-EFFECTIVE",
+        violation_type="OTIF_LATE",
+        penalty_category="LATE",
+        retailer_agreement_id=agreement_id,
+        calc_type="PER_UNIT",
+        rate=1.0,
+        effective_start_date=date(2027, 1, 1),
+    )
+    repos.penalty_rules.add_rule(
+        rule_code="RULE-EXPIRED",
+        violation_type="OTIF_LATE",
+        penalty_category="LATE",
+        retailer_agreement_id=agreement_id,
+        calc_type="PER_UNIT",
+        rate=1.0,
+        effective_start_date=date(2025, 1, 1),
+        effective_end_date=date(2025, 12, 31),
+    )
+    repos.penalty_rules.add_rule(
+        rule_code="RULE-NOT-ENGINE-PRICEABLE",
+        violation_type="OTIF_LATE",
+        penalty_category="LATE",
+        retailer_agreement_id=agreement_id,
+        calc_type="PER_UNIT",
+        rate=1.0,
+        effective_start_date=date(2026, 1, 1),
+        is_engine_priceable=False,
+    )
+    repos.penalty_rules.add_rule(
+        rule_code="RULE-OPEN-ENDED",
+        violation_type="OTIF_LATE",
+        penalty_category="LATE",
+        retailer_agreement_id=agreement_id,
+        calc_type="PER_UNIT",
+        rate=1.0,
+        effective_start_date=date(2026, 1, 1),
+        effective_end_date=None,
+    )
+
+    rules = repos.penalty_rules.list_rules_for_retailer_effective_on(retailer["id"], date(2026, 6, 1))
+
+    rule_ids = {r.rule_id for r in rules}
+    matched_rows = [
+        row
+        for row in repos.penalty_rules.list_rules(retailer["id"])
+        if row["rule_code"] in ("RULE-IN-WINDOW", "RULE-OPEN-ENDED")
+    ]
+    assert rule_ids == {str(row["id"]) for row in matched_rows}
+    assert len(rules) == 2
+
+
 def test_tier_code_is_generated_from_position(repos, db_session):
     """uq_penalty_rule_tier_rule_code -- DB-enforced idempotency guard,
     unlike production_schedule (see fulfillment repository docstring)."""

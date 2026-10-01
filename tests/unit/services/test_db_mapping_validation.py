@@ -53,7 +53,9 @@ class EntityValidationTests(unittest.TestCase):
             iri_key_column=Material.material_code,
             properties=(PropertyMapping("materialCode", MaterialMaster.sap_material_number),),
         )
-        _validate_entity(entity, declared_classes={"Material"}, declared_properties={"materialCode"}, issues=issues)
+        _validate_entity(
+            entity, declared_classes={"Material"}, declared_properties={"materialCode"}, issues=issues
+        )
         self.assertTrue(any("does not belong to" in i.message for i in issues))
 
     def test_undeclared_property_is_flagged(self) -> None:
@@ -117,7 +119,9 @@ class RelationshipValidationTests(unittest.TestCase):
             to_entity="Material",
         )
         _validate_relationship(rel, declared_properties={"referencesMaterial"}, issues=issues)
-        self.assertTrue(any("requires both value_from_column and value_to_column" in i.message for i in issues))
+        self.assertTrue(
+            any("requires both value_from_column and value_to_column" in i.message for i in issues)
+        )
 
     def test_value_match_with_incompatible_datatypes_is_flagged(self) -> None:
         issues: list = []

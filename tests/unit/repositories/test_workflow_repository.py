@@ -358,9 +358,7 @@ def test_list_threads_enriches_cmir_rows_from_existing_metadata_no_extra_query(r
         subject_type=WorkflowThreadSubjectType.EMAIL_EVENT,
         subject_id=email_event_id,
         metadata={
-            "latest_snapshot": {
-                "cmir": {"customer_identity": "Walmart Inc", "material_identity": "MAT-1"}
-            }
+            "latest_snapshot": {"cmir": {"customer_identity": "Walmart Inc", "material_identity": "MAT-1"}}
         },
     )
 

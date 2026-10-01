@@ -103,7 +103,12 @@ def _line_payload(**overrides: Any) -> dict[str, Any]:
 
 
 def _interrupt_result(reason: str, **extra: Any) -> dict:
-    payload = {"reason": reason, "po_number": "PO-2026-0001", "po_line_number": "10", "retailer_code": "CUST-1"}
+    payload = {
+        "reason": reason,
+        "po_number": "PO-2026-0001",
+        "po_line_number": "10",
+        "retailer_code": "CUST-1",
+    }
     payload.update(extra)
     return {INTERRUPT_KEY: [SimpleNamespace(value=payload)]}
 

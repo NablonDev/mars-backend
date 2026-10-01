@@ -147,9 +147,7 @@ class OntologyGraphServiceTests(unittest.TestCase):
         master_a.follow_up_material_id = material_b.id
         master_b.follow_up_material_id = material_a.id
 
-        graph = self._build_graph(
-            materials=[material_a, material_b], material_masters=[master_a, master_b]
-        )
+        graph = self._build_graph(materials=[material_a, material_b], material_masters=[master_a, master_b])
         service = OntologyGraphService(graph=graph)
 
         result = service.successor_chain(master_a.id)

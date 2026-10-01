@@ -136,9 +136,7 @@ class OntologyBuilderTests(unittest.TestCase):
         self.assertIn((record_iri, MARS.brand, Literal("AcmePlast")), self.graph)
         self.assertIn((record_iri, MARS.site, Literal("Site 12")), self.graph)
         self.assertIn((record_iri, MARS.customerIdentity, Literal("Acme Foods")), self.graph)
-        self.assertIn(
-            (record_iri, MARS.targetCustomerMaterialRef, Literal("ACM-4471")), self.graph
-        )
+        self.assertIn((record_iri, MARS.targetCustomerMaterialRef, Literal("ACM-4471")), self.graph)
         self.assertIn((record_iri, MARS.referencesMaterial, material_iri), self.graph)
 
     def test_cmir_record_with_unresolvable_identity_gets_no_reference_triple(self) -> None:

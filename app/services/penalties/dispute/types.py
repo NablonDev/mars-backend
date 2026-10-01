@@ -79,6 +79,10 @@ class DisputeFacts:
     # None if no delivery/shipment fact is on record yet. DELAY-family
     # disputes only.
     actual_delivery_date: date | None
+    # ASN_LATE-only Mars-derived facts: the ASN is late when it goes out after goods issue,
+    # the same definition the projection engine uses (`timeline.projection._build_timing_risks`).
+    asn_sent_date: date | None = None
+    goods_issued_date: date | None = None
     grace_period_days: int = 0
     # QUALITY-family claim-supplied fact: a defect count the retailer's DC observed, which
     # Mars holds nowhere else.

@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, status
 
-from app.api.dependencies import get_purchase_order_repository
+from app.api.dependencies import get_fulfillment_timeline_repository, get_purchase_order_repository
 from app.core.envelope import Envelope, success_envelope
+from app.repositories.common.fulfillment_timeline import FulfillmentTimelineRepository
 from app.repositories.common.purchase_order import PurchaseOrderRepository
 from app.schemas.common.purchase_orders import (
     PurchaseOrderLineResponse,
     PurchaseOrderRequest,
     PurchaseOrderResponse,
 )
+from app.schemas.penalties.timeline import FulfillmentPlanResponse
 
 router = APIRouter(tags=["purchase-orders"])
 
@@ -54,3 +57,18 @@ def list_purchase_orders(
     """List all purchase orders, optionally filtered by order status."""
     rows = [_to_response(purchase_orders, po) for po in purchase_orders.list_purchase_orders(order_status)]
     return success_envelope(rows)
+
+
+@router.get(
+    "/purchase-orders/{purchase_order_id}/fulfillment-plans",
+    response_model=Envelope[list[FulfillmentPlanResponse]],
+)
+def list_fulfillment_plans_for_purchase_order(
+    purchase_order_id: UUID,
+    purchase_orders: Annotated[PurchaseOrderRepository, Depends(get_purchase_order_repository)],
+    timeline: Annotated[FulfillmentTimelineRepository, Depends(get_fulfillment_timeline_repository)],
+) -> Envelope[list[FulfillmentPlanResponse]]:
+    """List every fulfillment plan for a purchase order (`404 PO_NOT_FOUND` if the PO doesn't exist)."""
+    purchase_orders.require_purchase_order(purchase_order_id)
+    plans = timeline.list_plans_for_purchase_order(purchase_order_id)
+    return success_envelope([FulfillmentPlanResponse.model_validate(plan) for plan in plans])

@@ -8,7 +8,13 @@ from uuid import UUID
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.models import PenaltyDispute
+from app.models import (
+    ActualPenalty,
+    PenaltyDispute,
+    PenaltyJobItemContext,
+    PenaltySummary,
+    PurchaseOrder,
+)
 from app.models.enums import DisputeStatus
 
 _ACTIVE_STATUSES = (DisputeStatus.OPEN, DisputeStatus.ANALYZED)
@@ -185,3 +191,40 @@ class PenaltyDisputeRepository:
         """Delete every dispute; must run before the actual-penalty, rule and PO truncates."""
         self._session.execute(delete(PenaltyDispute))
         self._session.flush()
+
+    def delete_seed_disputes(self, purchase_order_number_prefix: str) -> None:
+        """Delete only the disputes, their DISPUTE summaries and the actual penalties on seeded POs.
+
+        For re-seeding the dispute scenarios. Leaves every other summary on those POs (the stored
+        projection and mitigation narratives) and all other PO-linked rows alone.
+        """
+        po_ids = self._seed_po_ids(purchase_order_number_prefix)
+        self._session.execute(
+            delete(PenaltySummary).where(
+                PenaltySummary.purchase_order_id.in_(po_ids), PenaltySummary.summary_type == "DISPUTE"
+            )
+        )
+        self._session.execute(delete(PenaltyDispute).where(PenaltyDispute.purchase_order_id.in_(po_ids)))
+        self._session.execute(delete(ActualPenalty).where(ActualPenalty.purchase_order_id.in_(po_ids)))
+        self._session.flush()
+
+    def delete_seed_data(self, purchase_order_number_prefix: str) -> None:
+        """Delete everything penalty-side that hangs off POs with this number prefix (full seed reset).
+
+        Used only when the seeded POs themselves are about to be deleted, because every row listed
+        here holds a foreign key to them. Children first: job contexts, all summaries (including
+        stored narratives), disputes, then the actual penalties they contest.
+        """
+        po_ids = self._seed_po_ids(purchase_order_number_prefix)
+        self._session.execute(
+            delete(PenaltyJobItemContext).where(PenaltyJobItemContext.purchase_order_id.in_(po_ids))
+        )
+        self._session.execute(delete(PenaltySummary).where(PenaltySummary.purchase_order_id.in_(po_ids)))
+        self._session.execute(delete(PenaltyDispute).where(PenaltyDispute.purchase_order_id.in_(po_ids)))
+        self._session.execute(delete(ActualPenalty).where(ActualPenalty.purchase_order_id.in_(po_ids)))
+        self._session.flush()
+
+    def _seed_po_ids(self, purchase_order_number_prefix: str):
+        return select(PurchaseOrder.id).where(
+            PurchaseOrder.purchase_order_number.like(f"{purchase_order_number_prefix}%")
+        )

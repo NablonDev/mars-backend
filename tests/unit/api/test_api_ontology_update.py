@@ -36,7 +36,9 @@ class FakeOntologyUpdateRunService:
         self.start_calls.append(message)
         if self.start_result is not None:
             return self.start_result
-        return OntologyUpdateResponse(thread_id="thread_ontology_update_test", status=OntologyUpdateStatus.FAILED)
+        return OntologyUpdateResponse(
+            thread_id="thread_ontology_update_test", status=OntologyUpdateStatus.FAILED
+        )
 
     def submit_decision(self, thread_id: str, decision: str) -> OntologyUpdateResponse:
         self.decision_calls.append((thread_id, decision))

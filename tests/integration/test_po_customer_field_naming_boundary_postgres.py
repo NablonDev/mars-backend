@@ -106,7 +106,9 @@ def test_retailer_code_and_material_code_map_to_db_and_state_correctly(pg_databa
         ]
     )
     thread_id_1 = result1["lines"][0]["thread_id"]
-    assert thread_id_1 is not None, "a genuine crosswalk-miss must create a workflow_thread, not resolve touchlessly"
+    assert thread_id_1 is not None, (
+        "a genuine crosswalk-miss must create a workflow_thread, not resolve touchlessly"
+    )
     thread_id_1 = UUID(thread_id_1)
 
     verify = pg_database.new_session()
@@ -174,7 +176,9 @@ def test_retailer_code_and_material_code_map_to_db_and_state_correctly(pg_databa
             ),
             {"c": retailer_code, "m": retailer_material_code},
         ).first()
-        assert crosswalk is not None, "create_cmir_record must have written the crosswalk using the state values"
+        assert crosswalk is not None, (
+            "create_cmir_record must have written the crosswalk using the state values"
+        )
     finally:
         verify.close()
 
@@ -290,7 +294,9 @@ def test_legacy_checkpoint_with_old_field_names_resumes_without_keyerror(pg_data
             Command(resume={"sap_material_number": sap_material_number, "description": ""}), config=config
         )
         assert "__interrupt__" not in final_state, f"expected no further interrupt, got state: {final_state}"
-        assert final_state.get("error") is None, f"legacy checkpoint resume raised an error: {final_state.get('error')}"
+        assert final_state.get("error") is None, (
+            f"legacy checkpoint resume raised an error: {final_state.get('error')}"
+        )
 
     # Independent verification: the crosswalk was written using the OLD
     # checkpoint's values, correctly bridged through _normalize_po_line.

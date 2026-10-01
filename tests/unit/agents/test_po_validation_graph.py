@@ -141,9 +141,7 @@ class PoValidationWorkflowTests(unittest.TestCase):
                 # human_qty_mismatch_decision's find_material_master_by_material_id
                 # fix) -- a follow_up_material_id with no master record here is
                 # exactly the "no honest suggestion" case covered by the next test.
-                ("MAT-SUB", "1000"): _material_master(
-                    "MAT-SUB", "1000", 500, material_code="MAT-SUB-CODE"
-                ),
+                ("MAT-SUB", "1000"): _material_master("MAT-SUB", "1000", 500, material_code="MAT-SUB-CODE"),
             },
         )
         state = graph.invoke(
@@ -161,9 +159,7 @@ class PoValidationWorkflowTests(unittest.TestCase):
         self.assertEqual(payload["reason"], "qty_mismatch_decision")
         self.assertEqual(payload["candidate"]["suggested_substitute_material_code"], "MAT-SUB")
         self.assertEqual(payload["candidate"]["suggested_substitute_available_quantity"], 500)
-        self.assertEqual(
-            payload["candidate"]["suggested_substitute_business_material_code"], "MAT-SUB-CODE"
-        )
+        self.assertEqual(payload["candidate"]["suggested_substitute_business_material_code"], "MAT-SUB-CODE")
         self.assertEqual(payload["candidate"]["shortfall"], 60)
 
         # A.3 regression guard: the real node's candidate dict must carry a

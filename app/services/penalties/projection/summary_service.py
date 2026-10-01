@@ -34,7 +34,7 @@ from app.agents.penalties.projection import (
     build_penalty_projection_summary_tools,
 )
 from app.agents.penalties.projection.agent import PenaltyProjectionAgent
-from app.agents.penalties.projection.prompts.v2 import PROMPT_VERSION, SYSTEM_PROMPT
+from app.agents.penalties.projection.prompts.v3 import PROMPT_VERSION, SYSTEM_PROMPT
 from app.agents.providers.azure_openai import AzureOpenAIChatClient
 from app.core.exceptions import BusinessRuleError, NotFoundError, ValidationError
 from app.models.enums import JobTaskType, SummaryType

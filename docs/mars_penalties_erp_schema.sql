@@ -163,6 +163,8 @@ CREATE TABLE material_master (
     follow_up_material_id       uuid REFERENCES material(id),
     source_system               varchar(50),
     last_synced_at              timestamptz,
+    standard_cost               numeric(12,4),
+    qa_release_days             integer,
     created_at                  timestamptz NOT NULL DEFAULT now(),
     updated_at                  timestamptz NOT NULL DEFAULT now(),
     deleted_at                  timestamptz,
@@ -186,6 +188,10 @@ CREATE TABLE purchase_order (
     current_delivery_date           date,
     current_required_ship_date      date,
     negotiation_status              varchar(30) NOT NULL,
+    window_start                    date,
+    window_end                      date,
+    cancel_date                     date,
+    freight_term                    varchar(20),
     created_at                      timestamptz NOT NULL DEFAULT now(),
     updated_at                      timestamptz NOT NULL DEFAULT now(),
     deleted_at                      timestamptz
@@ -352,6 +358,109 @@ CREATE TABLE demand_exception (
     purchase_order_line_id      uuid NOT NULL REFERENCES purchase_order_line(id),
     flagged_date                date NOT NULL,
     resolved                    boolean NOT NULL,
+    created_at                  timestamptz NOT NULL DEFAULT now(),
+    updated_at                  timestamptz NOT NULL DEFAULT now(),
+    deleted_at                  timestamptz
+);
+
+-- Fulfillment timeline: milestone reference data, one row per planned
+-- shipment of a PO (fulfillment_plan), current milestone state
+-- (fulfillment_milestone), and the append-only change trace
+-- (fulfillment_event). See docs/DATABASE.md's "Fulfillment timeline tables".
+
+CREATE TABLE milestone_type (
+    id                          uuid PRIMARY KEY,
+    code                        varchar(50) NOT NULL UNIQUE,
+    name                        varchar(200) NOT NULL,
+    sequence_no                 integer NOT NULL UNIQUE,
+    depends_on                  jsonb NOT NULL,
+    default_duration_days       numeric(5,2),
+    freight_term_scope          varchar(20) NOT NULL,
+    is_measurement_point        boolean NOT NULL,
+    owner_team                  varchar(100),
+    sap_source_reference        varchar(100),
+    created_at                  timestamptz NOT NULL DEFAULT now(),
+    updated_at                  timestamptz NOT NULL DEFAULT now(),
+    deleted_at                  timestamptz
+);
+
+CREATE TABLE fulfillment_plan (
+    id                          uuid PRIMARY KEY,
+    plan_number                 varchar(50) NOT NULL UNIQUE,
+    purchase_order_id           uuid NOT NULL REFERENCES purchase_order(id),
+    delivery_id                 uuid REFERENCES delivery(id),
+    ship_from_warehouse_id      uuid REFERENCES warehouse(id),
+    carrier_id                  uuid REFERENCES carrier(id),
+    freight_term                varchar(20) NOT NULL,
+    planned_transit_days        integer,
+    status                      varchar(30) NOT NULL,
+    created_at                  timestamptz NOT NULL DEFAULT now(),
+    updated_at                  timestamptz NOT NULL DEFAULT now(),
+    deleted_at                  timestamptz
+);
+CREATE INDEX ix_fulfillment_plan_purchase_order_id ON fulfillment_plan (purchase_order_id);
+
+CREATE TABLE fulfillment_plan_line (
+    id                          uuid PRIMARY KEY,
+    fulfillment_plan_id         uuid NOT NULL REFERENCES fulfillment_plan(id),
+    purchase_order_line_id      uuid NOT NULL REFERENCES purchase_order_line(id),
+    planned_quantity            numeric(18,3) NOT NULL,
+    confirmed_quantity          numeric(18,3),
+    shipped_quantity            numeric(18,3),
+    created_at                  timestamptz NOT NULL DEFAULT now(),
+    updated_at                  timestamptz NOT NULL DEFAULT now(),
+    deleted_at                  timestamptz,
+    UNIQUE (fulfillment_plan_id, purchase_order_line_id)
+);
+
+CREATE TABLE fulfillment_milestone (
+    id                          uuid PRIMARY KEY,
+    fulfillment_plan_id         uuid NOT NULL REFERENCES fulfillment_plan(id),
+    milestone_type_id           uuid NOT NULL REFERENCES milestone_type(id),
+    baseline_date               date,
+    planned_date                date,
+    actual_date                 date,
+    status                      varchar(20) NOT NULL,
+    source_document_type        varchar(50),
+    source_document_number      varchar(100),
+    created_at                  timestamptz NOT NULL DEFAULT now(),
+    updated_at                  timestamptz NOT NULL DEFAULT now(),
+    deleted_at                  timestamptz,
+    UNIQUE (fulfillment_plan_id, milestone_type_id)
+);
+
+CREATE TABLE fulfillment_event (
+    id                          uuid PRIMARY KEY,
+    subject_type                varchar(30) NOT NULL,
+    subject_id                  uuid NOT NULL,
+    fulfillment_plan_id         uuid REFERENCES fulfillment_plan(id),
+    milestone_type_id           uuid REFERENCES milestone_type(id),
+    event_type                  varchar(30) NOT NULL,
+    field_name                  varchar(100),
+    old_value                   varchar(255),
+    new_value                   varchar(255),
+    reason_code                 varchar(50),
+    event_at                    timestamptz NOT NULL,
+    source                      varchar(50) NOT NULL,
+    source_reference            varchar(100),
+    created_at                  timestamptz NOT NULL DEFAULT now(),
+    updated_at                  timestamptz NOT NULL DEFAULT now(),
+    deleted_at                  timestamptz
+);
+CREATE INDEX ix_fulfillment_event_subject ON fulfillment_event (subject_type, subject_id);
+CREATE INDEX ix_fulfillment_event_plan_event_at ON fulfillment_event (fulfillment_plan_id, event_at);
+
+CREATE TABLE quality_lot (
+    id                          uuid PRIMARY KEY,
+    lot_number                  varchar(50) NOT NULL UNIQUE,
+    production_order_id         uuid REFERENCES production_order(id),
+    material_id                 uuid NOT NULL REFERENCES material(id),
+    plant_id                    uuid NOT NULL REFERENCES plant(id),
+    quantity                    numeric(18,3) NOT NULL,
+    inspection_start_date       date NOT NULL,
+    planned_release_date        date NOT NULL,
+    actual_release_date         date,
+    status                      varchar(20) NOT NULL,
     created_at                  timestamptz NOT NULL DEFAULT now(),
     updated_at                  timestamptz NOT NULL DEFAULT now(),
     deleted_at                  timestamptz
@@ -717,6 +826,96 @@ CREATE TABLE penalties.mitigation_option (
     deleted_at                  timestamptz,
     UNIQUE (purchase_order_id, projection_date, action)
 );
+
+CREATE TABLE penalties.fulfillment_risk (
+    id                          uuid PRIMARY KEY,
+    fulfillment_plan_id         uuid NOT NULL REFERENCES fulfillment_plan(id),
+    purchase_order_id           uuid NOT NULL REFERENCES purchase_order(id),
+    projection_date             date NOT NULL,
+    risk_type                   varchar(20) NOT NULL,
+    status                      varchar(20) NOT NULL,
+    measured_milestone_code     varchar(50) NOT NULL,
+    projected_measured_date     date,
+    window_start                date,
+    window_end                  date,
+    days_off                    integer,
+    shortfall_quantity          numeric(18,3),
+    driver_milestone_code       varchar(50),
+    driver_reason_code          varchar(50),
+    driver_event_id             uuid REFERENCES fulfillment_event(id),
+    projected_penalty_amount    numeric(12,2) NOT NULL,
+    currency_code               char(3) NOT NULL,
+    priced_rule_ids             jsonb NOT NULL,
+    projected_milestones        jsonb NOT NULL,
+    calculation_detail          jsonb,
+    created_at                  timestamptz NOT NULL DEFAULT now(),
+    updated_at                  timestamptz NOT NULL DEFAULT now(),
+    deleted_at                  timestamptz,
+    UNIQUE (fulfillment_plan_id, projection_date, risk_type)
+);
+CREATE INDEX ix_fulfillment_risk_purchase_order_id ON penalties.fulfillment_risk (purchase_order_id);
+
+CREATE TABLE penalties.fulfillment_mitigation_option (
+    id                          uuid PRIMARY KEY,
+    fulfillment_plan_id         uuid NOT NULL REFERENCES fulfillment_plan(id),
+    purchase_order_id           uuid NOT NULL REFERENCES purchase_order(id),
+    projection_date             date NOT NULL,
+    action_code                 varchar(50) NOT NULL,
+    owner_team                  varchar(100),
+    feasible                    boolean NOT NULL,
+    infeasible_reason           varchar(100),
+    act_by_date                 date,
+    penalty_before               numeric(12,2) NOT NULL,
+    penalty_after                numeric(12,2),
+    action_cost                 numeric(12,2) NOT NULL,
+    net_saving                  numeric(12,2),
+    confidence                  varchar(20) NOT NULL,  -- CONFIRMED / ESTIMATED
+    rank_no                     integer,
+    addresses_risk_types        jsonb NOT NULL,
+    rationale                   text,
+    created_at                  timestamptz NOT NULL DEFAULT now(),
+    updated_at                  timestamptz NOT NULL DEFAULT now(),
+    deleted_at                  timestamptz,
+    UNIQUE (fulfillment_plan_id, projection_date, action_code)
+);
+CREATE INDEX ix_fulfillment_mitigation_option_purchase_order_id
+    ON penalties.fulfillment_mitigation_option (purchase_order_id);
+
+CREATE TABLE penalties.timeline_alert (
+    id                          uuid PRIMARY KEY,
+    fulfillment_plan_id         uuid NOT NULL REFERENCES fulfillment_plan(id),
+    purchase_order_id           uuid NOT NULL REFERENCES purchase_order(id),
+    risk_type                   varchar(20) NOT NULL,
+    status                      varchar(20) NOT NULL DEFAULT 'NEW',
+    is_tracking                 boolean NOT NULL DEFAULT true,
+    change_type                 varchar(10) NOT NULL DEFAULT 'NEW',  -- NEW / WORSE / BETTER / SAME
+    first_seen_date             date NOT NULL,
+    last_seen_date              date NOT NULL,
+    prev_penalty_amount         numeric(12,2),
+    last_penalty_amount         numeric(12,2) NOT NULL DEFAULT 0,
+    prev_days_off               integer,
+    last_days_off               integer,
+    prev_shortfall_quantity     numeric(18,3),
+    last_shortfall_quantity     numeric(18,3),
+    assigned_to                 varchar(100),
+    chosen_action_code          varchar(50),
+    notes                       text,
+    acknowledged_at             timestamptz,
+    action_taken_at             timestamptz,
+    closed_at                   timestamptz,
+    acknowledged_by             varchar(100),
+    action_taken_by             varchar(100),
+    closed_by                   varchar(100),
+    closed_reason               varchar(30),  -- AUTO_CLEARED / FIX_WORKED / BREACHED / DISMISSED / OUTCOME_RECORDED
+    actual_penalty_amount       numeric(12,2),
+    created_at                  timestamptz NOT NULL DEFAULT now(),
+    updated_at                  timestamptz NOT NULL DEFAULT now(),
+    deleted_at                  timestamptz
+);
+CREATE INDEX ix_timeline_alert_fulfillment_plan_id ON penalties.timeline_alert (fulfillment_plan_id);
+CREATE INDEX ix_timeline_alert_purchase_order_id ON penalties.timeline_alert (purchase_order_id);
+CREATE INDEX ix_timeline_alert_plan_type_tracking
+    ON penalties.timeline_alert (fulfillment_plan_id, risk_type, is_tracking);
 
 CREATE TABLE penalties.penalty_summary (
     id                          uuid PRIMARY KEY,

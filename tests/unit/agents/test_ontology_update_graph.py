@@ -122,7 +122,9 @@ class OntologyUpdateGraphTests(unittest.TestCase):
 
         self.assertNotIn(INTERRUPT_KEY, state)
         self.assertEqual(state["approval_status"], "approve")
-        self.assertEqual(self.material_master_service.calls, [(self.master_master["id"], self.replacement["id"])])
+        self.assertEqual(
+            self.material_master_service.calls, [(self.master_master["id"], self.replacement["id"])]
+        )
         self.assertEqual(state["execution_result"]["material_master_id"], str(self.master_master["id"]))
         self.assertEqual(state["execution_result"]["follow_up_material_id"], str(self.replacement["id"]))
 

@@ -23,9 +23,12 @@ class RebuildValidationFailureTests(unittest.TestCase):
     def test_rebuild_raises_and_never_touches_the_db_or_the_graph_when_mapping_invalid(self) -> None:
         container = MagicMock()
 
-        with patch.object(
-            materialize_job, "validate_mapping", side_effect=MappingValidationError("deliberately broken")
-        ), self.assertRaises(MappingValidationError):
+        with (
+            patch.object(
+                materialize_job, "validate_mapping", side_effect=MappingValidationError("deliberately broken")
+            ),
+            self.assertRaises(MappingValidationError),
+        ):
             materialize_job.rebuild(container)
 
         # No bulk read was attempted, and -- critically -- the container's

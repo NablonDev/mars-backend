@@ -141,7 +141,11 @@ def test_cmir_concurrent_decisions_on_same_pending_action_one_wins_one_conflicts
             {
                 "__interrupt__": [
                     _FakeInterrupt(
-                        {"reason": "approval_required", "email_id": str(email_id), "cmir": {"brand": "Brand A"}}
+                        {
+                            "reason": "approval_required",
+                            "email_id": str(email_id),
+                            "cmir": {"brand": "Brand A"},
+                        }
                     )
                 ],
                 "email_id": email_id,

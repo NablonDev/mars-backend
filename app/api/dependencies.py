@@ -43,10 +43,12 @@ from app.db.session import Database
 from app.queue.interfaces import JobDispatcher, JobSource
 from app.repositories.common.delivery_change_request import PoDeliveryChangeRequestRepository
 from app.repositories.common.fulfillment import FulfillmentRepository
+from app.repositories.common.fulfillment_timeline import FulfillmentTimelineRepository
 from app.repositories.common.master_data import MasterDataRepository
 from app.repositories.common.purchase_order import PurchaseOrderRepository
 from app.repositories.common.retailer_agreement import RetailerAgreementRepository
 from app.repositories.penalties.dispute import PenaltyDisputeRepository
+from app.repositories.penalties.fulfillment_risk import FulfillmentRiskRepository
 from app.repositories.penalties.job_context import (
     PenaltyJobItemContextRepository,
     PenaltyJobRunContextRepository,
@@ -60,6 +62,7 @@ from app.repositories.penalties.rule_extraction import (
     RulePublicationRepository,
 )
 from app.repositories.penalties.summary import PenaltySummaryRepository
+from app.repositories.penalties.timeline_alert import TimelineAlertRepository
 from app.repositories.process.agent_registry import AgentRegistryRepository, AgentRunRepository
 from app.repositories.process.job_queue import JobQueueRepository
 from app.repositories.process.workflow import HumanActionRepository, WorkflowThreadRepository
@@ -77,6 +80,7 @@ from app.services.penalties.projection.service import ProjectionService
 from app.services.penalties.projection.summary_service import ProjectionSummaryService
 from app.services.penalties.rule_extraction.revision import RuleRevisionService
 from app.services.penalties.rule_extraction.service import PenaltyRuleExtractionService
+from app.services.penalties.timeline.service import TimelineProjectionService
 from app.services.po_validation.service import PoValidationService
 from app.services.seeding.service import PenaltySeedingService
 
@@ -174,6 +178,13 @@ def get_fulfillment_repository(
     return FulfillmentRepository(session)
 
 
+def get_fulfillment_timeline_repository(
+    session: Annotated[Session, Depends(get_session, scope="function")],
+) -> FulfillmentTimelineRepository:
+    """Provide a fulfillment-timeline repository for plans, milestones, events, and upstream supply."""
+    return FulfillmentTimelineRepository(session)
+
+
 # ---------------------------------------------------------------------------
 # process: repositories (shared backbone)
 # ---------------------------------------------------------------------------
@@ -224,6 +235,20 @@ def get_actual_penalty_repository(
 ) -> ActualPenaltyRepository:
     """Provide an actual penalty repository for reading and writing realized penalties."""
     return ActualPenaltyRepository(session)
+
+
+def get_fulfillment_risk_repository(
+    session: Annotated[Session, Depends(get_session, scope="function")],
+) -> FulfillmentRiskRepository:
+    """Provide a fulfillment-risk repository for reading and writing timeline risks/mitigation options."""
+    return FulfillmentRiskRepository(session)
+
+
+def get_timeline_alert_repository(
+    session: Annotated[Session, Depends(get_session, scope="function")],
+) -> TimelineAlertRepository:
+    """Provide a timeline-alert repository for the ops-tracked fulfillment-timeline alert lifecycle."""
+    return TimelineAlertRepository(session)
 
 
 def get_penalty_summary_repository(
@@ -385,6 +410,25 @@ def get_projection_service(
     )
 
 
+def get_timeline_projection_service(
+    timeline: Annotated[FulfillmentTimelineRepository, Depends(get_fulfillment_timeline_repository)],
+    risks: Annotated[FulfillmentRiskRepository, Depends(get_fulfillment_risk_repository)],
+    alerts: Annotated[TimelineAlertRepository, Depends(get_timeline_alert_repository)],
+    purchase_orders: Annotated[PurchaseOrderRepository, Depends(get_purchase_order_repository)],
+    rules: Annotated[PenaltyRuleRepository, Depends(get_penalty_rule_repository)],
+    master_data: Annotated[MasterDataRepository, Depends(get_master_data_repository)],
+) -> TimelineProjectionService:
+    """Provide a fulfillment-timeline projection service for the event-driven penalty engine."""
+    return TimelineProjectionService(
+        timeline=timeline,
+        risks=risks,
+        alerts=alerts,
+        purchase_orders=purchase_orders,
+        rules=rules,
+        master_data=master_data,
+    )
+
+
 def get_mitigation_service(
     purchase_orders: Annotated[PurchaseOrderRepository, Depends(get_purchase_order_repository)],
     rules: Annotated[PenaltyRuleRepository, Depends(get_penalty_rule_repository)],
@@ -429,6 +473,10 @@ def get_dispute_service(
     actual_penalties: Annotated[ActualPenaltyRepository, Depends(get_actual_penalty_repository)],
     rules: Annotated[PenaltyRuleRepository, Depends(get_penalty_rule_repository)],
     projection_service: Annotated[ProjectionService, Depends(get_projection_service)],
+    fulfillment: Annotated[FulfillmentRepository, Depends(get_fulfillment_repository)],
+    fulfillment_timeline: Annotated[
+        FulfillmentTimelineRepository, Depends(get_fulfillment_timeline_repository)
+    ],
     retailer_agreements: Annotated[RetailerAgreementRepository, Depends(get_retailer_agreement_repository)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> DisputeResolutionService:
@@ -439,6 +487,8 @@ def get_dispute_service(
         actual_penalties=actual_penalties,
         rules=rules,
         projection_service=projection_service,
+        fulfillment=fulfillment,
+        fulfillment_timeline=fulfillment_timeline,
         retailer_agreements=retailer_agreements,
         default_window_days=settings.dispute.default_window_days,
     )

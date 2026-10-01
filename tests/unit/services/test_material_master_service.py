@@ -116,6 +116,8 @@ def test_update_replacement_material_rejects_a_nonexistent_material_master(repos
     replacement = repos.master_data.add_material("MAT-REPL-1001", None)
 
     with pytest.raises(NotFoundError) as exc_info:
-        service.update_replacement_material(material_master_id=uuid4(), replacement_material_id=replacement["id"])
+        service.update_replacement_material(
+            material_master_id=uuid4(), replacement_material_id=replacement["id"]
+        )
 
     assert exc_info.value.code == "MATERIAL_MASTER_NOT_FOUND"

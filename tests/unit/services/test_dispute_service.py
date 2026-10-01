@@ -45,6 +45,8 @@ def _build_service(repos) -> DisputeResolutionService:
         rules=repos.penalty_rules,
         projection_service=projection_service,
         retailer_agreements=repos.retailer_agreements,
+        fulfillment=repos.fulfillment,
+        fulfillment_timeline=getattr(repos, "fulfillment_timeline", None),
     )
 
 
@@ -138,6 +140,7 @@ def _seed_shortage_dispute_scenario(
     claimed_amount: float = 80.0,
     rate: float = 5.0,
     actual_penalty_amount: float | None = None,
+    rule_effective_start: date = date(2026, 1, 1),
 ):
     """Real, final shortfall = order_qty - delivered_qty = 10 units; at
     rate=5.0/unit that computes to $50 -- callers vary `claimed_amount` to
@@ -147,7 +150,7 @@ def _seed_shortage_dispute_scenario(
     differs from the dispute's own `claimed_amount`. Returns
     (purchase_order_id, actual_penalty_id)."""
     purchase_order_id, line_id, _retailer_id = _seed_order(
-        repos, po_number, violation_type="SHORT_SHIP", rate=rate
+        repos, po_number, violation_type="SHORT_SHIP", rate=rate, rule_effective_start=rule_effective_start
     )
     _seed_delivery(repos, purchase_order_id, line_id, delivered_qty, charge_date)
 
@@ -326,9 +329,9 @@ def test_analyze_pay_full_undercharge_records_negative_delta(repos):
     assert analyzed["delta_amount"] == -30.0
 
 
-def test_analyze_raises_no_matching_rule_when_no_rule_effective_on_charge_date(repos):
+def test_analyze_raises_no_matching_rule_when_no_rule_effective_on_due_or_charge_date(repos):
     _purchase_order_id, actual_penalty_id = _seed_shortage_dispute_scenario(
-        repos, charge_date=date(2025, 1, 1)
+        repos, charge_date=date(2025, 1, 1), rule_effective_start=date(2027, 1, 1)
     )
     service = _build_service(repos)
     dispute = service.open_dispute(actual_penalty_id, "AMOUNT_INCORRECT", 80.0)
@@ -341,6 +344,21 @@ def test_analyze_raises_no_matching_rule_when_no_rule_effective_on_charge_date(r
     unchanged = service.get(dispute["id"])
     assert unchanged["dispute_status"] == "OPEN"
     assert unchanged["computed_amount"] is None
+
+
+def test_analyze_applies_rule_effective_on_delivery_due_date_even_if_deducted_earlier(repos):
+    # The rule starts 2026-01-01, after the 2025 deduction date but before the PO's due date:
+    # the contract version in force on the obligation date governs, not the deduction date.
+    _purchase_order_id, actual_penalty_id = _seed_shortage_dispute_scenario(
+        repos, charge_date=date(2025, 1, 1), rule_effective_start=date(2026, 1, 1)
+    )
+    service = _build_service(repos)
+    dispute = service.open_dispute(actual_penalty_id, "AMOUNT_INCORRECT", 80.0)
+
+    analyzed = service.analyze(dispute["id"])
+
+    assert analyzed["dispute_status"] == "ANALYZED"
+    assert analyzed["computed_amount"] == 50.0
 
 
 def test_analyze_raises_insufficient_data_when_no_delivery_recorded(repos):
@@ -809,3 +827,64 @@ def test_analyze_volume_commitment_ignores_claim_supplied_purchase_total(repos):
     assert analyzed["analysis_breakdown"]["claim_supplied_keys"] == []
     assert analyzed["analysis_breakdown"]["facts"]["actual_purchase_quantity"] == 700.0
     assert analyzed["analysis_breakdown"]["facts"]["committed_quantity"] == 1000.0
+
+
+def test_dispute_analyze_with_fulfillment_timeline(repos, db_session):
+    from datetime import UTC
+
+    from scripts.seed.seed_milestone_types import seed_milestone_types
+
+    seed_milestone_types(db_session)
+    po_id, _line_id, _retailer_id = _seed_order(
+        repos,
+        "ORD-TL-DSP-1",
+        violation_type="OTIF_LATE",
+        calc_type="FLAT_FEE",
+        rate=500.0,
+        grace_period_days=1,
+    )
+    plan = repos.fulfillment_timeline.create_plan(
+        plan_number="PLAN-TL-DSP-1",
+        purchase_order_id=po_id,
+        freight_term="PREPAID",
+    )
+    delivered_ms = repos.fulfillment_timeline.upsert_milestone(
+        plan["id"],
+        "DELIVERED",
+        baseline_date=date(2026, 6, 10),
+        planned_date=date(2026, 6, 11),
+        actual_date=date(2026, 6, 11),
+        status="DONE",
+    )
+    repos.fulfillment_timeline.add_event(
+        subject_type="PLAN_MILESTONE",
+        subject_id=delivered_ms["id"],
+        fulfillment_plan_id=plan["id"],
+        milestone_type_id=delivered_ms["milestone_type_id"],
+        event_type="DELIVERY_COMPLETED",
+        event_at=datetime(2026, 6, 11, 14, 0, tzinfo=UTC),
+        source="EDI_214",
+        source_reference="POD-998822",
+    )
+
+    actual_penalty = repos.actual_penalties.add_actual_penalty(
+        actual_penalty_number="AP-TL-DSP-1",
+        purchase_order_id=po_id,
+        violation_type="OTIF_LATE",
+        actual_penalty_amount=500.0,
+        invoice_or_deduction_date=date(2026, 6, 20),
+    )
+
+    service = _build_service(repos)
+    dispute = service.open_dispute(actual_penalty["id"], "NOT_LATE", 500.0)
+
+    analyzed = service.analyze(dispute["id"])
+
+    assert analyzed["computed_amount"] == 0.0
+    assert analyzed["verdict"] == "NO_PAY"
+    assert analyzed["analysis_breakdown"]["violation_family"] == "DELAY"
+    assert analyzed["analysis_breakdown"]["actual_delivery_date"] == "2026-06-11"
+    assert len(analyzed["analysis_breakdown"]["telematics_events"]) == 1
+    assert analyzed["analysis_breakdown"]["telematics_events"][0]["event_type"] == "DELIVERY_COMPLETED"
+    assert analyzed["analysis_breakdown"]["telematics_events"][0]["source"] == "EDI_214"
+    assert analyzed["analysis_breakdown"]["telematics_events"][0]["source_reference"] == "POD-998822"

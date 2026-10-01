@@ -740,14 +740,18 @@ class PoValidationService:
                 details={"sap_material_number": sap_material_number, "plant_id": str(plant_id)},
             )
 
-    def _require_open_pending(self, human_actions: Any, thread_id: UUID, interrupt_type: str) -> dict[str, Any]:
+    def _require_open_pending(
+        self, human_actions: Any, thread_id: UUID, interrupt_type: str
+    ) -> dict[str, Any]:
         pending = human_actions.get_open_for_thread(thread_id)
         if pending is None or pending["interrupt_type"] != interrupt_type:
             actual = None if pending is None else pending["interrupt_type"]
             raise self._thread_not_waiting(thread_id, interrupt_type, actual)
         return pending
 
-    def _ensure_current(self, workflow_threads: Any, thread_id: UUID, expected_updated_at: str) -> dict[str, Any]:
+    def _ensure_current(
+        self, workflow_threads: Any, thread_id: UUID, expected_updated_at: str
+    ) -> dict[str, Any]:
         stage = self._get_stage(workflow_threads, thread_id)
         if stage["updated_at"].isoformat() != expected_updated_at:
             raise ConflictError(

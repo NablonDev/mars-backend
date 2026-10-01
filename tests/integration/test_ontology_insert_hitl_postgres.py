@@ -104,7 +104,9 @@ def _invoke(pg_database: Database, checkpointer, thread_id: str, payload):
         md = MasterDataRepository(session)
         service = MaterialMasterService(master_data_repository=md)
         nodes = OntologyInsertNodes(
-            context_service=OntologyContextService(), master_data_repository=md, material_master_service=service
+            context_service=OntologyContextService(),
+            master_data_repository=md,
+            material_master_service=service,
         )
         graph = build_ontology_insert_graph(nodes, checkpointer, _NoOpTraceRepo())
         return graph.invoke(payload, config={"configurable": {"thread_id": thread_id}})
@@ -175,7 +177,9 @@ def test_missing_details_round_trip_then_approve(pg_database: Database, suffix: 
     plant_code = f"HITLINS-PLANT-{suffix}-3"
     sap_number = f"HITLINS-SAP-{suffix}-3"
 
-    state = _invoke(pg_database, checkpointer, thread_id, {"user_request": f"Create material {material_code}."})
+    state = _invoke(
+        pg_database, checkpointer, thread_id, {"user_request": f"Create material {material_code}."}
+    )
     assert INTERRUPT_KEY in state, state
     payload = state[INTERRUPT_KEY][0].value
     assert payload["reason"] == "missing_required_fields"
@@ -199,7 +203,9 @@ def test_missing_details_round_trip_then_approve(pg_database: Database, suffix: 
     assert master["sap_material_number"] == sap_number
 
 
-def test_a_second_insert_for_the_same_material_code_after_approval_is_rejected(pg_database: Database, suffix: str):
+def test_a_second_insert_for_the_same_material_code_after_approval_is_rejected(
+    pg_database: Database, suffix: str
+):
     material_code = f"HITLINS-MAT-{suffix}-4"
     plant_code = f"HITLINS-PLANT-{suffix}-4"
     request = (

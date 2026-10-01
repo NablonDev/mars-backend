@@ -217,7 +217,9 @@ class BuildProposalTests(unittest.TestCase):
             "material_code": "MAT-3000",
             "plant_code": "P100",
             "sap_material_number": "SAP-3000",
-            "semantic_context": {"relationship": {"name": "locatedAtPlant", "target_entity": "Plant", "kind": "foreign_key"}},
+            "semantic_context": {
+                "relationship": {"name": "locatedAtPlant", "target_entity": "Plant", "kind": "foreign_key"}
+            },
         }
 
         result = nodes.build_proposal(state)
@@ -240,7 +242,9 @@ class BuildProposalTests(unittest.TestCase):
             "material_code": "MAT-3000",
             "plant_code": "P100",
             "sap_material_number": "SAP-3000",
-            "semantic_context": {"relationship": {"name": "locatedAtPlant", "target_entity": "Plant", "kind": "foreign_key"}},
+            "semantic_context": {
+                "relationship": {"name": "locatedAtPlant", "target_entity": "Plant", "kind": "foreign_key"}
+            },
         }
 
         result = nodes.build_proposal(state)

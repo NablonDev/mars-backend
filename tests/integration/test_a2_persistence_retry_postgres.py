@@ -117,7 +117,11 @@ def _seed_cmir_thread_awaiting_approval(container: Container) -> tuple[UUID, str
             {
                 "__interrupt__": [
                     _FakeInterrupt(
-                        {"reason": "approval_required", "email_id": str(email_id), "cmir": {"brand": "Brand A"}}
+                        {
+                            "reason": "approval_required",
+                            "email_id": str(email_id),
+                            "cmir": {"brand": "Brand A"},
+                        }
                     )
                 ],
                 "email_id": email_id,
@@ -176,7 +180,13 @@ def test_db_persistence_succeeds_consistent_final_state(pg_database: Database) -
     thread_id, expected_updated_at, email_id = _seed_cmir_thread_awaiting_approval(container)
 
     resume_graph = _StubGraph(
-        [{"decision": "approve", "cmir": {"customer_identity": "Acme Manufacturing Ltd"}, "email_id": email_id}]
+        [
+            {
+                "decision": "approve",
+                "cmir": {"customer_identity": "Acme Manufacturing Ltd"},
+                "email_id": email_id,
+            }
+        ]
     )
 
     @contextmanager
@@ -211,7 +221,13 @@ def test_first_db_persistence_fails_retry_succeeds(pg_database: Database) -> Non
     thread_id, expected_updated_at, email_id = _seed_cmir_thread_awaiting_approval(container)
 
     resume_graph = _StubGraph(
-        [{"decision": "approve", "cmir": {"customer_identity": "Acme Manufacturing Ltd"}, "email_id": email_id}]
+        [
+            {
+                "decision": "approve",
+                "cmir": {"customer_identity": "Acme Manufacturing Ltd"},
+                "email_id": email_id,
+            }
+        ]
     )
     session_ids: dict[str, int] = {}
 
@@ -273,7 +289,13 @@ def test_first_db_persistence_fails_retry_also_fails_raises_workflow_state_corru
     thread_id, expected_updated_at, email_id = _seed_cmir_thread_awaiting_approval(container)
 
     resume_graph = _StubGraph(
-        [{"decision": "approve", "cmir": {"customer_identity": "Acme Manufacturing Ltd"}, "email_id": email_id}]
+        [
+            {
+                "decision": "approve",
+                "cmir": {"customer_identity": "Acme Manufacturing Ltd"},
+                "email_id": email_id,
+            }
+        ]
     )
 
     @contextmanager
@@ -297,7 +319,10 @@ def test_first_db_persistence_fails_retry_also_fails_raises_workflow_state_corru
 
     with pytest.raises(ExternalServiceError) as raised:
         service.submit_decision(
-            thread_id, actor="reviewer@company.com", decision="approve", expected_updated_at=expected_updated_at
+            thread_id,
+            actor="reviewer@company.com",
+            decision="approve",
+            expected_updated_at=expected_updated_at,
         )
 
     # Must be the distinct A.2 code, never the generic resume-failed one.
@@ -326,7 +351,13 @@ def test_cmir_real_hitl_flow_db_consistent_after_decision(pg_database: Database)
     thread_id, expected_updated_at, email_id = _seed_cmir_thread_awaiting_approval(container)
 
     resume_graph = _StubGraph(
-        [{"decision": "reject", "cmir": {"customer_identity": "Acme Manufacturing Ltd"}, "email_id": email_id}]
+        [
+            {
+                "decision": "reject",
+                "cmir": {"customer_identity": "Acme Manufacturing Ltd"},
+                "email_id": email_id,
+            }
+        ]
     )
 
     @contextmanager

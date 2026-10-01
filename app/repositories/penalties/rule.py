@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date
 from uuid import UUID
 
@@ -153,6 +154,18 @@ class PenaltyRuleRepository:
         self._session.flush()
         return _rule_to_dict(rule)
 
+    def get_rule_codes(self, rule_ids: Sequence[UUID]) -> dict[str, str]:
+        """Map a set of rule ids to their `rule_code`, str(id) -> rule_code.
+
+        Backs the timeline engine's `calculation_detail`: the pure `PenaltyRuleValue`
+        pricing sees has no `rule_code` field, so the service resolves it here once
+        pricing is done, keyed by the same `str(rule.id)` `PenaltyRuleValue.rule_id` uses.
+        """
+        if not rule_ids:
+            return {}
+        rows = self._session.scalars(select(PenaltyRuleModel).where(PenaltyRuleModel.id.in_(rule_ids))).all()
+        return {str(r.id): r.rule_code for r in rows}
+
     def get_by_rule_code(self, rule_code: str) -> dict | None:
         """Return the penalty rule with this `rule_code`, or None; backs publish's republish guard."""
         row = self._session.scalars(
@@ -172,6 +185,30 @@ class PenaltyRuleRepository:
             .where(
                 RetailerAgreement.retailer_id == retailer_id,
                 PenaltyRuleModel.is_active.is_(True),
+            )
+        ).all()
+        return [self._row_to_rule_value(r) for r in rows]
+
+    def list_rules_for_retailer_effective_on(
+        self, retailer_id: UUID, on_date: date
+    ) -> list[PenaltyRuleValue]:
+        """Fetch a retailer's active, engine-priceable rules effective on `on_date`, as pure engine values.
+
+        Backs the timeline pricing adapter (`app.services.penalties.timeline.pricing`): unlike
+        `list_rules_for_retailer`, which returns every currently-active rule regardless of its
+        effective window, this narrows to the rules actually in force on the projection date and
+        excludes any rule not flagged `is_engine_priceable`.
+        """
+        rows = self._session.scalars(
+            select(PenaltyRuleModel)
+            .join(RetailerAgreement, PenaltyRuleModel.retailer_agreement_id == RetailerAgreement.id)
+            .where(
+                RetailerAgreement.retailer_id == retailer_id,
+                PenaltyRuleModel.is_active.is_(True),
+                PenaltyRuleModel.effective_start_date <= on_date,
+                (PenaltyRuleModel.effective_end_date.is_(None))
+                | (PenaltyRuleModel.effective_end_date >= on_date),
+                PenaltyRuleModel.is_engine_priceable.is_(True),
             )
         ).all()
         return [self._row_to_rule_value(r) for r in rows]
@@ -260,6 +297,14 @@ class PenaltyRuleRepository:
         """Delete every rule and its tiers; penalty_projection must be cleared first."""
         self._session.execute(delete(PenaltyRuleTierModel))
         self._session.execute(delete(PenaltyRuleModel))
+        self._session.flush()
+
+    def delete_seed_data(self, rule_code_prefix: str) -> None:
+        """Delete every rule/tier whose `rule_code` matches this prefix."""
+        rule_like = f"{rule_code_prefix}%"
+        rule_ids = select(PenaltyRuleModel.id).where(PenaltyRuleModel.rule_code.like(rule_like))
+        self._session.execute(delete(PenaltyRuleTierModel).where(PenaltyRuleTierModel.rule_id.in_(rule_ids)))
+        self._session.execute(delete(PenaltyRuleModel).where(PenaltyRuleModel.rule_code.like(rule_like)))
         self._session.flush()
 
     def _row_to_rule_value(self, r: PenaltyRuleModel) -> PenaltyRuleValue:

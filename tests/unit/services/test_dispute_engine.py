@@ -262,10 +262,73 @@ def test_delay_percent_of_po_penalized():
 
 
 def test_delay_flat_fee_penalized():
-    rule = PenaltyRule(rule_id="r1", violation_type="ASN_LATE", calc_type=CalcType.FLAT_FEE, rate=75.0)
+    rule = PenaltyRule(rule_id="r1", violation_type="OTIF_LATE", calc_type=CalcType.FLAT_FEE, rate=75.0)
     facts = _delay_facts(actual_delivery_date=date(2026, 6, 15))
     amount, _ = price_violation(rule, facts)
     assert amount == 75.0
+
+
+def _asn_facts(asn_sent_date, goods_issued_date, grace_period_days=0) -> DisputeFacts:
+    # A delivery that is perfectly on time: an ASN rule must be judged on the ASN, not on this.
+    return DisputeFacts(
+        order_qty=100,
+        unit_price=10.0,
+        delivered_qty=100,
+        required_delivery_date=REQUIRED_DELIVERY,
+        actual_delivery_date=REQUIRED_DELIVERY,
+        asn_sent_date=asn_sent_date,
+        goods_issued_date=goods_issued_date,
+        grace_period_days=grace_period_days,
+    )
+
+
+def test_asn_late_is_measured_against_goods_issue_not_delivery():
+    rule = PenaltyRule(
+        rule_id="r1",
+        violation_type="ASN_LATE",
+        engine_family="DELAY",
+        calc_type=CalcType.FLAT_FEE,
+        rate=75.0,
+    )
+    facts = _asn_facts(date(2026, 6, 6), date(2026, 6, 1))
+
+    amount, calc_trace = price_violation(rule, facts)
+
+    assert amount == 75.0
+    assert calc_trace["violation_family"] == "DELAY"
+    assert calc_trace["days_late"] == 5
+
+
+def test_asn_sent_on_goods_issue_day_is_not_late():
+    rule = PenaltyRule(rule_id="r1", violation_type="ASN_LATE", calc_type=CalcType.FLAT_FEE, rate=75.0)
+
+    amount, calc_trace = price_violation(rule, _asn_facts(date(2026, 6, 1), date(2026, 6, 1)))
+
+    assert amount == 0.0
+    assert calc_trace["is_late"] is False
+
+
+def test_asn_late_grace_period_absorbs_days_and_charges_the_rest():
+    rule = PenaltyRule(
+        rule_id="r1",
+        violation_type="ASN_LATE",
+        calc_type=CalcType.PER_UNIT,
+        rate=1.0,
+        applies_per=APPLIES_PER_DAY,
+    )
+
+    # 5 days after goods issue, 2 days of grace: 3 chargeable days x $1/unit x 100 units.
+    amount, calc_trace = price_violation(rule, _asn_facts(date(2026, 6, 6), date(2026, 6, 1), 2))
+
+    assert calc_trace["days_late"] == 3
+    assert amount == 300.0
+
+
+def test_asn_late_without_asn_facts_raises_insufficient_data():
+    rule = PenaltyRule(rule_id="r1", violation_type="ASN_LATE", calc_type=CalcType.FLAT_FEE, rate=75.0)
+
+    with pytest.raises(InsufficientDataForDisputeError):
+        price_violation(rule, _asn_facts(None, date(2026, 6, 1)))
 
 
 def test_delay_respects_grace_period_within_window():

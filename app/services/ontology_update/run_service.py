@@ -35,7 +35,9 @@ _THREAD_PREFIX = "thread_ontology_update_"
 
 
 class OntologyUpdateRunService:
-    def __init__(self, *, unit_of_work_factory: Callable[[], AbstractContextManager[SimpleNamespace]]) -> None:
+    def __init__(
+        self, *, unit_of_work_factory: Callable[[], AbstractContextManager[SimpleNamespace]]
+    ) -> None:
         self._unit_of_work_factory = unit_of_work_factory
 
     @staticmethod
@@ -65,7 +67,9 @@ class OntologyUpdateRunService:
                     code="ONTOLOGY_UPDATE_THREAD_NOT_FOUND",
                     message=f"No pending ontology-update approval for thread_id={thread_id!r}.",
                 )
-            state = uow.graph.invoke(Command(resume={"decision": decision}), config=self._thread_config(thread_id))
+            state = uow.graph.invoke(
+                Command(resume={"decision": decision}), config=self._thread_config(thread_id)
+            )
         return self._to_response(thread_id, state)
 
     @staticmethod

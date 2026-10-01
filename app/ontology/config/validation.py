@@ -60,8 +60,12 @@ def _column_of(attr) -> Column:
     return attr.expression
 
 
-def _validate_entity(entity: EntityMapping, declared_classes: set[str], declared_properties: set[str],
-                      issues: list[ValidationIssue]) -> None:
+def _validate_entity(
+    entity: EntityMapping,
+    declared_classes: set[str],
+    declared_properties: set[str],
+    issues: list[ValidationIssue],
+) -> None:
     scope = f"entity:{entity.ontology_class}"
     if entity.ontology_class not in declared_classes:
         issues.append(ValidationIssue(scope, "not declared as an owl:Class in mars_ontology.ttl"))
@@ -76,7 +80,9 @@ def _validate_entity(entity: EntityMapping, declared_classes: set[str], declared
     for prop in entity.properties:
         prop_scope = f"{scope}.{prop.ontology_property}"
         if prop.ontology_property not in declared_properties:
-            issues.append(ValidationIssue(prop_scope, "not declared as an owl:DatatypeProperty in mars_ontology.ttl"))
+            issues.append(
+                ValidationIssue(prop_scope, "not declared as an owl:DatatypeProperty in mars_ontology.ttl")
+            )
         column = _column_of(prop.column)
         if column.table is not table:
             issues.append(ValidationIssue(prop_scope, f"column {column} does not belong to {table}"))
@@ -84,8 +90,9 @@ def _validate_entity(entity: EntityMapping, declared_classes: set[str], declared
             issues.append(ValidationIssue(prop_scope, f"column {column.name!r} not found on {table}"))
 
 
-def _validate_foreign_key(rel: RelationshipMapping, *, owner: EntityMapping, target: EntityMapping,
-                           issues: list[ValidationIssue]) -> None:
+def _validate_foreign_key(
+    rel: RelationshipMapping, *, owner: EntityMapping, target: EntityMapping, issues: list[ValidationIssue]
+) -> None:
     scope = f"relationship:{rel.ontology_property}"
     if rel.fk_column is None:
         issues.append(ValidationIssue(scope, f"{rel.kind.value} requires fk_column, none given"))
@@ -95,12 +102,16 @@ def _validate_foreign_key(rel: RelationshipMapping, *, owner: EntityMapping, tar
     owner_table = owner.model.__table__
     if column.table is not owner_table:
         issues.append(
-            ValidationIssue(scope, f"fk_column {column} does not belong to {owner.ontology_class}'s table {owner_table}")
+            ValidationIssue(
+                scope, f"fk_column {column} does not belong to {owner.ontology_class}'s table {owner_table}"
+            )
         )
         return
 
     if not column.foreign_keys:
-        issues.append(ValidationIssue(scope, f"column {column.name!r} on {owner_table} has no ForeignKey constraint"))
+        issues.append(
+            ValidationIssue(scope, f"column {column.name!r} on {owner_table} has no ForeignKey constraint")
+        )
         return
 
     target_table = target.model.__table__
@@ -116,11 +127,18 @@ def _validate_foreign_key(rel: RelationshipMapping, *, owner: EntityMapping, tar
         )
 
 
-def _validate_value_match(rel: RelationshipMapping, *, from_entity: EntityMapping, to_entity: EntityMapping,
-                           issues: list[ValidationIssue]) -> None:
+def _validate_value_match(
+    rel: RelationshipMapping,
+    *,
+    from_entity: EntityMapping,
+    to_entity: EntityMapping,
+    issues: list[ValidationIssue],
+) -> None:
     scope = f"relationship:{rel.ontology_property}"
     if rel.value_from_column is None or rel.value_to_column is None:
-        issues.append(ValidationIssue(scope, "value_match requires both value_from_column and value_to_column"))
+        issues.append(
+            ValidationIssue(scope, "value_match requires both value_from_column and value_to_column")
+        )
         return
 
     from_column = _column_of(rel.value_from_column)
@@ -128,11 +146,15 @@ def _validate_value_match(rel: RelationshipMapping, *, from_entity: EntityMappin
 
     if from_column.table is not from_entity.model.__table__:
         issues.append(
-            ValidationIssue(scope, f"value_from_column {from_column} does not belong to {from_entity.ontology_class}")
+            ValidationIssue(
+                scope, f"value_from_column {from_column} does not belong to {from_entity.ontology_class}"
+            )
         )
     if to_column.table is not to_entity.model.__table__:
         issues.append(
-            ValidationIssue(scope, f"value_to_column {to_column} does not belong to {to_entity.ontology_class}")
+            ValidationIssue(
+                scope, f"value_to_column {to_column} does not belong to {to_entity.ontology_class}"
+            )
         )
 
     from_type = from_column.type.python_type
@@ -147,8 +169,9 @@ def _validate_value_match(rel: RelationshipMapping, *, from_entity: EntityMappin
         )
 
 
-def _validate_relationship(rel: RelationshipMapping, declared_properties: set[str],
-                            issues: list[ValidationIssue]) -> None:
+def _validate_relationship(
+    rel: RelationshipMapping, declared_properties: set[str], issues: list[ValidationIssue]
+) -> None:
     scope = f"relationship:{rel.ontology_property}"
     if rel.ontology_property not in declared_properties:
         issues.append(ValidationIssue(scope, "not declared as an owl:ObjectProperty in mars_ontology.ttl"))

@@ -65,7 +65,9 @@ def _entity_by_name(entity: str) -> EntityMapping:
     return match
 
 
-def _physical_implementation(rel: RelationshipMapping, from_entity: EntityMapping, to_entity: EntityMapping) -> str:
+def _physical_implementation(
+    rel: RelationshipMapping, from_entity: EntityMapping, to_entity: EntityMapping
+) -> str:
     if rel.kind is RelationshipKind.VALUE_MATCH:
         from_col = _column_of(rel.value_from_column)
         to_col = _column_of(rel.value_to_column)

@@ -30,7 +30,9 @@ class FakeOntologyInsertRunService:
         self.start_calls.append(message)
         if self.start_result is not None:
             return self.start_result
-        return OntologyInsertResponse(thread_id="thread_ontology_insert_test", status=OntologyInsertStatus.FAILED)
+        return OntologyInsertResponse(
+            thread_id="thread_ontology_insert_test", status=OntologyInsertStatus.FAILED
+        )
 
     def submit_decision(self, thread_id: str, *, decision=None, details=None) -> OntologyInsertResponse:
         self.decision_calls.append((thread_id, decision, details))
@@ -56,7 +58,9 @@ def _proposal() -> InsertOperationProposal:
     )
 
 
-def test_start_with_a_complete_sentence_returns_awaiting_approval_with_the_proposal(client, ontology_insert_service):
+def test_start_with_a_complete_sentence_returns_awaiting_approval_with_the_proposal(
+    client, ontology_insert_service
+):
     ontology_insert_service.start_result = OntologyInsertResponse(
         thread_id="thread_ontology_insert_abc123",
         status=OntologyInsertStatus.AWAITING_APPROVAL,
