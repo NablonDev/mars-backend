@@ -19,6 +19,7 @@ from datetime import date
 
 import pytest
 
+from app.core.exceptions import ConflictError
 from app.models.enums import WorkflowThreadSubjectType
 
 
@@ -209,6 +210,13 @@ def test_human_action_apply_human_action_opens_next_pending_and_transitions_thre
 
 
 def test_human_action_apply_human_action_raises_for_already_closed_action(repos):
+    """B fix (narrow scope, concurrent-decision error-contract): a second
+    caller racing to complete an already-resolved pending action must get a
+    clean, expected ConflictError/THREAD_STALE -- the same conflict shape
+    reviewers already handle for any other "thread moved since you last saw
+    it" case -- not a bare ValueError (which every caller's generic
+    `except Exception` wrapping used to turn into an opaque 5xx
+    WORKFLOW_RESUME_FAILED instead of a 409)."""
     email_event_id = _seed_email_event(repos)
     thread = repos.workflow_threads.create(
         stage="AWAITING_APPROVAL",
@@ -222,7 +230,7 @@ def test_human_action_apply_human_action_raises_for_already_closed_action(repos)
     )
     repos.human_actions.complete(pending_id, response_payload={}, actor="reviewer@company.com")
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ConflictError) as raised:
         repos.human_actions.apply_human_action(
             pending_action_id=pending_id,
             workflow_thread_id=thread["id"],
@@ -231,6 +239,9 @@ def test_human_action_apply_human_action_raises_for_already_closed_action(repos)
             next_status="waiting_approval",
             next_stage="AWAITING_APPROVAL",
         )
+
+    assert raised.value.code == "THREAD_STALE"
+    assert raised.value.status_code == 409
 
 
 def test_processing_error_log_and_list_for_job_item(repos, db_session):
@@ -301,6 +312,79 @@ def test_processing_error_mark_resolved(repos, db_session):
 
     assert resolved["resolved"] is True
     assert resolved["resolved_by"] == "ops@company.com"
+
+
+def test_list_threads_enriches_po_validation_rows_with_real_business_fields(repos):
+    """`list_threads` is what backs the frontend's Error Queue -- it must
+    return real PO number/material/quantity/retailer name per row (one batch
+    query for the whole page), not just IDs, so the queue doesn't show a bare
+    UUID as its only identifier."""
+    retailer = repos.master_data.add_retailer("RET-WF2", "Acme Retail Co", None, "SUM")
+    purchase_order = repos.purchase_orders.create_purchase_order(
+        purchase_order_number="PO-BIZ-1",
+        retailer_id=retailer["id"],
+        order_date=date(2026, 8, 1),
+    )
+    line = repos.purchase_orders.add_line(
+        purchase_order_id=purchase_order["id"],
+        line_number="20",
+        ordered_quantity=480,
+        unit_price=10.0,
+        retailer_material_code="G10-PED-40LB-NEW",
+    )
+    repos.workflow_threads.create(
+        stage="AWAITING_QTY_MISMATCH_DECISION",
+        subject_type=WorkflowThreadSubjectType.PURCHASE_ORDER_LINE,
+        subject_id=line["id"],
+    )
+
+    items, _ = repos.workflow_threads.list_threads()
+
+    row = next(i for i in items if i["purchase_order_line_id"] == line["id"])
+    assert row["po_number"] == "PO-BIZ-1"
+    assert row["po_line_number"] == "20"
+    assert row["retailer_material_code"] == "G10-PED-40LB-NEW"
+    assert row["order_quantity"] == 480
+    assert row["retailer_name"] == "Acme Retail Co"
+
+
+def test_list_threads_enriches_cmir_rows_from_existing_metadata_no_extra_query(repos):
+    """CMIR business fields are already captured in `metadata_json.latest_snapshot.cmir`
+    at every interrupt (app/services/cmir/run_service.py) -- `list_threads` should
+    surface them directly, with no extra join/query, unlike the PO-validation case."""
+    email_event_id = _seed_email_event(repos)
+    repos.workflow_threads.create(
+        stage="AWAITING_APPROVAL",
+        subject_type=WorkflowThreadSubjectType.EMAIL_EVENT,
+        subject_id=email_event_id,
+        metadata={
+            "latest_snapshot": {"cmir": {"customer_identity": "Walmart Inc", "material_identity": "MAT-1"}}
+        },
+    )
+
+    items, _ = repos.workflow_threads.list_threads()
+
+    row = next(i for i in items if i["email_event_id"] == email_event_id)
+    assert row["customer_identity"] == "Walmart Inc"
+    assert row["material_identity"] == "MAT-1"
+    assert row["po_number"] is None
+
+
+def test_list_threads_leaves_business_fields_none_when_data_is_genuinely_missing(repos):
+    """A thread with no PO-line subject and no CMIR metadata yet must not
+    fabricate values -- every business field stays None."""
+    email_event_id = _seed_email_event(repos)
+    repos.workflow_threads.create(
+        stage="STARTED", subject_type=WorkflowThreadSubjectType.EMAIL_EVENT, subject_id=email_event_id
+    )
+
+    items, _ = repos.workflow_threads.list_threads()
+
+    row = next(i for i in items if i["email_event_id"] == email_event_id)
+    assert row["customer_identity"] is None
+    assert row["material_identity"] is None
+    assert row["po_number"] is None
+    assert row["retailer_name"] is None
 
 
 def test_processing_error_log_rolls_back_only_its_own_savepoint_on_a_write_failure(repos, db_session):

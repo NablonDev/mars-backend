@@ -16,6 +16,7 @@ from app.core.config.dispute import DisputeSettings
 from app.core.config.email import EmailSettings
 from app.core.config.job_queue import JobQueueBackend, JobQueueSettings
 from app.core.config.llm import AzureOpenAISettings
+from app.core.config.ontology import OntologySettings
 from app.core.config.service_bus import ServiceBusSettings
 from app.core.config.summary import SummarySettings
 
@@ -33,6 +34,7 @@ _GROUP_CLASSES: dict[str, type[BaseSettings]] = {
     "job_queue": JobQueueSettings,
     "email": EmailSettings,
     "summary": SummarySettings,
+    "ontology": OntologySettings,
     "dispute": DisputeSettings,
     "cors": CorsSettings,
 }
@@ -48,6 +50,7 @@ __all__ = [
     "JobQueueBackend",
     "JobQueueSettings",
     "LLMConfig",
+    "OntologySettings",
     "ServiceBusConfig",
     "ServiceBusSettings",
     "Settings",
@@ -74,6 +77,7 @@ class Settings(BaseSettings):
     job_queue: JobQueueSettings = Field(default_factory=JobQueueSettings)
     email: EmailSettings = Field(default_factory=EmailSettings)
     summary: SummarySettings = Field(default_factory=SummarySettings)
+    ontology: OntologySettings = Field(default_factory=OntologySettings)
     dispute: DisputeSettings = Field(default_factory=DisputeSettings)
     cors: CorsSettings = Field(default_factory=CorsSettings)
 

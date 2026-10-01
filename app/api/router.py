@@ -9,6 +9,9 @@ from app.api.v1 import (
     health,
     internal,
     job_runs,
+    ontology,
+    ontology_insert,
+    ontology_update,
     po_validation,
     processing_errors,
     workflow_threads,
@@ -45,6 +48,9 @@ protected_router.include_router(mitigations.router)
 protected_router.include_router(actual_penalties.router)
 protected_router.include_router(disputes.router)
 protected_router.include_router(job_runs.router)
+protected_router.include_router(ontology.router)
+protected_router.include_router(ontology_update.router)
+protected_router.include_router(ontology_insert.router)
 protected_router.include_router(admin.router)
 
 router.include_router(protected_router)

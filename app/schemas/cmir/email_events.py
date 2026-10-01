@@ -55,6 +55,23 @@ class IngestEmailEventsResponse(BaseModel):
     threads: list[EmailIngestThreadSummary]
 
 
+class PendingEmailSummary(BaseModel):
+    """One row of `GET /cmir/email-events/pending` -- the UI "email queue"
+    panel that lets a reviewer manually process a queued email instead of
+    waiting on the real Service Bus consumer. Real `cmir.email_event`
+    columns only (see `EmailRepository.list_pending`)."""
+
+    id: UUID
+    sender: str
+    subject: str | None = None
+    raw_content: str | None = None
+    queue_status: str
+    queued_at: datetime | None = None
+    processing_started_at: datetime | None = None
+    queue_delivery_count: int
+    created_at: datetime
+
+
 class ProcessQueuedEmailRequest(BaseModel):
     """Body for the internal `POST /internal/process-email` route, called by the queue consumer."""
 

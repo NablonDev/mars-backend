@@ -35,6 +35,21 @@ class WorkflowThreadResponse(BaseModel):
     email_event_id: UUID | None = None
     purchase_order_line_id: UUID | None = None
     updated_at: IsoDatetime
+    # List-view-only business context (2026-09-15) -- populated by
+    # `WorkflowThreadRepository.list_threads` only (one batched query for the
+    # whole page for the PO-validation fields; read off the thread's own
+    # `metadata_json.latest_snapshot.cmir` for CMIR, no query at all), so the
+    # Error Queue can show real customer/PO/material context per row instead
+    # of only a UUID. Always None on `get_by_id`/`get_snapshot` responses,
+    # which don't populate them -- the full snapshot is the source of truth
+    # for a selected thread's detail; this is only a cheap list-level summary.
+    po_number: str | None = None
+    po_line_number: str | None = None
+    retailer_material_code: str | None = None
+    order_quantity: float | None = None
+    retailer_name: str | None = None
+    customer_identity: str | None = None
+    material_identity: str | None = None
 
 
 class WorkflowThreadListResponse(BaseModel):
@@ -61,9 +76,23 @@ class SnapshotHistoryItem(BaseModel):
 
 
 class CmirThreadSnapshotResponse(WorkflowThreadResponse):
-    """CMIR-domain snapshot shape: the shared thread stage plus its `human_action` history."""
+    """CMIR-domain snapshot shape -- `WorkflowThreadRepository.get_snapshot`'s
+    real return value (`CmirService.get_snapshot` adds `editable_fields`
+    to it): the shared thread-stage dict plus its `human_action` history.
+    This is thinner than the pre-restructure PRD §10.4 shape (no top-level
+    `cmir`/`existing_cmir`/`diff`/`email` -- that detail stays nested inside
+    `metadata_json["latest_snapshot"]`, shaped differently per interrupt
+    type, so it is not flattened here). `editable_fields` is the one
+    exception: it's the fixed `CMIR_CONTENT_FIELDS` set, not volatile
+    per-stage data like `cmir`/`existing_cmir`/`diff`, so flattening it onto
+    this model doesn't defeat the reason those stay nested. Structurally
+    different from `app.schemas.po_validation.threads.PoValidationThreadSnapshotResponse`
+    (PRD §11.3), so `GET /workflow-threads/{thread_id}?include=snapshot`
+    types its `snapshot` field as `dict[str, Any]` rather than a single fixed
+    model -- see `app/api/v1/workflow_threads.py`."""
 
     history: list[SnapshotHistoryItem] = Field(default_factory=list)
+    editable_fields: list[str]
 
 
 # ---------------------------------------------------------------------------

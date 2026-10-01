@@ -49,7 +49,16 @@ class GmailImapReader:
         if unread_only:
             search_terms.insert(0, "UNSEEN")
 
-        status, data = mail.search(None, *search_terms)
+        # UID-based throughout (search/fetch here, store in mark_as_read) --
+        # a plain (non-UID) message *sequence* number is only a snapshot of
+        # this message's position in the mailbox at the moment of this
+        # SELECT; it silently goes stale (or points at a different message)
+        # the instant the mailbox's contents change before the later
+        # mark_as_read call -- which, given the real-world delay between
+        # ingest and a human's HITL decision, is not a rare edge case. A UID
+        # is a stable, permanent identifier for this message that survives
+        # across sessions and mailbox changes.
+        status, data = mail.uid("search", "", *search_terms)
 
         if status != "OK":
             mail.logout()
@@ -60,7 +69,7 @@ class GmailImapReader:
 
         max_messages = limit or self._config.max_per_run
         for num in email_ids[-max_messages:]:
-            status, msg = mail.fetch(num, "(RFC822)")
+            status, msg = mail.uid("fetch", num, "(RFC822)")
             if status != "OK":
                 continue
 
@@ -87,7 +96,7 @@ class GmailImapReader:
         """Flag one message as Seen so it's excluded from future unread-only fetches."""
         mail = self._connect()
         mail.select("INBOX")
-        mail.store(imap_id, "+FLAGS", "\\Seen")
+        mail.uid("store", imap_id, "+FLAGS", "\\Seen")
         mail.logout()
 
     @staticmethod

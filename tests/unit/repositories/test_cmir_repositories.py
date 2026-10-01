@@ -249,6 +249,29 @@ def test_email_repository_queue_lifecycle_transitions(repos):
     assert repos.emails.get_queue_state(email_id)["queue_status"] == "processed"
 
 
+def test_email_repository_list_pending_excludes_processed_rows(repos):
+    new_row = repos.emails.save_for_queue(
+        sender="new@example.com", subject="New", raw_content="body", source_message_id="msg-pending-1"
+    )
+    queued_row = repos.emails.save_for_queue(
+        sender="queued@example.com", subject="Queued", raw_content="body", source_message_id="msg-pending-2"
+    )
+    repos.emails.mark_queued(queued_row["id"], "queue-msg-2")
+    processed_row = repos.emails.save_for_queue(
+        sender="processed@example.com",
+        subject="Processed",
+        raw_content="body",
+        source_message_id="msg-pending-3",
+    )
+    repos.emails.mark_queue_processed(processed_row["id"])
+
+    pending_ids = {row["id"] for row in repos.emails.list_pending(limit=50)}
+
+    assert new_row["id"] in pending_ids
+    assert queued_row["id"] in pending_ids
+    assert processed_row["id"] not in pending_ids
+
+
 def test_email_repository_mark_queue_failed_retryable_goes_back_to_new(repos):
     saved = repos.emails.save_for_queue(
         sender="customer@example.com", subject="Subj", raw_content="body", source_message_id="msg-003"

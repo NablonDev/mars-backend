@@ -1,6 +1,20 @@
 """API schemas for PO-line ingest and the cross-PO `GET /api/v1/purchase-order-lines` listing.
 
-Wire field names keep the short `po_number`/`po_line_number` form the service layer reads.
+Class names drop the stale `po_line`/`Po*` abbreviation in favor of the full
+`purchase_order_line` wording (approved plan's locked-in naming decision),
+per §6's "Rename DTO classes dropping stale prefixes where the rest of the
+rename already applies elsewhere." Most wire-level payload field names
+(`po_number`, `po_line_number`, ...) are read directly by
+`PoValidationService._ingest_one_line` (`payload["po_number"]`, ...), a
+service-layer contract out of scope for this API-surface phase.
+
+`retailer_code`/`retailer_material_code` (final naming refactor) are the one
+exception: previously `customer_id`/`customer_material_code`, renamed to
+match the DB/domain vocabulary (`common.retailer.retailer_code`/
+`purchase_order_line.retailer_material_code`) -- no DB column changed, only
+this application-level contract. See
+`app/agents/po_validation/nodes.py::_normalize_po_line` for how already-open
+threads (checkpointed before this rename) stay compatible.
 """
 
 from __future__ import annotations
@@ -16,8 +30,12 @@ class IngestPurchaseOrderLineItem(BaseModel):
 
     po_number: str
     po_line_number: str
-    customer_id: str
-    customer_material_code: str
+    # Application-level naming, aligned with the DB/domain vocabulary
+    # (common.retailer.retailer_code / purchase_order_line.retailer_material_code)
+    # -- was customer_id/customer_material_code (approved final naming refactor;
+    # no DB column was renamed, only the API/LangGraph-state layer).
+    retailer_code: str
+    retailer_material_code: str
     plant: str
     order_quantity: float
     uom: str | None = None
@@ -57,3 +75,19 @@ class PurchaseOrderLinesListResponse(BaseModel):
 
     items: list[PurchaseOrderLineResponse]
     next_cursor: str | None = None
+
+
+class PoAuditTrailLineResponse(BaseModel):
+    """One row of `GET /po-audit-trail` -- the CMIR Intelligence Module's
+    "PO Audit Trail" panel. Backed by
+    `PurchaseOrderRepository.list_recent_lines`, a genuinely new cross-PO
+    query (ordered by `purchase_order_line.created_at desc`) added
+    specifically for this panel -- distinct from `PurchaseOrderLinesListResponse`
+    above, whose `VIEW_NOT_SUPPORTED` gap is about a filterable, paginated
+    cross-PO listing, not a fixed "most recent N" one."""
+
+    po_number: str
+    retailer_material_code: str | None = None
+    quantity: float
+    status: str
+    delivery_date: str | None = None
